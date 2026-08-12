@@ -12,9 +12,10 @@ sata04 <88605918+sata04@users.noreply.github.com>
 ```
 
 This is not a style preference. The repository's entire original history — 37
-commits — was written as a project name paired with an unrelated personal address because an agent passed
-`git -c user.name="AAT Web" -c user.email="…" commit` on every call. It invented
-a committer out of the application's name and an address it found in its context.
+commits — was written under the application's name paired with an unrelated
+personal email address, because an agent passed
+`git -c user.name="…" -c user.email="…" commit` on every call. It invented a
+committer out of the project name and an address it found in its own context.
 Correcting that meant rewriting every commit, which changed every SHA. That was
 survivable only because the repository was private, unreferenced and undeployed.
 It will not be survivable a second time.

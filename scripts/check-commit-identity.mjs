@@ -4,11 +4,11 @@
  *
  * ## Why this exists
  *
- * This repository's entire initial history — 37 commits — was written as
- * a project name paired with an unrelated personal address, because an agent passed
- * `git -c user.name=… -c user.email=… commit` on every call. The project name
- * is not a person, that address was never an approved committer, and neither
- * would ever have been noticed until the repository went public. Fixing it
+ * This repository's entire initial history — 37 commits — was written under a
+ * project name and an unrelated personal address, because an agent passed
+ * `git -c user.name=… -c user.email=… commit` on every call. A project is not a
+ * person, that address was never an approved committer, and neither would have
+ * been noticed until the repository went public. Fixing it
  * required rewriting every commit, which changes every SHA — cheap while the
  * repository is private and unreferenced, expensive afterwards. The same thing
  * happened once in sata04/examtrace, which is where this check comes from.
@@ -62,17 +62,6 @@ const ALLOWED_IDENTITIES = new Map([
   ['noreply@github.com', 'GitHub web-flow (API and web-UI commits)'],
 ])
 
-/**
- * Identities that are explicitly NOT approved, listed so the failure message can
- * explain what went wrong instead of just saying "unknown".
- */
-const KNOWN_BAD = new Map([
-  [
-    '[redacted-personal-address]',
-    "the address that produced this repository's original bad history — never commit as this",
-  ],
-])
-
 function git(args) {
   return execFileSync('git', args, { encoding: 'utf8' }).trim()
 }
@@ -96,9 +85,6 @@ function nameOf(identity) {
 const FORBIDDEN_NAMES = [/^aat(\s|-|_)?web$/i, /^aat$/i, /^unknown$/i, /^user$/i, /^root$/i]
 
 function describeProblem(role, name, email) {
-  if (KNOWN_BAD.has(email)) {
-    return `${role} address ${email} — ${KNOWN_BAD.get(email)}`
-  }
   if (!ALLOWED_IDENTITIES.has(email)) {
     return `${role} address ${email} is not on the allowlist`
   }

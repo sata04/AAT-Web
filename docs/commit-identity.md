@@ -14,16 +14,18 @@ using the account's numeric id `88605918`. It is the same identity used in
 
 ## What went wrong here
 
-The repository's first 37 commits were written as:
+The repository's first 37 commits were written under the **application's name**
+as the author and committer, paired with an **unrelated personal email address**.
+An agent building the project passed `git -c user.name="…" -c user.email="…"
+commit` on every call: it treated the project name as a person, and an address
+it found in its own context as that person's email. Neither was ever an approved
+committer.
 
-```
-AAT Web <[redacted-personal-address]>
-```
-
-for both author and committer. An agent building the project passed
-`git -c user.name="AAT Web" -c user.email="…" commit` on every call: it took the
-application's name as a person, and an address from its own context as that
-person's email. Neither was ever an approved committer.
+The offending values are deliberately not reproduced here. The address was
+personal data that never belonged in this repository, and repeating it in the
+documentation — or in a checker's error message — would reintroduce exactly what
+the history rewrite removed. The allowlist below fails closed on any address it
+does not recognise, so naming the bad one buys nothing.
 
 Two things made this invisible until someone looked:
 
