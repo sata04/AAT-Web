@@ -1,0 +1,42 @@
+packages:
+  - "apps/*"
+  - "packages/*"
+
+# --- Supply-chain policy (see docs/supply-chain.md) -------------------------
+
+# Refuse any version published less than 7 days (10080 minutes) ago. Most
+# compromised packages are detected and unpublished within days, so skipping
+# that window removes the bulk of the risk at no ongoing cost.
+# To take an emergency security fix sooner, add "name@version" to
+# minimumReleaseAgeExclude, land it, then remove the entry again.
+minimumReleaseAge: 10080
+
+# Refuse transitive dependencies fetched from anywhere other than the npm
+# registry (git+https, arbitrary tarball URLs). Every AAT dependency is an
+# ordinary npm package, so anything caught here is itself the signal.
+blockExoticSubdeps: true
+
+# Reject versions whose publish provenance got weaker than the preceding
+# release (a common account-takeover signature). Orthogonal to release age:
+# it catches takeovers that seven days of waiting would not surface.
+trustPolicy: no-downgrade
+trustPolicyExclude:
+  # Reached through workbox-build (vite-plugin-pwa). The same publisher shipped
+  # 2.5.0 with provenance and then this prerelease without it 32 minutes later
+  # (2025-12-02); the later 4.0.0-pre2 is published by a trusted publisher
+  # again. Audited as a packaging slip, not a takeover — same conclusion the
+  # examtrace repository reached independently for this exact version.
+  - "@trickfilm400/rollup-plugin-off-main-thread@3.0.0-pre1"
+  # Backport of the ReDoS fix CVE-2022-25883 onto the v6 line (published
+  # 2023-07-10). Contemporary v7 releases carried provenance, so publish-date
+  # ordering flags this as a downgrade, but it is a legitimate npm/node release.
+  # Reached through @babel/core under workbox-build.
+  - semver@6.3.1
+
+# Install/build scripts run only for the packages listed true here. Everything
+# else is blocked, so a compromised transitive dependency cannot execute code
+# at install time. Keep this list as short as it can possibly be.
+allowBuilds:
+  "@biomejs/biome": true
+  esbuild: true
+  workerd: true

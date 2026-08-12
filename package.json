@@ -1,0 +1,21 @@
+{
+  "name": "aat-web",
+  "private": true,
+  "type": "module",
+  "packageManager": "pnpm@11.19.0",
+  "engines": { "node": ">=22" },
+  "scripts": {
+    "dev": "pnpm --filter @aat/web dev",
+    "build": "pnpm -r build",
+    "test": "pnpm -r test",
+    "typecheck": "pnpm -r typecheck",
+    "lint": "biome check .",
+    "lint:fix": "biome check --write .",
+    "golden:check": "python3 reference/python/generate_golden.py --check",
+    "check:bundle": "pnpm --filter @aat/web exec wrangler deploy --dry-run --outdir dist/worker-bundle && node scripts/check-worker-bundle-size.mjs apps/web/dist/worker-bundle"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "2.5.7",
+    "typescript": "7.0.2"
+  }
+}

@@ -391,6 +391,12 @@ def main() -> int:
         print(f"  {fixture.name}: {len(record['gQuality'])} g-quality rows, end index {record['filter']['endIndex']}")
 
     index_path = GOLDEN_DIR / "index.json"
+    if args.only:
+        # A single-fixture run knows nothing about the others; rewriting the
+        # manifest from it would silently drop every fixture the suite expects.
+        print(f"\nRewrote {args.only} only; index.json left untouched.")
+        return 0
+
     index_payload = (
         json.dumps(
             {

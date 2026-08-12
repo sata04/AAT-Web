@@ -4,11 +4,179 @@
   "referenceCommit": "4e8378e444d3b4d644ba02fef8b75ba7b2357745",
   "fixtures": [
     {
+      "name": "normal_two_sensor_utf8",
+      "description": "Nominal two-sensor UTF-8 run",
+      "golden": "normal_two_sensor_utf8.json",
+      "csv": "csv/normal_two_sensor_utf8.csv",
+      "csvSha256": "93c50ebaf42aa825d2cc5f068d842c64a7ff482bb013ad74ca5f1820e4c710af",
+      "encoding": "utf-8"
+    },
+    {
+      "name": "japanese_headers_utf8",
+      "description": "Japanese headers, UTF-8",
+      "golden": "japanese_headers_utf8.json",
+      "csv": "csv/japanese_headers_utf8.csv",
+      "csvSha256": "912a5911928ca1cdae2c0a6c533085130cdf7543916da468e565dde6d4306367",
+      "encoding": "utf-8"
+    },
+    {
+      "name": "japanese_headers_cp932",
+      "description": "Japanese headers, CP932/Windows-31J",
+      "golden": "japanese_headers_cp932.json",
+      "csv": "csv/japanese_headers_cp932.csv",
+      "csvSha256": "ae16492a723455eb2d785623e7d414748a4ff0771b9d47638550990508f08679",
+      "encoding": "cp932"
+    },
+    {
+      "name": "inner_only",
+      "description": "Inner Capsule column only",
+      "golden": "inner_only.json",
+      "csv": "csv/inner_only.csv",
+      "csvSha256": "74a81146e51ca220866ac4fffaa79e19ac56064d893ecc43542a4c68676758eb",
+      "encoding": "utf-8"
+    },
+    {
+      "name": "drag_only",
+      "description": "Drag Shield column only",
+      "golden": "drag_only.json",
+      "csv": "csv/drag_only.csv",
+      "csvSha256": "be6ffa1ab2e7e688a0e0488bd155eb8c54a31398a92d321be902547d6766eb1d",
+      "encoding": "utf-8"
+    },
+    {
+      "name": "missing_sync_point",
+      "description": "No sample below sync threshold",
+      "golden": "missing_sync_point.json",
+      "csv": "csv/missing_sync_point.csv",
+      "csvSha256": "c34363dad125cbda81679f2f5317acf76b9e827aec6e9ed2179db61fd6390440",
+      "encoding": "utf-8"
+    },
+    {
+      "name": "sync_at_nonzero_index",
+      "description": "Sync found at a late index",
+      "golden": "sync_at_nonzero_index.json",
+      "csv": "csv/sync_at_nonzero_index.csv",
+      "csvSha256": "4b0e7dc301dddf499b4cc6dc4cf157be0c0ee00e8abb91dd6dd5033879f698f8",
+      "encoding": "utf-8"
+    },
+    {
+      "name": "nan_missing_samples",
+      "description": "NaN gaps in both sensors",
+      "golden": "nan_missing_samples.json",
+      "csv": "csv/nan_missing_samples.csv",
+      "csvSha256": "e55c9c5f436e6e2d2add627242b21f98701ecf8e2946da3128d1b15431a4226e",
+      "encoding": "utf-8"
+    },
+    {
+      "name": "inf_values",
+      "description": "+/-Inf samples treated as missing",
+      "golden": "inf_values.json",
+      "csv": "csv/inf_values.csv",
+      "csvSha256": "3b71d8bfaec21b71f6e6435a98fb868b42242b00d8ff4c59ea1778ab65c0be3f",
+      "encoding": "utf-8"
+    },
+    {
+      "name": "non_numeric_mixed",
+      "description": "Non-numeric cells coerced to missing",
+      "golden": "non_numeric_mixed.json",
+      "csv": "csv/non_numeric_mixed.csv",
+      "csvSha256": "b5aa7d6d1199ac800648658bc7f746134050dc79a01af704054d6bd9bad27f78",
+      "encoding": "utf-8"
+    },
+    {
+      "name": "non_monotonic_time",
+      "description": "Time axis steps backwards",
+      "golden": "non_monotonic_time.json",
+      "csv": "csv/non_monotonic_time.csv",
+      "csvSha256": "54d7bb5fe1a50b6681e885d4d84341270ac4ce242315d3b14ca6e1a2c5207dbf",
+      "encoding": "utf-8"
+    },
+    {
+      "name": "duplicate_time",
+      "description": "Duplicate timestamps",
+      "golden": "duplicate_time.json",
+      "csv": "csv/duplicate_time.csv",
+      "csvSha256": "311319506e4da080bbc472d40e14d0205f49432165eaba145f28660219cbb595",
+      "encoding": "utf-8"
+    },
+    {
+      "name": "constant_window",
+      "description": "Exactly-constant window -> std 0",
+      "golden": "constant_window.json",
+      "csv": "csv/constant_window.csv",
+      "csvSha256": "664ce6a9084dc78adf1703457db7a1a9766626d54c30c2ab286aa9bc15443333",
+      "encoding": "utf-8"
+    },
+    {
+      "name": "large_dc_offset",
+      "description": "1e6 offset with 1e-6 variance",
+      "golden": "large_dc_offset.json",
+      "csv": "csv/large_dc_offset.csv",
+      "csvSha256": "544448a64a49398c0b44538542e1a0a0da6486928eca4f58e0652546de17e2f3",
+      "encoding": "utf-8"
+    },
+    {
+      "name": "extreme_spike_positive",
+      "description": "1000 G positive spike",
+      "golden": "extreme_spike_positive.json",
+      "csv": "csv/extreme_spike_positive.csv",
+      "csvSha256": "a94cb1524a90ccfa1ba33ee79a0d559fee4824c75532193faaefb6c78e1344e4",
+      "encoding": "utf-8"
+    },
+    {
+      "name": "extreme_spike_negative",
+      "description": "1000 G negative spike",
+      "golden": "extreme_spike_negative.json",
+      "csv": "csv/extreme_spike_negative.csv",
+      "csvSha256": "93ab9ee6a254fbf7529d330785fc309d5958cfe0b6a18fcc889f1690562fa177",
+      "encoding": "utf-8"
+    },
+    {
       "name": "tie_equal_minimum",
       "description": "Equal minima -> earliest window wins",
       "golden": "tie_equal_minimum.json",
       "csv": "csv/tie_equal_minimum.csv",
       "csvSha256": "e63df8cab97e07db9d419afdee510218c6ac618aad83c4f5f6eba043d00c6f52",
+      "encoding": "utf-8"
+    },
+    {
+      "name": "short_data",
+      "description": "Shorter than one window",
+      "golden": "short_data.json",
+      "csv": "csv/short_data.csv",
+      "csvSha256": "09eb3297eaa8e612b52a0d30d8787ed38e970e7977165b5dde16bb48659f00da",
+      "encoding": "utf-8"
+    },
+    {
+      "name": "comparison_a",
+      "description": "Comparison dataset A",
+      "golden": "comparison_a.json",
+      "csv": "csv/comparison_a.csv",
+      "csvSha256": "19bb96aab33454492f9ef1e5130dc2c0b7792407155f3598e6fbe9844b5d0b6f",
+      "encoding": "utf-8"
+    },
+    {
+      "name": "comparison_b",
+      "description": "Comparison dataset B",
+      "golden": "comparison_b.json",
+      "csv": "csv/comparison_b.csv",
+      "csvSha256": "51b1ddbd606e62e389b7ce680ddef77d0d78df1bf097ff79cf4765b0d3a191b4",
+      "encoding": "utf-8"
+    },
+    {
+      "name": "realistic_large",
+      "description": "20 s at 1 kHz",
+      "golden": "realistic_large.json",
+      "csv": "csv/realistic_large.csv",
+      "csvSha256": "0067f0d072988ef1a7b483cf35cd00aaf623d7ce76d662068db2c2c2f37d9e17",
+      "encoding": "utf-8"
+    },
+    {
+      "name": "crlf_quoted_headers",
+      "description": "Quoted headers with commas, CRLF",
+      "golden": "crlf_quoted_headers.json",
+      "csv": "csv/crlf_quoted_headers.csv",
+      "csvSha256": "c3225955455f62d3236bf4eb1bb0e6496c16722aa99e8d7b23fae1b08e6c15bf",
       "encoding": "utf-8"
     }
   ]
