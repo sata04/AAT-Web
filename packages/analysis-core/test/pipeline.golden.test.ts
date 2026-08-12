@@ -10,6 +10,7 @@
  */
 
 import { describe, expect, it } from 'vitest'
+import { analyseCsv } from '../src/analysis.ts'
 import { detectColumns } from '../src/columns.ts'
 import { analysisConfigFromRecord } from '../src/config.ts'
 import { parseCsvText } from '../src/csv.ts'
@@ -49,7 +50,7 @@ function expectArray(actual: Float64Array, ref: ArrayRef | null | undefined, lab
     difference < 0
       ? ''
       : `${label}: first bit difference at index ${difference}: ` +
-        `expected ${show(expected[difference] as number)}, received ${show(actual[difference] as number)}`,
+          `expected ${show(expected[difference] as number)}, received ${show(actual[difference] as number)}`,
   ).toBe(-1)
 }
 
@@ -145,5 +146,48 @@ describe.each(index.fixtures.map((fixture) => fixture.name))('%s', (name) => {
       expectScalar(row.dragMean, expected.dragMean, `${at}.dragMean`)
       expectScalar(row.dragStd, expected.dragStd, `${at}.dragStd`)
     }
+  })
+})
+
+/**
+ * The one-call entry point must agree with the staged run, so the Web Worker
+ * cannot drift away from what the golden assertions above cover.
+ */
+describe('analyseCsv', () => {
+  const representative = ['normal_two_sensor_utf8', 'japanese_headers_cp932', 'inner_only', 'short_data']
+
+  it.each(representative)('reproduces the staged pipeline for %s', (name) => {
+    const golden = loadGolden(name)
+    const config = analysisConfigFromRecord(golden.config)
+    const result = analyseCsv(loadFixtureBytes(golden.csv), config)
+
+    expect(result.detectedColumns.time).toEqual(golden.detectedColumns.time)
+    expect(result.filtered.inner.gravity.length).toBe(golden.filter.innerLength)
+    expect(result.filtered.drag.gravity.length).toBe(golden.filter.dragLength)
+    expect(result.gQuality.rows.length).toBe(golden.gQuality.length)
+
+    expectScalar(result.statistics.inner.mean, golden.statistics.inner.mean, `${name}: inner mean`)
+    expectScalar(result.statistics.inner.std, golden.statistics.inner.std, `${name}: inner std`)
+    expectScalar(
+      result.statistics.inner.startTime,
+      golden.statistics.inner.startTime,
+      `${name}: inner startTime`,
+    )
+    expectScalar(result.statistics.drag.mean, golden.statistics.drag.mean, `${name}: drag mean`)
+    expectScalar(result.statistics.drag.std, golden.statistics.drag.std, `${name}: drag std`)
+    expectScalar(
+      result.statistics.drag.startTime,
+      golden.statistics.drag.startTime,
+      `${name}: drag startTime`,
+    )
+  })
+
+  it('can skip the sweep without touching anything else', () => {
+    const golden = loadGolden('normal_two_sensor_utf8')
+    const config = analysisConfigFromRecord(golden.config)
+    const bytes = loadFixtureBytes(golden.csv)
+    const skipped = analyseCsv(bytes, config, { skipGQuality: true })
+    expect(skipped.gQuality.rows).toEqual([])
+    expect(skipped.filtered.inner.gravity.length).toBe(golden.filter.innerLength)
   })
 })
