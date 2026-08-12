@@ -29,10 +29,10 @@
 
 import {
   AnalysisError,
-  calculateGQuality,
-  calculateStatistics,
   ColumnNotFoundError,
   type CsvTable,
+  calculateGQuality,
+  calculateStatistics,
   decodeCsv,
   detectColumns,
   EMPTY_WINDOW_STATISTICS,
@@ -43,8 +43,9 @@ import {
 } from '@aat/analysis-core'
 import type { AnalysisConfig } from '@aat/shared'
 import { configHash, sha256Hex } from '@aat/shared'
-import { readCache, sha256Hex as sha256Bytes, writeCache } from '../cache/analysis-cache.ts'
 import { ANALYSIS_ENGINE_VERSION } from '../app/version.ts'
+import { readCache, sha256Hex as sha256Bytes, writeCache } from '../cache/analysis-cache.ts'
+import { toEngineConfig } from './engine-config.ts'
 import { proposeMapping } from './mapping.ts'
 import type {
   AnalysedMessage,
@@ -310,23 +311,7 @@ async function handleAnalyse(request: AnalyseRequest): Promise<void> {
   }
 
   const { table } = entry
-  const engineConfig = {
-    timeColumn: request.mapping.timeColumn,
-    accelerationColumnInnerCapsule: request.mapping.innerColumn,
-    accelerationColumnDragShield: request.mapping.dragColumn,
-    useInnerAcceleration: request.mapping.useInner,
-    useDragAcceleration: request.mapping.useDrag,
-    samplingRate: request.config.sampling_rate,
-    gravityConstant: request.config.gravity_constant,
-    accelerationThreshold: request.config.acceleration_threshold,
-    endGravityLevel: request.config.end_gravity_level,
-    windowSize: request.config.window_size,
-    gQualityStart: request.config.g_quality_start,
-    gQualityEnd: request.config.g_quality_end,
-    gQualityStep: request.config.g_quality_step,
-    minSecondsAfterStart: request.config.min_seconds_after_start,
-    invertInnerAcceleration: request.config.invert_inner_acceleration,
-  }
+  const engineConfig = toEngineConfig(request.config, request.mapping)
 
   progress(request.requestId, 'loading', 50)
   const loaded = loadAndProcessData(table, engineConfig)

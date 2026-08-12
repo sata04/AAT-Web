@@ -12,6 +12,7 @@
  * user still has the analysis, the graph and the exports.
  */
 
+import type { WindowStatistics } from '@aat/analysis-core'
 import {
   type AnalysisConfig,
   type AnalysisSnapshot,
@@ -22,9 +23,8 @@ import {
   gzipCompress,
   SNAPSHOT_FORMAT_VERSION,
 } from '@aat/shared'
-import type { WindowStatistics } from '@aat/analysis-core'
-import { ANALYSIS_ENGINE_VERSION, APP_VERSION } from '../app/version.ts'
 import type { Dataset } from '../app/dataset.ts'
+import { ANALYSIS_ENGINE_VERSION, APP_VERSION } from '../app/version.ts'
 import { type CloudOutcome, type SnapshotUploadResult, uploadSnapshot } from './gateway.ts'
 
 function statistics(value: WindowStatistics): AnalysisSnapshot['statistics']['inner'] {
@@ -43,10 +43,7 @@ function statistics(value: WindowStatistics): AnalysisSnapshot['statistics']['in
  * for — the *reason* for the fallback is already in the warnings list, and
  * recording it twice in two shapes would let the two disagree.
  */
-export async function buildSnapshot(
-  dataset: Dataset,
-  config: AnalysisConfig,
-): Promise<AnalysisSnapshot> {
+export async function buildSnapshot(dataset: Dataset, config: AnalysisConfig): Promise<AnalysisSnapshot> {
   return {
     snapshotFormatVersion: SNAPSHOT_FORMAT_VERSION,
     analysisEngineVersion: ANALYSIS_ENGINE_VERSION,

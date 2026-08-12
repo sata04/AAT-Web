@@ -65,9 +65,7 @@ export function StatisticsPanel(props: StatisticsPanelProps): React.JSX.Element 
               ))}
             </tr>
           </thead>
-          <tbody>
-            {showGQuality ? gQualityRows(props.datasets) : standardRows(props.datasets)}
-          </tbody>
+          <tbody>{showGQuality ? gQualityRows(props.datasets) : standardRows(props.datasets)}</tbody>
         </table>
       </div>
     </section>

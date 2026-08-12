@@ -12,9 +12,9 @@
  * packages/shared, which this work does not own.
  */
 
+import { ApiError } from '@aat/shared'
 import { zValidator } from '@hono/zod-validator'
 import type { ValidationTargets } from 'hono'
-import { ApiError } from '@aat/shared'
 import type { ZodType } from 'zod'
 
 export function validate<Target extends keyof ValidationTargets, Schema extends ZodType>(

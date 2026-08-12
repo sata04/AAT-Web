@@ -26,29 +26,27 @@
  * this code having to implement its own compare-and-delete.
  */
 
-import { createAuthEndpoint } from 'better-auth/api'
-import { setSessionCookie } from 'better-auth/cookies'
+import { ApiError, buildApiErrorPayload, capabilitiesForRole, type ErrorCode, type Role } from '@aat/shared'
 import type { BetterAuthPlugin } from 'better-auth'
-import { APIError } from 'better-auth/api'
-import * as z from 'zod'
+import { APIError, createAuthEndpoint } from 'better-auth/api'
+import { setSessionCookie } from 'better-auth/cookies'
 import { and, eq } from 'drizzle-orm'
-import { ApiError, type ErrorCode, buildApiErrorPayload, capabilitiesForRole, type Role } from '@aat/shared'
+import * as z from 'zod'
+import type { WorkerConfig } from '../config.ts'
 import type { Database } from '../db/client.ts'
 import { passkey as passkeyTable, user as userTable } from '../db/schema.ts'
-import type { WorkerConfig } from '../config.ts'
-import { hashToken, newId } from '../lib/ids.ts'
-import { newSecretToken } from '../lib/ids.ts'
+import { hashToken, newId, newSecretToken } from '../lib/ids.ts'
 import { writeAuditLog } from '../services/audit.ts'
 import { clientAddress, consumeRateLimit, RATE_LIMITS, rateLimitKey } from '../services/rate-limit.ts'
-import {
-  CeremonyError,
-  newChallenge,
-  verifyAuthentication,
-  verifyRegistration,
-} from './webauthn/ceremony.ts'
-import { OFFERED_ALGORITHMS } from './webauthn/cose.ts'
-import { claimInvitation, consumeInvitation, resolveRegistrationContext } from './invitations.ts'
 import { syntheticEmail } from './identity.ts'
+import {
+  claimInvitation,
+  consumeInvitation,
+  recordInvitationUser,
+  resolveRegistrationContext,
+} from './invitations.ts'
+import { CeremonyError, newChallenge, verifyAuthentication, verifyRegistration } from './webauthn/ceremony.ts'
+import { OFFERED_ALGORITHMS } from './webauthn/cose.ts'
 
 /** Translate an AAT error code into the HTTP error Better Auth's router will serialise. */
 function toApiError(code: ErrorCode, details?: Record<string, unknown>): APIError {
@@ -260,7 +258,13 @@ export function aatPasskey({ db, config }: AatPasskeyOptions) {
           // already completed against the same invitation and no second user must appear. The
           // reverse order would leave a window in which a claim expires, the invitation returns to
           // `pending`, and a second user is created from one invitation.
-          const spent = await consumeInvitation(db, resolved.invitationId, ctx.body.registrationContext, userId, now)
+          const spent = await consumeInvitation(
+            db,
+            resolved.invitationId,
+            ctx.body.registrationContext,
+            userId,
+            now,
+          )
           if (!spent) {
             throw toApiError('INVITE_USED')
           }
@@ -276,6 +280,8 @@ export function aatPasskey({ db, config }: AatPasskeyOptions) {
               banned: false,
             })
           }
+
+          await recordInvitationUser(db, resolved.invitationId, userId)
 
           const [account] = await db.select().from(userTable).where(eq(userTable.id, userId)).limit(1)
           if (!account) {

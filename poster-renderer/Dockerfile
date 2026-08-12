@@ -89,22 +89,40 @@ COPY pytest.ini /app/pytest.ini
 # A dedicated unprivileged user with no login shell and no home directory to write to. Everything
 # the process needs to write (the Matplotlib cache) is created here, at build time, and nothing
 # else in the image is writable by it.
-RUN useradd --system --no-create-home --shell /usr/sbin/nologin --uid 10001 poster \
+RUN useradd --no-create-home --shell /usr/sbin/nologin --uid 10001 poster \
  && mkdir -p /app/.mplconfig \
  && chown -R poster:poster /app/.mplconfig \
  && chmod 700 /app/.mplconfig
 
 USER poster
 
-# Warm the font cache into the image so the first request does not pay for a font scan, and fail
-# the build if the renderer cannot import or draw at all.
-RUN python -c "import poster_renderer.render as r; print(r.PNG_METADATA)"
+# Draw one throwaway figure at build time. This writes Matplotlib's font cache into the image (so
+# no request ever pays for a font scan, and no runtime write to MPLCONFIGDIR is needed) and fails
+# the build outright if the pinned stack cannot rasterise text.
+RUN python -c "\
+import io; \
+from matplotlib.backends.backend_agg import FigureCanvasAgg; \
+from matplotlib.figure import Figure; \
+import poster_renderer.render as render; \
+figure = Figure(figsize=(2, 1)); FigureCanvasAgg(figure); \
+axes = figure.add_subplot(111); axes.set_title('warm'); \
+buffer = io.BytesIO(); figure.savefig(buffer, format='png'); \
+print('font cache warmed:', len(buffer.getvalue()), 'bytes;', render.PNG_METADATA['Software'])"
 
 EXPOSE 8080
 
-# The renderer needs no network access of its own: it never fetches fonts, data or updates. Run
-# it with `--network` restricted to whatever reaches it, and nothing outbound.
+# The renderer needs no network access of its own: it never fetches fonts, data or updates, so it
+# is expected to run with no outbound connectivity at all (CI runs it with `--network none`).
+# The probe reads POSTER_PORT at run time rather than hardcoding it, so a container started on a
+# different port still reports its health correctly.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
-    CMD python -c "import sys,urllib.request; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8080/health', timeout=4).status == 200 else 1)"
+    CMD python -c "\
+import os, sys, urllib.request; \
+port = os.environ.get('POSTER_PORT', '8080'); \
+sys.exit(0 if urllib.request.urlopen(f'http://127.0.0.1:{port}/health', timeout=4).status == 200 else 1)"
 
-ENTRYPOINT ["python", "-m", "poster_renderer"]
+# CMD, deliberately not ENTRYPOINT. An exec-form ENTRYPOINT would turn `docker run <image> python
+# -m pytest /app/tests` into arguments *appended to* the server's command line rather than a
+# replacement for it, and the container would quietly start serving instead of running the tests —
+# which is exactly how CI and deploy.yml invoke this image.
+CMD ["python", "-m", "poster_renderer"]

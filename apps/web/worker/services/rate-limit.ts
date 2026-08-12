@@ -12,8 +12,8 @@
  * is an acceptable trade for a single round trip and no per-request state.
  */
 
-import { sql } from 'drizzle-orm'
 import { ApiError } from '@aat/shared'
+import { sql } from 'drizzle-orm'
 import type { Database } from '../db/client.ts'
 import { rateLimits } from '../db/schema.ts'
 

@@ -68,9 +68,9 @@ export function Dialog(props: DialogProps): React.JSX.Element {
   }, [props])
 
   return (
-    // biome-ignore lint/a11y/noStaticElementInteractions: the backdrop's click is
-    // a convenience duplicate of the Escape key and the Cancel button, both of
-    // which are reachable from the keyboard.
+    // The backdrop's pointer handler is a convenience duplicate of the Escape
+    // key and the Cancel button, both of which are reachable from the keyboard,
+    // so it needs no keyboard equivalent of its own.
     <div
       className="dialog-backdrop"
       onPointerDown={(event) => {

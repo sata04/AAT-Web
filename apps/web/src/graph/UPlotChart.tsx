@@ -13,7 +13,7 @@
  * do itself, and can be tested without a canvas.
  */
 
-import { useCallback, useEffect, useId, useLayoutEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
 import uPlot from 'uplot'
 import 'uplot/dist/uPlot.min.css'
 import { buildDisplayGrid, columnsForWidth, decimateToGrid } from './decimate.ts'
@@ -78,7 +78,6 @@ export function UPlotChart(props: UPlotChartProps): React.JSX.Element {
   const rootRef = useRef<HTMLDivElement | null>(null)
   const plotRef = useRef<uPlot | null>(null)
   const [size, setSize] = useState<{ width: number; height: number }>({ width: 0, height: 0 })
-  const titleId = useId()
 
   // Refs, not state: uPlot's `range` callbacks and the wheel handler run outside
   // React's render cycle and must see the current values, not a captured render.
@@ -241,12 +240,7 @@ export function UPlotChart(props: UPlotChartProps): React.JSX.Element {
                 const from = self.valToPos(band.from, 'x', true)
                 const to = self.valToPos(band.to, 'x', true)
                 context.fillStyle = band.colour
-                context.fillRect(
-                  Math.min(from, to),
-                  self.bbox.top,
-                  Math.abs(to - from),
-                  self.bbox.height,
-                )
+                context.fillRect(Math.min(from, to), self.bbox.top, Math.abs(to - from), self.bbox.height)
               }
               context.restore()
             },
@@ -286,6 +280,7 @@ export function UPlotChart(props: UPlotChartProps): React.JSX.Element {
    * what makes zooming actually reveal detail: decimating once against the full
    * range would keep a zoomed-in view at the resolution of the zoomed-out one.
    */
+  // biome-ignore lint/correctness/useExhaustiveDependencies: `size` is not read in the body — the plot area width comes from uPlot's own bbox (the canvas minus the axes) — but a resize is exactly when that bbox changes, so it must retrigger decimation.
   useEffect(() => {
     const plot = plotRef.current
     if (plot === null || model.traces.length === 0) return
@@ -302,6 +297,7 @@ export function UPlotChart(props: UPlotChartProps): React.JSX.Element {
   }, [model, viewport, size.width, size.height, publishGeometry])
 
   /** Wheel zoom about the pointer, and Shift-drag (or middle-drag) to pan. */
+  // biome-ignore lint/correctness/useExhaustiveDependencies: the listeners read current values through refs, but they attach to the uPlot `over` element, which is replaced whenever the plot is rebuilt — so the dependencies are the things that rebuild it.
   useEffect(() => {
     const plot = plotRef.current
     if (plot === null) return
@@ -343,10 +339,7 @@ export function UPlotChart(props: UPlotChartProps): React.JSX.Element {
       const span = panning.start.max - panning.start.min
       const delta = ((event.clientX - panning.clientX) / rect.width) * span
       onViewportChangeRef.current(
-        clampViewport(
-          { min: panning.start.min - delta, max: panning.start.max - delta },
-          boundsRef.current,
-        ),
+        clampViewport({ min: panning.start.min - delta, max: panning.start.max - delta }, boundsRef.current),
       )
     }
 
@@ -372,15 +365,10 @@ export function UPlotChart(props: UPlotChartProps): React.JSX.Element {
   }, [model, palette, size.width, size.height, primaryDragReserved])
 
   return (
-    <div className="plot-frame" ref={rootRef} aria-labelledby={titleId}>
-      <p className="visually-hidden" id={titleId}>
-        {model.title}
-      </p>
-      {model.emptyMessage !== null ? (
-        <p className="plot-frame__empty">{model.emptyMessage}</p>
-      ) : null}
+    <section className="plot-frame" ref={rootRef} aria-label={model.title}>
+      {model.emptyMessage !== null ? <p className="plot-frame__empty">{model.emptyMessage}</p> : null}
       {props.children}
-    </div>
+    </section>
   )
 }
 

@@ -9,8 +9,8 @@
  */
 
 import type { AnalysisWarning, GQualityRow, SyncResult, WindowStatistics } from '@aat/analysis-core'
-import { asFullResolution, type FullResolutionArray } from '../analysis/series.ts'
 import type { AnalysisPayload, ColumnMapping } from '../analysis/protocol.ts'
+import { asFullResolution, type FullResolutionArray } from '../analysis/series.ts'
 
 export interface SensorDataset {
   readonly present: boolean

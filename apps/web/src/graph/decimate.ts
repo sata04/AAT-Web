@@ -29,7 +29,14 @@
 
 import type { FullResolutionArray } from '../analysis/series.ts'
 
-declare const DISPLAY_SERIES: unique symbol
+/**
+ * The nominal marker.
+ *
+ * A real symbol, not a `declare`d phantom: it is written at runtime, and it is
+ * not exported, so a `DisplaySeries` can only come from this module. That is
+ * what makes the type nominal rather than merely descriptive.
+ */
+const DISPLAY_SERIES = Symbol('aat.displaySeries')
 
 /** The shared x axis every trace on one plot is decimated onto. */
 export interface DisplayGrid {
@@ -157,12 +164,7 @@ export function decimateToGrid(
   return { [DISPLAY_SERIES]: true, y, grid, sourceLength: counted }
 }
 
-function nextFiniteIndex(
-  time: Float64Array,
-  values: Float64Array,
-  from: number,
-  length: number,
-): number {
+function nextFiniteIndex(time: Float64Array, values: Float64Array, from: number, length: number): number {
   for (let index = from; index < length; index++) {
     if (Number.isFinite(values[index] as number) && Number.isFinite(time[index] as number)) return index
   }

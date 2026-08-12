@@ -118,7 +118,11 @@ function parseClientData(clientDataJson: Uint8Array): ClientData {
     throw new CeremonyError('clientDataJSON is not an object')
   }
   const record = parsed as Record<string, unknown>
-  if (typeof record.type !== 'string' || typeof record.challenge !== 'string' || typeof record.origin !== 'string') {
+  if (
+    typeof record.type !== 'string' ||
+    typeof record.challenge !== 'string' ||
+    typeof record.origin !== 'string'
+  ) {
     throw new CeremonyError('clientDataJSON is missing required fields')
   }
   return {

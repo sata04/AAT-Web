@@ -14,9 +14,9 @@
  * reports are shown rather than swallowed.
  */
 
-import { useMemo, useState } from 'react'
 import type { AnalysisConfig } from '@aat/shared'
 import { DEFAULT_ANALYSIS_CONFIG } from '@aat/shared'
+import { useMemo, useState } from 'react'
 import { importDesktopConfig, validateConfig } from '../app/settings.ts'
 import { Dialog } from './Dialog.tsx'
 
@@ -36,7 +36,12 @@ interface NumericFieldSpec {
 
 /** Grouped the way the desktop's settings dialog groups them. */
 const MEASUREMENT_FIELDS: NumericFieldSpec[] = [
-  { key: 'sampling_rate', label: 'サンプリングレート (Hz)', step: '1', hint: '時間窓の長さの基準になります。' },
+  {
+    key: 'sampling_rate',
+    label: 'サンプリングレート (Hz)',
+    step: '1',
+    hint: '時間窓の長さの基準になります。',
+  },
   { key: 'gravity_constant', label: '重力加速度 (m/s²)', step: '0.000001' },
   { key: 'acceleration_threshold', label: '同期点しきい値 (m/s²)', step: '0.1' },
   { key: 'end_gravity_level', label: '終了重力レベル (G)', step: '0.1' },

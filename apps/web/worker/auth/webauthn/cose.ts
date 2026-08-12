@@ -135,7 +135,9 @@ export async function importCoseKey(coseKey: CborMap): Promise<ParsedCoseKey> {
     if (x.length !== 32) {
       throw new UnsupportedCredentialError('Ed25519 public keys must be exactly 32 bytes')
     }
-    const key = await crypto.subtle.importKey('raw', x as BufferSource, { name: 'Ed25519' }, false, ['verify'])
+    const key = await crypto.subtle.importKey('raw', x as BufferSource, { name: 'Ed25519' }, false, [
+      'verify',
+    ])
     return { algorithm, key }
   }
 

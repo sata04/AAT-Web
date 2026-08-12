@@ -9,21 +9,21 @@
  * because jsdom is deliberately not a dependency.
  */
 
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { AnalysisConfig } from '@aat/shared'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { AnalysisClient, type AnalysisProgress, AnalysisWorkerError } from '../analysis/client.ts'
 import { defaultDialogMapping } from '../analysis/mapping.ts'
 import type { ColumnMapping, OpenedSource } from '../analysis/protocol.ts'
 import { clearCache } from '../cache/analysis-cache.ts'
+import { fetchPoster, fetchSession, requestPoster } from '../cloud/gateway.ts'
+import { type CloudStatuses, INITIAL_STATUSES } from '../cloud/status.ts'
+import { syncDataset } from '../cloud/sync.ts'
 import { CloudStatusBar } from '../components/CloudStatusBar.tsx'
 import { ColumnSelectorDialog } from '../components/ColumnSelectorDialog.tsx'
 import { FileDropZone } from '../components/FileDropZone.tsx'
 import { RangeStatisticsPanel } from '../components/RangeStatisticsPanel.tsx'
 import { SettingsDialog } from '../components/SettingsDialog.tsx'
 import { StatisticsPanel } from '../components/StatisticsPanel.tsx'
-import { fetchPoster, fetchSession, requestPoster } from '../cloud/gateway.ts'
-import { type CloudStatuses, INITIAL_STATUSES } from '../cloud/status.ts'
-import { syncDataset } from '../cloud/sync.ts'
 import { ExportClient, ExportTooLargeForWorksheet, saveBlob } from '../exporting/client.ts'
 import { workbookInputFor } from '../exporting/input.ts'
 import { canvasToPng, PNG_PARITY_NOTICE } from '../exporting/png.ts'
@@ -45,6 +45,9 @@ import { type Dataset, datasetFromPayload, sensorModeFrom } from './dataset.ts'
 import { rangeStatisticsFor } from './range-statistics.ts'
 import { loadConfig, saveConfig } from './settings.ts'
 import { APP_VERSION } from './version.ts'
+
+/** How many notices stay on screen at once; older ones drop off. */
+const MAX_NOTICES = 6
 
 interface Notice {
   id: number
@@ -78,14 +81,16 @@ export function App(): React.JSX.Element {
   const exportClient = useRef<ExportClient | null>(null)
   const noticeId = useRef(0)
 
-  const getAnalysisClient = () => {
+  // Lazily constructed so that merely loading the page does not start a worker,
+  // and stable so the callbacks that use them do not change identity per render.
+  const getAnalysisClient = useCallback(() => {
     analysisClient.current ??= new AnalysisClient()
     return analysisClient.current
-  }
-  const getExportClient = () => {
+  }, [])
+  const getExportClient = useCallback(() => {
     exportClient.current ??= new ExportClient()
     return exportClient.current
-  }
+  }, [])
 
   useEffect(
     () => () => {
@@ -98,7 +103,9 @@ export function App(): React.JSX.Element {
   const notify = useCallback((tone: Notice['tone'], text: string) => {
     noticeId.current += 1
     const id = noticeId.current
-    setNotices((current) => [...current, { id, tone, text }])
+    // Capped: a disturbed recording can raise a warning per stage per sensor,
+    // and a wall of notices buries the graph it is trying to qualify.
+    setNotices((current) => [...current, { id, tone, text }].slice(-MAX_NOTICES))
   }, [])
 
   const dismissNotice = (id: number) => setNotices((current) => current.filter((n) => n.id !== id))
@@ -191,7 +198,11 @@ export function App(): React.JSX.Element {
     if (status === 'failed') {
       setStatuses((current) => ({
         ...current,
-        poster: { kind: 'failed', message: state.message ?? 'ポスターの生成に失敗しました。', retryable: true },
+        poster: {
+          kind: 'failed',
+          message: state.message ?? 'ポスターの生成に失敗しました。',
+          retryable: true,
+        },
       }))
       return
     }
@@ -270,10 +281,7 @@ export function App(): React.JSX.Element {
           onProgress,
         )
         const dataset = datasetFromPayload(result.payload, result.fromCache)
-        setDatasets((current) => [
-          ...current.filter((existing) => existing.name !== dataset.name),
-          dataset,
-        ])
+        setDatasets((current) => [...current.filter((existing) => existing.name !== dataset.name), dataset])
         setActiveName(dataset.name)
         setSelection(null)
         setViewport(null)
@@ -307,7 +315,7 @@ export function App(): React.JSX.Element {
         notify('error', `${source.filename}: ${message}`)
       }
     },
-    [config, signedIn, notify, syncToCloud],
+    [config, signedIn, notify, syncToCloud, getAnalysisClient],
   )
 
   const openFiles = useCallback(
@@ -336,6 +344,12 @@ export function App(): React.JSX.Element {
               reason: undefined,
             })
             setStatuses((current) => ({ ...current, analysis: { kind: 'idle' } }))
+            const remaining = files.length - files.indexOf(file) - 1
+            if (remaining > 0) {
+              // The dialog is modal, so the rest of the batch cannot be analysed
+              // behind it. Say so rather than dropping files silently.
+              notify('info', `残り ${remaining} 件は列を選択したあとで開き直してください。`)
+            }
             return
           }
           await runAnalysis(source, source.suggestedMapping)
@@ -347,7 +361,7 @@ export function App(): React.JSX.Element {
         }
       }
     },
-    [runAnalysis, notify],
+    [runAnalysis, notify, getAnalysisClient],
   )
 
   const closeDataset = useCallback(
@@ -356,7 +370,7 @@ export function App(): React.JSX.Element {
       setActiveName((current) => (current === dataset.name ? null : current))
       void getAnalysisClient().release(dataset.sourceSha256)
     },
-    [],
+    [getAnalysisClient],
   )
 
   const retrySync = () => {
@@ -424,10 +438,7 @@ export function App(): React.JSX.Element {
       if (error instanceof ExportTooLargeForWorksheet) {
         // Never truncate. Say how big it is and offer the format that has no
         // row limit.
-        notify(
-          'warning',
-          `${error.message}\n「CSVで書き出す」を選ぶと、行数制限なしで保存できます。`,
-        )
+        notify('warning', `${error.message}\n「CSVで書き出す」を選ぶと、行数制限なしで保存できます。`)
         return
       }
       notify('error', error instanceof Error ? error.message : String(error))
@@ -477,7 +488,8 @@ export function App(): React.JSX.Element {
           </label>
         </div>
 
-        <div className="command-bar__group segmented" role="group" aria-label="表示モード">
+        <fieldset className="command-bar__group segmented">
+          <legend className="visually-hidden">表示モード</legend>
           <button
             type="button"
             className="button"
@@ -505,7 +517,7 @@ export function App(): React.JSX.Element {
           >
             G-quality
           </button>
-        </div>
+        </fieldset>
 
         <div className="command-bar__group">
           <button
@@ -574,10 +586,20 @@ export function App(): React.JSX.Element {
         <div className="command-bar__spacer" />
 
         <div className="command-bar__group">
-          <button type="button" className="button" disabled={active === null} onClick={() => void doExport('xlsx')}>
+          <button
+            type="button"
+            className="button"
+            disabled={active === null}
+            onClick={() => void doExport('xlsx')}
+          >
             Excelで書き出す
           </button>
-          <button type="button" className="button" disabled={active === null} onClick={() => void doExport('csv')}>
+          <button
+            type="button"
+            className="button"
+            disabled={active === null}
+            onClick={() => void doExport('csv')}
+          >
             CSVで書き出す
           </button>
           <button
@@ -615,9 +637,9 @@ export function App(): React.JSX.Element {
           )}
 
           {statuses.analysis.kind === 'running' ? (
-            <div className="progress" role="progressbar" aria-valuenow={statuses.analysis.percent}>
-              <div className="progress__bar" style={{ width: `${statuses.analysis.percent}%` }} />
-            </div>
+            <progress className="progress" max={100} value={statuses.analysis.percent}>
+              {statuses.analysis.percent}%
+            </progress>
           ) : null}
 
           {hasDatasets ? (
@@ -682,7 +704,10 @@ export function App(): React.JSX.Element {
               </ul>
             </section>
 
-            <StatisticsPanel datasets={isComparing(mode) ? datasets : active === null ? [] : [active]} mode={mode} />
+            <StatisticsPanel
+              datasets={isComparing(mode) ? datasets : active === null ? [] : [active]}
+              mode={mode}
+            />
 
             <RangeStatisticsPanel
               selection={selection}

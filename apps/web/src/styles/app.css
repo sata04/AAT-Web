@@ -7,7 +7,7 @@
  * single popover elevation, and no colour that is not carrying information.
  */
 
-@import './tokens.css';
+@import "./tokens.css";
 
 *,
 *::before,
@@ -158,7 +158,9 @@ textarea {
   border: 1px solid var(--border-strong);
   border-radius: var(--radius-form);
   cursor: pointer;
-  transition: background var(--transition), border-color var(--transition);
+  transition:
+    background var(--transition),
+    border-color var(--transition);
 }
 
 .button:hover:not(:disabled) {
@@ -193,14 +195,17 @@ textarea {
 }
 
 /* Accent marks state, never decoration — this is the only "on" treatment. */
-.button[aria-pressed='true'] {
+.button[aria-pressed="true"] {
   background: var(--bg-selected);
   border-color: var(--accent);
   color: var(--accent);
 }
 
+/* A fieldset so the group has a real legend; its default chrome is removed. */
 .segmented {
   display: inline-flex;
+  margin: 0;
+  padding: 0;
   border: 1px solid var(--border-strong);
   border-radius: var(--radius-form);
   overflow: hidden;
@@ -343,7 +348,7 @@ textarea {
 }
 
 /* Accent marks the active dataset — state, not decoration. */
-.dataset-list__name[aria-current='true'] {
+.dataset-list__name[aria-current="true"] {
   background: var(--bg-selected);
   color: var(--accent);
   box-shadow: inset 2px 0 0 var(--accent);
@@ -490,7 +495,7 @@ textarea {
 }
 
 .selection-overlay__handle::after {
-  content: '';
+  content: "";
   position: absolute;
   top: 0;
   bottom: 0;
@@ -588,7 +593,9 @@ textarea {
   background: var(--bg-primary);
   text-align: center;
   color: var(--text-secondary);
-  transition: border-color var(--transition), background var(--transition);
+  transition:
+    border-color var(--transition),
+    background var(--transition);
 }
 
 .dropzone--active {

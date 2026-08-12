@@ -90,9 +90,7 @@ export interface WorkbookInput {
   statistics: { inner: WindowStatistics; drag: WindowStatistics }
   gQuality: GQualityRow[]
   /** Optional selected-range statistics, appended to the statistics sheet. */
-  rangeStatistics?:
-    | { xMin: number; xMax: number; inner: RangeStatistics; drag: RangeStatistics }
-    | undefined
+  rangeStatistics?: { xMin: number; xMax: number; inner: RangeStatistics; drag: RangeStatistics } | undefined
 }
 
 /** A single worksheet as write-excel-file's row/cell structure. */
@@ -109,7 +107,10 @@ export function planWorkbook(input: WorkbookInput): {
   dataRows: number
   fitsWorksheet: boolean
 } {
-  const range = unionTimeRange([finiteRange(input.inner?.time ?? null), finiteRange(input.drag?.time ?? null)])
+  const range = unionTimeRange([
+    finiteRange(input.inner?.time ?? null),
+    finiteRange(input.drag?.time ?? null),
+  ])
   if (range === null) {
     throw new ExportTooLargeError('There is no exportable time data.', 0, XLSX_MAX_DATA_ROWS)
   }
@@ -144,10 +145,7 @@ export function buildSheets(input: WorkbookInput): Sheet[] {
   }
 
   const { unifiedTime } = plan
-  const sheets: Sheet[] = [
-    gravityDataSheet(unifiedTime, input),
-    statisticsSheet(input),
-  ]
+  const sheets: Sheet[] = [gravityDataSheet(unifiedTime, input), statisticsSheet(input)]
 
   const accelerationSheet = accelerationDataSheet(unifiedTime, input)
   if (accelerationSheet !== null) sheets.push(accelerationSheet)

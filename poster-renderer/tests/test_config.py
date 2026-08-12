@@ -62,3 +62,16 @@ def test_invalid_values_fail_at_startup(environment):
 def test_empty_string_falls_back_to_the_default():
     """An unset variable and one set to "" mean the same thing in a container runtime."""
     assert from_environment({"POSTER_PORT": ""}).port == DEFAULT_PORT
+
+
+def test_entry_point_refuses_command_line_arguments(monkeypatch):
+    """`python -m poster_renderer <anything>` must fail loudly, not start a server anyway.
+
+    The image uses CMD rather than ENTRYPOINT so `docker run <image> python -m pytest ...` replaces
+    the command; this is the second half of that safeguard, for the case where something appends
+    arguments to the server's own invocation.
+    """
+    from poster_renderer.__main__ import main
+
+    monkeypatch.setattr("sys.argv", ["poster_renderer", "python", "-m", "pytest"])
+    assert main() == 2

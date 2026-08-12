@@ -1,0 +1,9 @@
+# Matplotlib's font cache, written when the service runs outside the container image (inside it,
+# MPLCONFIGDIR is /app/.mplconfig and the cache is baked in at build time).
+.mplconfig/
+
+# Artefacts of building the image behind a TLS-intercepting proxy: a Dockerfile variant that
+# injects the proxy's CA, and the CA bundle itself. Useful locally, never part of the image that
+# ships — the real Dockerfile must not trust an extra certificate authority.
+Dockerfile.sandbox
+.sandbox-ca.crt

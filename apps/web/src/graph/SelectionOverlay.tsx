@@ -18,7 +18,6 @@ import {
   beginDrag,
   commitDrag,
   dragRange,
-  hitTestSelection,
   type SelectionDrag,
   type SelectionRange,
   updateDrag,
@@ -121,10 +120,6 @@ export function SelectionOverlay(props: SelectionOverlayProps): React.JSX.Elemen
 
   const bounds = { min: geometry.xMin, max: geometry.xMax }
   const shown = drag !== null ? dragRange(drag, bounds) : selection
-  const hoverCursor =
-    selection !== null && drag === null
-      ? hitTestSelection(selection, geometry.xMin, pixelsToSpan(geometry, HANDLE_TOLERANCE_PX))
-      : null
 
   return (
     <div
@@ -137,7 +132,9 @@ export function SelectionOverlay(props: SelectionOverlayProps): React.JSX.Elemen
         // horizontal drag into a page scroll.
         pointerEvents: enabled ? 'auto' : 'none',
         touchAction: enabled ? 'none' : 'auto',
-        cursor: hoverCursor === 'body' ? 'grab' : 'crosshair',
+        // Crosshair while idle, grabbing while moving a selection. The edge
+        // grips set their own `ew-resize` in CSS, since they are real elements.
+        cursor: drag?.kind === 'move' ? 'grabbing' : 'crosshair',
       }}
     >
       {shown === null ? null : (

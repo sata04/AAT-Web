@@ -167,11 +167,9 @@ describe('workbook shape', () => {
 
   it('uses the frozen column headers', () => {
     const [gravity] = buildSheets(baseInput())
-    expect((gravity as { rows: Array<Array<{ value: unknown }>> }).rows[0]?.map((cell) => cell.value)).toEqual([
-      'Time (s)',
-      'Gravity Level (Inner Capsule) (G)',
-      'Gravity Level (Drag Shield) (G)',
-    ])
+    expect(
+      (gravity as { rows: Array<Array<{ value: unknown }>> }).rows[0]?.map((cell) => cell.value),
+    ).toEqual(['Time (s)', 'Gravity Level (Inner Capsule) (G)', 'Gravity Level (Drag Shield) (G)'])
   })
 
   it('omits the acceleration sheet when no acceleration was supplied', () => {
@@ -183,9 +181,7 @@ describe('workbook shape', () => {
   })
 
   it('omits the G-quality sheet when the sweep produced nothing', () => {
-    expect(buildSheets(baseInput({ gQuality: [] })).map((sheet) => sheet.name)).not.toContain(
-      SHEET_G_QUALITY,
-    )
+    expect(buildSheets(baseInput({ gQuality: [] })).map((sheet) => sheet.name)).not.toContain(SHEET_G_QUALITY)
   })
 
   it('writes the six frozen statistics rows before any addition', () => {
@@ -291,9 +287,7 @@ describe('CSV export', () => {
     const text = chunks.join('')
     const lines = text.trim().split('\r\n')
     // Headers contain no comma, quote or newline, so they need no quoting.
-    expect(lines[0]).toBe(
-      'Time (s),Gravity Level (Inner Capsule) (G),Gravity Level (Drag Shield) (G)',
-    )
+    expect(lines[0]).toBe('Time (s),Gravity Level (Inner Capsule) (G),Gravity Level (Drag Shield) (G)')
     expect(lines).toHaveLength(4)
   })
 

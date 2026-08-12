@@ -13,17 +13,18 @@
  * wraps a database exception cannot leak it. See packages/shared/src/errors.ts.
  */
 
-import type { Context, ErrorHandler } from 'hono'
 import { ApiError, buildApiErrorPayload, type Locale } from '@aat/shared'
+import type { Context, ErrorHandler } from 'hono'
 import { newId } from '../lib/ids.ts'
+import type { AppEnv } from './authorize.ts'
 
 /** Locale for user-facing messages. Japanese is the default; `?locale=en` is honoured for an English UI. */
-function requestLocale(context: Context): Locale {
+function requestLocale(context: Context<AppEnv>): Locale {
   const requested = new URL(context.req.url).searchParams.get('locale')
   return requested === 'en' ? 'en' : 'ja'
 }
 
-export const errorHandler: ErrorHandler<{ Bindings: Env }> = (error, context) => {
+export const errorHandler: ErrorHandler<AppEnv> = (error, context) => {
   const locale = requestLocale(context)
 
   if (error instanceof ApiError) {
@@ -59,7 +60,7 @@ export const errorHandler: ErrorHandler<{ Bindings: Env }> = (error, context) =>
 }
 
 /** 404 for an unknown /api path, in the same envelope as every other error. */
-export function notFoundHandler(context: Context): Response {
+export function notFoundHandler(context: Context<AppEnv>): Response {
   return context.json(
     { error: buildApiErrorPayload('RESOURCE_NOT_FOUND', { locale: requestLocale(context) }) },
     404,

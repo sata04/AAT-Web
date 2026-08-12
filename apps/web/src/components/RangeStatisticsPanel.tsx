@@ -126,7 +126,7 @@ export function RangeStatisticsPanel(props: RangeStatisticsPanelProps): React.JS
             選択範囲: {formatFixed(selection.xMin, 4)} 秒 ～ {formatFixed(selection.xMax, 4)} 秒 (範囲:{' '}
             {formatFixed(selection.xMax - selection.xMin, 4)} 秒)
           </p>
-          {result !== null && result.empty ? (
+          {result?.empty === true ? (
             <p className="notice notice--warning" role="status">
               <span className="notice__body">選択範囲にデータがありません。</span>
             </p>

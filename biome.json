@@ -2,13 +2,21 @@
   "$schema": "https://biomejs.dev/schemas/2.5.7/schema.json",
   "vcs": { "enabled": true, "clientKind": "git", "useIgnoreFile": true },
   "files": {
-    "includes": ["**", "!**/dist", "!**/.wrangler", "!**/node_modules", "!tests/golden/**", "!tests/fixtures/**", "!**/worker-configuration.d.ts"]
+    "includes": [
+      "**",
+      "!**/dist",
+      "!**/.wrangler",
+      "!**/node_modules",
+      "!tests/golden",
+      "!tests/fixtures",
+      "!**/worker-configuration.d.ts"
+    ]
   },
   "formatter": { "enabled": true, "indentStyle": "space", "indentWidth": 2, "lineWidth": 110 },
   "linter": {
     "enabled": true,
     "rules": {
-      "recommended": true,
+      "preset": "recommended",
       "suspicious": { "noExplicitAny": "error" },
       "correctness": { "noUnusedVariables": "error", "noUnusedImports": "error" }
     }

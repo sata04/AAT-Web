@@ -18,8 +18,8 @@
  */
 
 import { calculateRangeStatistics, type RangeStatistics } from '@aat/analysis-core'
-import type { Dataset } from './dataset.ts'
 import { isSelectionUsable, type SelectionRange, valuesInRange } from '../graph/selection.ts'
+import type { Dataset } from './dataset.ts'
 
 export interface RangeStatisticsResult {
   range: SelectionRange
@@ -36,10 +36,7 @@ export interface RangeStatisticsResult {
  * 0.001 s floor, or not yet a real range. A one-sample selection reports a
  * standard deviation of ~0, which reads as a spectacular result and is not one.
  */
-export function rangeStatisticsFor(
-  dataset: Dataset,
-  range: SelectionRange,
-): RangeStatisticsResult | null {
+export function rangeStatisticsFor(dataset: Dataset, range: SelectionRange): RangeStatisticsResult | null {
   if (!isSelectionUsable(range)) return null
 
   const innerValues = valuesInRange(dataset.inner.filteredTime, dataset.inner.filteredGravity, range)

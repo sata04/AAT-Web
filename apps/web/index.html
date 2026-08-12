@@ -22,17 +22,21 @@
        * what a tool used in a darkened control room should not do. Kept tiny and
        * inline for that reason; it is the only script in the document head.
        */
-      ;(function () {
+      ;(() => {
+        let theme = 'light'
         try {
-          var raw = localStorage.getItem('aat.analysis-config.v1')
-          var setting = raw ? JSON.parse(raw).theme : 'system'
-          if (setting !== 'light' && setting !== 'dark') {
-            setting = window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light'
+          const raw = localStorage.getItem('aat.analysis-config.v1')
+          const setting = raw ? JSON.parse(raw).theme : 'system'
+          if (setting === 'light' || setting === 'dark') {
+            theme = setting
+          } else {
+            theme = window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light'
           }
-          document.documentElement.dataset.theme = setting
-        } catch (error) {
-          document.documentElement.dataset.theme = 'light'
+        } catch {
+          // Unreadable storage is not a reason to fail to paint; light is the
+          // documented default.
         }
+        document.documentElement.dataset.theme = theme
       })()
     </script>
   </head>

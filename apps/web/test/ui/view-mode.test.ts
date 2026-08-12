@@ -141,11 +141,22 @@ describe('show-all and G-quality are mutually exclusive', () => {
   })
 
   it('is idempotent for repeated ON and repeated OFF events', () => {
+    const toggles: ViewEvent[] = ['SHOW_ALL_ON', 'SHOW_ALL_OFF', 'G_QUALITY_ON', 'G_QUALITY_OFF']
     for (const mode of VIEW_MODES) {
-      for (const event of EVENTS) {
+      for (const event of toggles) {
         const once = transition(mode, event)
         expect(transition(once, event)).toBe(once)
       }
     }
+  })
+
+  it('reproduces the Python quirk that re-entering comparison drops the sub-mode', () => {
+    // `ENTER_COMPARING.get(mode, ViewMode.COMPARING)` has no entry for the
+    // already-comparing states, so it falls back to plain COMPARING. The desktop
+    // never reaches this — `toggle_comparison` branches first — but the mapping
+    // is reproduced rather than "improved", because the two implementations have
+    // to agree about what the table says.
+    expect(transition('COMPARING_SHOW_ALL', 'ENTER_COMPARING')).toBe('COMPARING')
+    expect(transition('COMPARING_G_QUALITY', 'ENTER_COMPARING')).toBe('COMPARING')
   })
 })

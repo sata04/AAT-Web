@@ -1,0 +1,14 @@
+# Keep the build context to exactly what the image needs: requirements.txt, src/, tests/ and
+# pytest.ini. A smaller context is also a smaller blast radius — nothing that is not copied can be
+# leaked into a layer by accident.
+.venv/
+**/__pycache__/
+**/*.py[cod]
+.pytest_cache/
+.mplconfig/
+*.egg-info/
+.coverage
+htmlcov/
+README.md
+Dockerfile
+.dockerignore

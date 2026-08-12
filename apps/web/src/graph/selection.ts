@@ -112,11 +112,7 @@ export function resizeSelection(
  * rather than squashing it, which is what makes "drag from anywhere inside"
  * feel like moving an object instead of resizing one.
  */
-export function moveSelection(
-  range: SelectionRange,
-  delta: number,
-  bounds: AxisBounds,
-): SelectionRange {
+export function moveSelection(range: SelectionRange, delta: number, bounds: AxisBounds): SelectionRange {
   const width = rangeWidth(range)
   let xMin = range.xMin + delta
   if (xMin < bounds.min) xMin = bounds.min
@@ -201,11 +197,7 @@ export type SelectionDrag =
     }
 
 /** Start an interaction from a pointer press at `x`. */
-export function beginDrag(
-  existing: SelectionRange | null,
-  x: number,
-  tolerance: number,
-): SelectionDrag {
+export function beginDrag(existing: SelectionRange | null, x: number, tolerance: number): SelectionDrag {
   if (existing !== null) {
     const handle = hitTestSelection(existing, x, tolerance)
     if (handle === 'start' || handle === 'end') return { kind: 'resize', handle, range: existing }
@@ -220,7 +212,11 @@ export function updateDrag(drag: SelectionDrag, x: number, bounds: AxisBounds): 
     case 'create':
       return { kind: 'create', origin: drag.origin, current: x }
     case 'resize':
-      return { kind: 'resize', handle: drag.handle, range: resizeSelection(drag.range, drag.handle, x, bounds) }
+      return {
+        kind: 'resize',
+        handle: drag.handle,
+        range: resizeSelection(drag.range, drag.handle, x, bounds),
+      }
     case 'move':
       return {
         kind: 'move',

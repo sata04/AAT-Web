@@ -104,8 +104,7 @@ export const MAPPING_PROBLEM_MESSAGES: Readonly<Record<MappingProblem, string>> 
 }
 
 export const AMBIGUITY_MESSAGES: Readonly<Record<ColumnAmbiguity, string>> = {
-  NO_TIME_CANDIDATE:
-    '時間列の候補が見つかりませんでした。時間軸として使用する列を選択してください。',
+  NO_TIME_CANDIDATE: '時間列の候補が見つかりませんでした。時間軸として使用する列を選択してください。',
   NO_ACCELERATION_CANDIDATE:
     '加速度列の候補が見つかりませんでした。加速度として使用する列を選択してください。',
   MULTIPLE_CANDIDATES:

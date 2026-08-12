@@ -15,7 +15,7 @@ import { asFullResolution, type FullResolutionArray } from '../analysis/series.t
 import type { Dataset, SensorMode } from '../app/dataset.ts'
 import { hasAllData, hasFilteredData, resolveSensorVisibility } from '../app/dataset.ts'
 import { comparisonColour, type GraphPalette } from './theme.ts'
-import { isGQuality, isShowingAll, type ViewMode, usesFixedDuration } from './view-mode.ts'
+import { isGQuality, isShowingAll, usesFixedDuration, type ViewMode } from './view-mode.ts'
 
 export interface PlotTrace {
   key: string
@@ -103,10 +103,34 @@ function gQualityModel(inputs: PlotInputs): PlotModel {
 
   const traces: PlotTrace[] = []
   const definitions = [
-    { key: 'inner-mean', label: 'Inner Capsule: Mean Gravity Level', colour: palette.innerMean, axis: 'y' as const, pick: (row: Dataset['gQuality'][number]) => row.innerMean },
-    { key: 'drag-mean', label: 'Drag Shield: Mean Gravity Level', colour: palette.dragMean, axis: 'y' as const, pick: (row: Dataset['gQuality'][number]) => row.dragMean },
-    { key: 'inner-std', label: 'Inner Capsule: Standard Deviation', colour: palette.innerStd, axis: 'y2' as const, pick: (row: Dataset['gQuality'][number]) => row.innerStd },
-    { key: 'drag-std', label: 'Drag Shield: Standard Deviation', colour: palette.dragStd, axis: 'y2' as const, pick: (row: Dataset['gQuality'][number]) => row.dragStd },
+    {
+      key: 'inner-mean',
+      label: 'Inner Capsule: Mean Gravity Level',
+      colour: palette.innerMean,
+      axis: 'y' as const,
+      pick: (row: Dataset['gQuality'][number]) => row.innerMean,
+    },
+    {
+      key: 'drag-mean',
+      label: 'Drag Shield: Mean Gravity Level',
+      colour: palette.dragMean,
+      axis: 'y' as const,
+      pick: (row: Dataset['gQuality'][number]) => row.dragMean,
+    },
+    {
+      key: 'inner-std',
+      label: 'Inner Capsule: Standard Deviation',
+      colour: palette.innerStd,
+      axis: 'y2' as const,
+      pick: (row: Dataset['gQuality'][number]) => row.innerStd,
+    },
+    {
+      key: 'drag-std',
+      label: 'Drag Shield: Standard Deviation',
+      colour: palette.dragStd,
+      axis: 'y2' as const,
+      pick: (row: Dataset['gQuality'][number]) => row.dragStd,
+    },
   ]
 
   for (const definition of definitions) {
@@ -290,7 +314,9 @@ function singleDatasetModel(inputs: PlotInputs): PlotModel {
 /** Decide what the current mode should draw. */
 export function buildPlotModel(inputs: PlotInputs): PlotModel {
   const comparing =
-    inputs.mode === 'COMPARING' || inputs.mode === 'COMPARING_SHOW_ALL' || inputs.mode === 'COMPARING_G_QUALITY'
+    inputs.mode === 'COMPARING' ||
+    inputs.mode === 'COMPARING_SHOW_ALL' ||
+    inputs.mode === 'COMPARING_G_QUALITY'
   if (comparing) return comparisonModel(inputs)
   if (isGQuality(inputs.mode)) return gQualityModel(inputs)
   return singleDatasetModel(inputs)

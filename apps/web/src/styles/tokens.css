@@ -50,10 +50,10 @@
   --scrim: rgb(31 35 40 / 38%);
 
   /* --- Typography. System UI families first, matching the host platform. --- */
-  --font-sans: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', 'Hiragino Sans',
-    'Yu Gothic UI', 'Noto Sans CJK JP', Meiryo, sans-serif;
-  --font-mono: ui-monospace, 'SF Mono', Menlo, Consolas, 'Cascadia Mono', 'Noto Sans Mono',
-    monospace;
+  --font-sans:
+    -apple-system, BlinkMacSystemFont, "Segoe UI", "Noto Sans", "Hiragino Sans", "Yu Gothic UI",
+    "Noto Sans CJK JP", Meiryo, sans-serif;
+  --font-mono: ui-monospace, "SF Mono", Menlo, Consolas, "Cascadia Mono", "Noto Sans Mono", monospace;
 
   --size-header: 15px;
   --size-subheader: 13px;
@@ -85,7 +85,7 @@
   --transition: 120ms ease;
 }
 
-:root[data-theme='dark'] {
+:root[data-theme="dark"] {
   --bg-primary: #0d1117;
   --bg-secondary: #161b22;
   --bg-tertiary: #21262d;
@@ -117,7 +117,7 @@
   color-scheme: dark;
 }
 
-:root[data-theme='light'] {
+:root[data-theme="light"] {
   color-scheme: light;
 }
 

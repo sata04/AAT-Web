@@ -68,12 +68,7 @@ export async function sha256Hex(bytes: BufferSource): Promise<string> {
 
 /** Compose the cache key. Order is fixed so the key is stable across releases. */
 export function cacheKey(parts: CacheKeyParts): string {
-  return [
-    `v${CACHE_FORMAT_VERSION}`,
-    parts.engineVersion,
-    parts.configHash,
-    parts.sourceSha256,
-  ].join(':')
+  return [`v${CACHE_FORMAT_VERSION}`, parts.engineVersion, parts.configHash, parts.sourceSha256].join(':')
 }
 
 function openDatabase(): Promise<IDBDatabase> {

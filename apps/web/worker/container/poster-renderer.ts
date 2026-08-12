@@ -108,10 +108,10 @@ export class PosterRendererContainer extends DurableObject<Env> {
         }),
       )
     } catch (error) {
-      return new Response(
-        JSON.stringify({ code: 'POSTER_RENDER_FAILED', reason: (error as Error).name }),
-        { status: 502, headers: { 'content-type': 'application/json' } },
-      )
+      return new Response(JSON.stringify({ code: 'POSTER_RENDER_FAILED', reason: (error as Error).name }), {
+        status: 502,
+        headers: { 'content-type': 'application/json' },
+      })
     }
   }
 

@@ -34,8 +34,8 @@
  * live for an invitation at a time.
  */
 
+import { ApiError, ROLES, type Role } from '@aat/shared'
 import { and, eq, isNull, lte, or, sql } from 'drizzle-orm'
-import { ApiError, type Role, ROLES } from '@aat/shared'
 import { type Database, rowsAffected } from '../db/client.ts'
 import { registrationInvites } from '../db/schema.ts'
 import { hashToken, newId, newSecretToken } from '../lib/ids.ts'
@@ -53,7 +53,8 @@ export interface CreateInvitationInput {
   /** Required for `recovery`: the existing user who is regaining access. */
   targetUserId?: string | undefined
   ttlSeconds: number
-  createdByUserId: string
+  /** Null for the bootstrap invitation of a fresh deployment, which has no administrator yet. */
+  createdByUserId: string | null
 }
 
 export interface CreatedInvitation {
@@ -160,10 +161,7 @@ export async function claimInvitation(
         sql`${registrationInvites.expiresAt} > ${Math.floor(now.getTime() / 1000)}`,
         or(
           eq(registrationInvites.status, 'pending'),
-          and(
-            eq(registrationInvites.status, 'claimed'),
-            lte(registrationInvites.claimExpiresAt, now),
-          ),
+          and(eq(registrationInvites.status, 'claimed'), lte(registrationInvites.claimExpiresAt, now)),
         ),
       ),
     )
@@ -240,18 +238,22 @@ export async function resolveRegistrationContext(
  * Conditional on the claim still being the one this context owns, so a context that was superseded
  * by a later claim cannot complete. Returns false if the transition did not happen; the caller
  * must treat that as a failed registration and not create a user.
+ *
+ * `used_by_user_id` is NOT set here. It references `user(id)`, and this statement deliberately
+ * runs *before* the user exists — spending the invitation is what authorises the registration, so
+ * it has to come first or a lost race could leave a second user behind. The link is recorded
+ * afterwards by {@link recordInvitationUser}.
  */
 export async function consumeInvitation(
   db: Database,
   invitationId: string,
   registrationContext: string,
-  userId: string,
   now: Date = new Date(),
 ): Promise<boolean> {
   const contextHash = await hashToken(registrationContext)
   const result = await db
     .update(registrationInvites)
-    .set({ status: 'used', usedAt: now, usedByUserId: userId, claimContextHash: null })
+    .set({ status: 'used', usedAt: now, claimContextHash: null })
     .where(
       and(
         eq(registrationInvites.id, invitationId),
@@ -262,6 +264,18 @@ export async function consumeInvitation(
       ),
     )
   return rowsAffected(result) === 1
+}
+
+/** Record which user a spent invitation produced, once that user exists. */
+export async function recordInvitationUser(
+  db: Database,
+  invitationId: string,
+  userId: string,
+): Promise<void> {
+  await db
+    .update(registrationInvites)
+    .set({ usedByUserId: userId })
+    .where(and(eq(registrationInvites.id, invitationId), isNull(registrationInvites.usedByUserId)))
 }
 
 /** Revoke an unspent invitation. Returns false if it was already used or already revoked. */

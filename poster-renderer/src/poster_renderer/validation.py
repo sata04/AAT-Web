@@ -161,20 +161,32 @@ def _object(value: Any, field: str) -> Mapping[str, Any]:
     return value
 
 
-def _exact_keys(value: Mapping[str, Any], allowed: frozenset[str], required: frozenset[str], field: str) -> None:
-    """Enforce a Zod `.strict()` object: no unknown keys, no missing required keys."""
+def _exact_keys(
+    value: Mapping[str, Any],
+    allowed: frozenset[str],
+    required: frozenset[str],
+    prefix: str,
+    label: str | None = None,
+) -> None:
+    """Enforce a Zod `.strict()` object: no unknown keys, no missing required keys.
+
+    `prefix` is the reported field path (empty at the top level, so a bad top-level key is
+    reported as `dpi` rather than `spec.dpi` — the same paths `spec.ts` produces); `label` is what
+    the message calls the object.
+    """
+    name = label if label is not None else prefix
     keys = set(value)
     unknown = sorted(keys - allowed)
     if unknown:
         raise SpecValidationError(
-            f"{field} contains unknown key(s): {', '.join(unknown)}",
-            field=f"{field}.{unknown[0]}" if field else unknown[0],
+            f"{name} contains unknown key(s): {', '.join(unknown)}",
+            field=f"{prefix}.{unknown[0]}" if prefix else unknown[0],
         )
     missing = sorted(required - keys)
     if missing:
         raise SpecValidationError(
-            f"{field} is missing required key(s): {', '.join(missing)}",
-            field=f"{field}.{missing[0]}" if field else missing[0],
+            f"{name} is missing required key(s): {', '.join(missing)}",
+            field=f"{prefix}.{missing[0]}" if prefix else missing[0],
         )
 
 
@@ -317,7 +329,7 @@ def _series_entry(value: Any, key: str) -> tuple[SeriesArrays, int]:
 def validate_spec(value: Any) -> PosterPlotSpec:
     """Validate a parsed JSON document as a poster plot spec, or raise :class:`SpecValidationError`."""
     document = _object(value, "spec")
-    _exact_keys(document, SPEC_ALLOWED_KEYS, SPEC_REQUIRED_KEYS, "spec")
+    _exact_keys(document, SPEC_ALLOWED_KEYS, SPEC_REQUIRED_KEYS, "", label="spec")
 
     analysis_revision_id = _string(document["analysisRevisionId"], "analysisRevisionId")
     if not (

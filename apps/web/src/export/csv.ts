@@ -9,12 +9,7 @@
 
 import { sanitiseTextCell } from './formula-safety.ts'
 import { buildUnifiedTimeAxis, finiteRange, resampleToAxis, unionTimeRange } from './resample.ts'
-import {
-  HEADER_GRAVITY_DRAG,
-  HEADER_GRAVITY_INNER,
-  HEADER_TIME,
-  type WorkbookInput,
-} from './workbook.ts'
+import { HEADER_GRAVITY_DRAG, HEADER_GRAVITY_INNER, HEADER_TIME, type WorkbookInput } from './workbook.ts'
 
 /**
  * Number of digits that round-trips a float64 through decimal text.

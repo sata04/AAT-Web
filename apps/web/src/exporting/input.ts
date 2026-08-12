@@ -12,10 +12,10 @@
  * cannot reach a spreadsheet even by accident.
  */
 
-import type { WorkbookInput } from '../export/workbook.ts'
-import type { Dataset, SensorDataset } from '../app/dataset.ts'
-import type { SelectionRange } from '../graph/selection.ts'
 import type { RangeStatistics } from '@aat/analysis-core'
+import type { Dataset, SensorDataset } from '../app/dataset.ts'
+import type { WorkbookInput } from '../export/workbook.ts'
+import type { SelectionRange } from '../graph/selection.ts'
 
 function sensorSeries(sensor: SensorDataset): WorkbookInput['inner'] {
   if (!sensor.present || sensor.gravity.length === 0) return null

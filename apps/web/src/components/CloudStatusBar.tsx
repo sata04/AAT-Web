@@ -47,7 +47,8 @@ export function CloudStatusBar(props: CloudStatusBarProps): React.JSX.Element {
           : null
 
   return (
-    <footer className="status-bar" aria-label="状態">
+    <footer className="status-bar">
+      <h2 className="visually-hidden">状態</h2>
       {/* Polite: a status change must never interrupt what the user is reading. */}
       <div className="status-lane" role="status" aria-live="polite">
         <Lane name="解析" label={analysisLabel(statuses.analysis)} />

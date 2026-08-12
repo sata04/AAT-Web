@@ -10,11 +10,7 @@
  */
 
 import { useMemo, useState } from 'react'
-import {
-  AMBIGUITY_MESSAGES,
-  MAPPING_PROBLEM_MESSAGES,
-  validateMapping,
-} from '../analysis/mapping.ts'
+import { AMBIGUITY_MESSAGES, MAPPING_PROBLEM_MESSAGES, validateMapping } from '../analysis/mapping.ts'
 import type { ColumnAmbiguity, ColumnMapping, OpenedSource } from '../analysis/protocol.ts'
 import { Dialog } from './Dialog.tsx'
 

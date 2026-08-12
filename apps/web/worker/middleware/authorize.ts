@@ -29,9 +29,9 @@
  * is a policy that has to be chosen deliberately, and it has not been.
  */
 
-import type { Context, MiddlewareHandler } from 'hono'
+import { ApiError, type Capability, capabilitiesForRole, hasCapability, ROLES, type Role } from '@aat/shared'
 import { and, eq, isNull } from 'drizzle-orm'
-import { ApiError, type Capability, capabilitiesForRole, hasCapability, type Role, ROLES } from '@aat/shared'
+import type { Context, MiddlewareHandler } from 'hono'
 import { getAuth } from '../auth/auth.ts'
 import { type Database, getDatabase } from '../db/client.ts'
 import { analysisRevisions, cloudObjects, runs } from '../db/schema.ts'

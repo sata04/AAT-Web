@@ -1,5 +1,5 @@
-import { defineConfig } from 'vite'
 import react from '@vitejs/plugin-react'
+import { defineConfig } from 'vite'
 import { VitePWA } from 'vite-plugin-pwa'
 
 /**
@@ -22,10 +22,9 @@ export default defineConfig({
       output: {
         // uPlot is large, stable, and unrelated to the analysis engine. Splitting
         // it means a change to either one does not invalidate the other's cache
-        // entry in an installed PWA.
-        manualChunks: {
-          uplot: ['uplot'],
-        },
+        // entry in an installed PWA. Written as a function because Vite 8's
+        // bundler (Rolldown) only accepts that form.
+        manualChunks: (id: string) => (id.includes('node_modules/uplot') ? 'uplot' : undefined),
       },
     },
   },

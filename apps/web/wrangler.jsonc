@@ -166,13 +166,7 @@
    * controls.
    */
   "secrets": {
-    "required": [
-      "BETTER_AUTH_SECRET",
-      "BETTER_AUTH_URL",
-      "AAT_RP_ID",
-      "AAT_RP_NAME",
-      "AAT_TRUSTED_ORIGINS"
-    ]
+    "required": ["BETTER_AUTH_SECRET", "BETTER_AUTH_URL", "AAT_RP_ID", "AAT_RP_NAME", "AAT_TRUSTED_ORIGINS"]
   },
 
   "observability": {

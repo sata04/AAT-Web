@@ -9,6 +9,7 @@
  * start it — a user who opens the page to read the settings never pays for it.
  */
 
+import type { AnalysisConfig } from '@aat/shared'
 import type {
   AnalyseRequest,
   AnalysisPayload,
@@ -18,7 +19,6 @@ import type {
   ColumnMapping,
   OpenedSource,
 } from './protocol.ts'
-import type { AnalysisConfig } from '@aat/shared'
 
 export interface AnalysisProgress {
   stage: AnalysisStage
@@ -120,7 +120,7 @@ export class AnalysisClient {
       return
     }
     if (message.type === 'released' && request.expect === 'released') {
-      ;(request.resolve as unknown as (value: void) => void)()
+      ;(request.resolve as unknown as () => void)()
       return
     }
 
@@ -199,11 +199,7 @@ export class AnalysisClient {
 
   /** Let the worker drop a parsed table when its dataset is closed. */
   release(sourceSha256: string): Promise<void> {
-    return this.send<void>(
-      { type: 'release', requestId: this.id(), sourceSha256 },
-      'released',
-      [],
-    )
+    return this.send<void>({ type: 'release', requestId: this.id(), sourceSha256 }, 'released', [])
   }
 
   /** Shut the worker down. Used when the application unmounts. */

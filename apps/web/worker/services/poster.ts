@@ -24,9 +24,9 @@
  * failure mode a single-container deployment cannot absorb.
  */
 
-import { and, eq, gt, inArray, sql } from 'drizzle-orm'
-import { ApiError } from '@aat/shared'
 import type { PosterPlotSpec } from '@aat/plot-spec'
+import { ApiError } from '@aat/shared'
+import { and, eq, gt, inArray, sql } from 'drizzle-orm'
 import { type Database, rowsAffected } from '../db/client.ts'
 import { posterFigures } from '../db/schema.ts'
 import { getCircuitBreaker } from './flags.ts'
@@ -147,7 +147,12 @@ export async function takeOverStaleRender(
   const staleBefore = new Date(now.getTime() - staleSeconds * 1000)
   const result = await db
     .update(posterFigures)
-    .set({ status: 'rendering', startedAt: now, updatedAt: now, attemptCount: sql`${posterFigures.attemptCount} + 1` })
+    .set({
+      status: 'rendering',
+      startedAt: now,
+      updatedAt: now,
+      attemptCount: sql`${posterFigures.attemptCount} + 1`,
+    })
     .where(
       and(
         eq(posterFigures.id, posterId),

@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+
 /**
  * Fail the build well before the Worker bundle reaches Cloudflare's size limit.
  *
@@ -11,9 +12,9 @@
  * Usage: node scripts/check-worker-bundle-size.mjs <outdir>
  */
 
-import { gzipSync } from 'node:zlib'
 import { readdirSync, readFileSync, statSync } from 'node:fs'
 import { join } from 'node:path'
+import { gzipSync } from 'node:zlib'
 
 /** Cloudflare's documented gzipped script-size limit on the Paid plan. */
 const LIMIT_BYTES = 10 * 1024 * 1024
@@ -71,7 +72,9 @@ perFile.sort((a, b) => b.size - a.size)
 const asMiB = (bytes) => (bytes / 1024 / 1024).toFixed(2)
 const share = total / LIMIT_BYTES
 
-console.log(`Worker bundle: ${asMiB(total)} MiB gzipped (${(share * 100).toFixed(1)}% of the ${asMiB(LIMIT_BYTES)} MiB limit)`)
+console.log(
+  `Worker bundle: ${asMiB(total)} MiB gzipped (${(share * 100).toFixed(1)}% of the ${asMiB(LIMIT_BYTES)} MiB limit)`,
+)
 for (const file of perFile.slice(0, 5)) {
   console.log(`  ${asMiB(file.size).padStart(6)} MiB  ${file.path}`)
 }

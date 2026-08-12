@@ -13,8 +13,8 @@
  *    only ever stored hashed, and never logged.
  */
 
-import { ulid } from 'ulid'
 import { sha256Hex } from '@aat/shared'
+import { ulid } from 'ulid'
 import { bytesToBase64Url } from './encoding.ts'
 
 /** A fresh opaque identifier. */

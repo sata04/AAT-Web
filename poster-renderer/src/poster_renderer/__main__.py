@@ -31,6 +31,13 @@ def main(config: ServiceConfig | None = None) -> int:
     configure_logging()
     logger = logging.getLogger("poster_renderer")
 
+    # The entry point takes no arguments — everything is configured through the environment. It
+    # says so loudly rather than ignoring them, because silently accepting stray argv is how a
+    # container ends up serving when it was asked to run something else entirely.
+    if len(sys.argv) > 1:
+        logger.error("poster_renderer takes no command-line arguments; configure it via POSTER_* env vars")
+        return 2
+
     try:
         resolved = config if config is not None else from_environment()
     except ValueError as error:

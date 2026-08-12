@@ -454,3 +454,11 @@ def test_display_name_falls_back_to_the_run_code(spec_dict):
     """An empty title means "no override": the figure is named after the run, as on the desktop."""
     assert validate_spec(spec_dict).display_name == "260725a"
     assert validate_spec(build_spec(title="Drop 42")).display_name == "Drop 42"
+
+
+def test_top_level_field_paths_match_the_schema():
+    """A bad top-level key is reported as `dpi`, not `spec.dpi` — the path spec.ts would produce."""
+    spec = build_spec()
+    del spec["dpi"]
+    assert expect_rejected(spec).field == "dpi"
+    assert expect_rejected(build_spec(rcParams={})).field == "rcParams"

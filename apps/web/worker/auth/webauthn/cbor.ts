@@ -99,8 +99,7 @@ class CborReader {
       }
       case 1: {
         const read = this.readArgument(offset)
-        const value =
-          typeof read.argument === 'bigint' ? -1n - read.argument : -1 - (read.argument as number)
+        const value = typeof read.argument === 'bigint' ? -1n - read.argument : -1 - (read.argument as number)
         return { value, offset: read.offset }
       }
       case 2: {
@@ -141,7 +140,11 @@ class CborReader {
         for (let index = 0; index < count; index++) {
           const key = this.decodeItem(cursor)
           const value = this.decodeItem(key.offset)
-          if (typeof key.value !== 'string' && typeof key.value !== 'number' && typeof key.value !== 'bigint') {
+          if (
+            typeof key.value !== 'string' &&
+            typeof key.value !== 'number' &&
+            typeof key.value !== 'bigint'
+          ) {
             throw new Error('CBOR map keys must be integers or text strings')
           }
           if (map.has(key.value)) {

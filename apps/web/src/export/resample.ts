@@ -38,11 +38,7 @@ export class ExportRangeError extends Error {
  * clamped endpoint value and shows up in the workbook as a duplicated row that
  * was never measured.
  */
-export function buildUnifiedTimeAxis(
-  startTime: number,
-  endTime: number,
-  samplingRate: number,
-): Float64Array {
+export function buildUnifiedTimeAxis(startTime: number, endTime: number, samplingRate: number): Float64Array {
   let start = startTime
   let end = endTime
   if (end < start) [start, end] = [end, start]
@@ -53,8 +49,7 @@ export function buildUnifiedTimeAxis(
   const rawCount = span * samplingRate
   const floor = Math.floor(rawCount)
   const remainder = rawCount - floor
-  const rounded =
-    remainder > 0.5 ? floor + 1 : remainder < 0.5 ? floor : floor % 2 === 0 ? floor : floor + 1
+  const rounded = remainder > 0.5 ? floor + 1 : remainder < 0.5 ? floor : floor % 2 === 0 ? floor : floor + 1
   const sampleCount = rounded + 1
 
   if (sampleCount > MAX_UNIFIED_SAMPLES) {
