@@ -161,7 +161,23 @@ jobs:
       - name: Build container image
         run: docker build -t aat-poster-renderer:ci poster-renderer
 
+      # POSTER_STRICT_REFERENCE_BYTES=1 upgrades the reference-image check from
+      # "perceptually indistinguishable" to "byte-identical", and this is the one
+      # place it can honestly be demanded. tests/test_reference_image.py keeps it
+      # opt-in because the committed PNG was produced on one machine and FreeType
+      # or zlib built differently elsewhere moves bytes without moving anything a
+      # reader could see — but inside this image none of that is free to vary:
+      # the base is pinned by digest and every wheel by hash, so the renderer,
+      # the glyph rasteriser and the PNG encoder are the exact ones that produced
+      # the reference. Its docstring names precisely this situation.
+      #
+      # The host run above stays tolerant, so a runner image change still reports
+      # as a visual diff rather than a byte diff. If this step ever fails while
+      # that one passes, the pinned stack moved — which is the signal worth
+      # having, and the reason poster-renderer updates never auto-merge.
       - name: Renderer tests inside the image
         run: |
-          docker run --rm --network none aat-poster-renderer:ci \
+          docker run --rm --network none \
+            --env POSTER_STRICT_REFERENCE_BYTES=1 \
+            aat-poster-renderer:ci \
             python -m pytest /app/tests -q
