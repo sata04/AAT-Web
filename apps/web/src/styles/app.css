@@ -79,10 +79,13 @@ textarea {
   margin-right: var(--space-sm);
 }
 
+/* An anchor, because it is the way back to the analyzer from every screen. */
 .command-bar__title {
   font-size: var(--size-header);
   font-weight: var(--weight-bold);
   letter-spacing: 0.01em;
+  color: inherit;
+  text-decoration: none;
 }
 
 .command-bar__version {
@@ -99,6 +102,55 @@ textarea {
 
 .command-bar__spacer {
   flex: 1 1 auto;
+}
+
+/* The signed-in user's name. Never an email address — see worker/auth/identity.ts. */
+.command-bar__identity {
+  font-size: var(--size-small);
+  color: var(--text-secondary);
+  white-space: nowrap;
+}
+
+/*
+ * Screen navigation.
+ *
+ * Anchors, not buttons: they have to be openable in a new tab and announced as
+ * links. The active item is marked with `aria-current="page"` and styled from
+ * that attribute, so the accent is carrying the same information the
+ * accessibility tree already has rather than a second, silent copy of it.
+ */
+.app-nav {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3xs);
+}
+
+.app-nav__link {
+  display: inline-flex;
+  align-items: center;
+  min-height: var(--control-height);
+  padding: 0 var(--space-sm);
+  color: var(--text-secondary);
+  text-decoration: none;
+  border: 1px solid transparent;
+  border-radius: var(--radius-form);
+  white-space: nowrap;
+  transition:
+    background var(--transition),
+    color var(--transition),
+    border-color var(--transition);
+}
+
+.app-nav__link:hover {
+  background: var(--bg-tertiary);
+  color: var(--text-primary);
+}
+
+/* Accent marks state, never decoration — this is the only "current" treatment. */
+.app-nav__link[aria-current="page"] {
+  background: var(--bg-selected);
+  border-color: var(--accent);
+  color: var(--accent);
 }
 
 .workspace {
@@ -144,6 +196,56 @@ textarea {
   }
 }
 
+/*
+ * ===== Screens =====
+ *
+ * The analyzer fills the viewport and never scrolls the page; every other screen
+ * is a document. This is the second shape: one scrolling column, capped so lines
+ * of Japanese prose stay readable on a wide display.
+ */
+
+.screen {
+  min-height: 0;
+  overflow-y: auto;
+  padding: var(--space-xl) var(--space-md);
+}
+
+.screen--centred {
+  display: grid;
+  place-items: center;
+}
+
+.screen__inner {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-lg);
+  width: min(60rem, 100%);
+  margin: 0 auto;
+}
+
+.screen__inner--narrow {
+  width: min(32rem, 100%);
+}
+
+.screen__header {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2xs);
+}
+
+.screen__title {
+  margin: 0;
+  font-size: var(--size-header);
+  font-weight: var(--weight-bold);
+}
+
+.screen__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-sm);
+  margin-top: var(--space-md);
+}
+
 /* ===== Controls ===== */
 
 .button {
@@ -158,6 +260,8 @@ textarea {
   border: 1px solid var(--border-strong);
   border-radius: var(--radius-form);
   cursor: pointer;
+  /* So the class works on an anchor as well as a button. */
+  text-decoration: none;
   transition:
     background var(--transition),
     border-color var(--transition);
@@ -274,6 +378,19 @@ textarea {
   padding: var(--space-md);
 }
 
+/*
+ * A panel that stands alone rather than stacking inside the side panel.
+ *
+ * The side panel's dividers come from each panel's bottom border; a panel on a
+ * screen of its own has nothing above or below it, so it closes its own outline.
+ * Still a hairline — the only shadow in this application is `.dialog`.
+ */
+.panel--framed {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-panel);
+  background: var(--bg-secondary);
+}
+
 .panel__header {
   display: flex;
   align-items: baseline;
@@ -290,6 +407,18 @@ textarea {
 .panel__hint {
   font-size: var(--size-small);
   color: var(--text-secondary);
+}
+
+/*
+ * Inline links inside prose.
+ *
+ * Interactivity is state, and the accent is what marks state here. Without this
+ * rule the browser's own link colour applies, which would be the only colour on
+ * screen that is not one of the borrowed desktop tokens.
+ */
+.panel__hint a,
+.notice__body a {
+  color: var(--accent);
 }
 
 .data-table {
@@ -436,9 +565,16 @@ textarea {
   border-left-color: var(--accent);
 }
 
+/*
+ * `pre-line` because notices are written as a statement and its remedy, split by
+ * a newline — an export that was too large for a worksheet, a passkey ceremony
+ * that failed and what to do about it. Collapsing that into one run of text is
+ * how the actionable half stops being read.
+ */
 .notice__body {
   flex: 1 1 auto;
   min-width: 0;
+  white-space: pre-line;
 }
 
 /* ===== Graph ===== */
