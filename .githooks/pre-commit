@@ -1,0 +1,14 @@
+#!/bin/sh
+# Pre-commit checks. These are an early-warning copy of checks CI also runs, so
+# forgetting to install the hook cannot let a bad commit reach main — it only
+# means you find out later.
+#
+# Enable in a fresh clone:
+#   git config core.hooksPath .githooks
+set -e
+
+# Reject commits made under an unapproved author/committer identity. This reads
+# the EFFECTIVE identity, so `git -c user.email=...` and GIT_AUTHOR_* /
+# GIT_COMMITTER_* environment overrides are caught too — a config-only check
+# would not have stopped the 37 bad commits this repository started with.
+node scripts/check-commit-identity.mjs

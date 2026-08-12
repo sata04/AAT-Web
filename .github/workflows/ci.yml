@@ -23,10 +23,40 @@ jobs:
       # nothing. Renovate keeps the digests current.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          # The identity check walks base..head, so the history has to be there.
+          fetch-depth: 0
           # Do not leave GITHUB_TOKEN in .git/config. No job here pushes, so it
           # is not needed, and a dependency that manages to run code cannot
           # pick it up.
           persist-credentials: false
+
+      # An unapproved committer is cheap to reject here and expensive to remove
+      # later: correcting one means rewriting history, which changes every SHA
+      # downstream. This repository's first 37 commits were written under a
+      # project name and an unapproved address, and had to be rewritten wholesale.
+      # The check reads the effective identity, so `-c user.email=...` and
+      # GIT_AUTHOR_* overrides are caught, not just committed config.
+      - name: Check commit identity (pull request)
+        if: github.event_name == 'pull_request'
+        run: node scripts/check-commit-identity.mjs --range "${{ github.event.pull_request.base.sha }}..${{ github.event.pull_request.head.sha }}"
+
+      # On a push, inspect exactly what was pushed. The before-SHA is all zeroes
+      # for a newly created branch and can point at a discarded commit after a
+      # force push, so fall back to auditing every reachable commit instead of
+      # silently checking nothing.
+      - name: Check commit identity (push)
+        if: github.event_name == 'push'
+        env:
+          BEFORE: ${{ github.event.before }}
+          AFTER: ${{ github.sha }}
+        run: |
+          if [ -n "$BEFORE" ] && [ "$BEFORE" != "0000000000000000000000000000000000000000" ] \
+             && git cat-file -e "$BEFORE^{commit}" 2>/dev/null; then
+            node scripts/check-commit-identity.mjs --range "$BEFORE..$AFTER"
+          else
+            echo "No usable before-SHA (new branch or force push); auditing all reachable commits."
+            node scripts/check-commit-identity.mjs --all
+          fi
 
       # pnpm comes from the packageManager field rather than a third-party
       # action, so there is one source of truth and Renovate updates it there.
