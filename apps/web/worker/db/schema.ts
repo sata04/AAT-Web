@@ -462,7 +462,11 @@ export const posterFigures = sqliteTable(
     /** SHA-256 of the canonical plot spec that was sent to the renderer. */
     specHash: text('spec_hash').notNull(),
     rendererVersion: text('renderer_version'),
-    /** 'pending' | 'rendering' | 'succeeded' | 'failed'. */
+    /**
+     * 'queued' | 'rendering' | 'ready' | 'failed' — the vocabulary in `@aat/plot-spec`'s
+     * `PosterFigureStatusSchema`, which is what `services/poster.ts` writes and what the client
+     * parses. One vocabulary spans browser, Worker and database on purpose.
+     */
     status: text('status').notNull(),
     objectId: text('object_id'),
     errorCode: text('error_code'),
