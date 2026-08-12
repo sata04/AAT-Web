@@ -1,0 +1,186 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "aat-web",
+  "main": "worker/index.ts",
+
+  // workerd 1.20260730.x is what this repository pins; the compatibility date
+  // must not be newer than the runtime that is actually installed.
+  "compatibility_date": "2026-07-30",
+
+  // Deliberately no "nodejs_compat": nothing on the Worker's import graph pulls
+  // a node: builtin (better-auth only does so from its test-utils entry, which
+  // is never imported here), and the polyfill costs bundle size that
+  // scripts/check-worker-bundle-size.mjs would then have to carry forever.
+  "compatibility_flags": [],
+
+  /*
+   * Asset-first routing (Workers Static Assets, not the legacy Workers Sites).
+   *
+   * Every request is served from the static asset store unless it matches
+   * `run_worker_first`, so the React SPA — the part that must keep working with
+   * no account and no network — never pays for a Worker invocation. Better
+   * Auth mounts itself under /api/auth, so a single /api/* rule covers both the
+   * versioned application API and the auth path.
+   *
+   * `single-page-application` makes unmatched non-asset paths fall back to
+   * index.html, which is what client-side routes such as /register?token=...
+   * need.
+   */
+  "assets": {
+    "directory": "./dist/client",
+    "binding": "ASSETS",
+    "html_handling": "auto-trailing-slash",
+    "not_found_handling": "single-page-application",
+    "run_worker_first": ["/api/*"]
+  },
+
+  /*
+   * D1 holds the structured index only: users, runs, immutable analysis
+   * revisions, headline metrics, poster bookkeeping, quotas and the audit log.
+   * Time series never land here — a 20 s run at 1 kHz is 20,000 samples per
+   * channel, and that belongs in R2 as one snapshot object.
+   *
+   * database_id must be replaced with the id printed by `wrangler d1 create
+   * aat-db` for the target account. It is an account-scoped identifier, not a
+   * secret, so it is committed rather than injected — but this repository has
+   * never been deployed, so the placeholder below is intentionally invalid and
+   * a deploy fails loudly rather than writing to some other account's database.
+   */
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "aat-db",
+      "database_id": "00000000-0000-0000-0000-000000000000",
+      "migrations_dir": "migrations"
+    }
+  ],
+
+  /*
+   * Private bucket. There is no public R2 URL and no signed-URL issuance:
+   * every read goes through the Worker so ownership is checked on the way out.
+   */
+  "r2_buckets": [
+    {
+      "binding": "AAT_OBJECTS",
+      "bucket_name": "aat-objects"
+    }
+  ],
+
+  /*
+   * The poster renderer container, reached through a Durable Object stub.
+   *
+   * Both of the following are cost guards, not performance tuning — see
+   * docs/cost-controls.md:
+   *
+   *  - "max_instances": 1 caps the blast radius of a render storm. AAT renders
+   *    one poster per analysis; a second instance would only ever exist because
+   *    something is looping, and paying for that loop is the failure mode this
+   *    project cannot afford. The Worker returns POSTER_BUSY as backpressure
+   *    instead of queueing work behind a scaling container fleet.
+   *
+   *  - the sleep-after timeout lives in the Durable Object class
+   *    (POSTER_RENDERER_SLEEP_AFTER_MS in worker/container/poster-renderer.ts),
+   *    because Wrangler's container schema has no sleepAfter field — it is a
+   *    property of the container class in @cloudflare/containers, which this
+   *    project does not depend on. A container that stays warm between the two
+   *    posters a researcher generates in a day is a container being billed for
+   *    a day, so it is deliberately short.
+   *
+   * "instance_type": "lite" is the smallest shape available. Matplotlib Agg
+   * rendering a 10.6x3.4in figure at 300 dpi fits comfortably.
+   *
+   * The image reference is the account-scoped Cloudflare registry tag: Wrangler
+   * resolves a bare name against registry.cloudflare.com/<account_id>/. CI
+   * builds and tests the image in a credential-free job and pushes it from the
+   * deploy job (see .github/workflows/deploy.yml); Wrangler performs no
+   * environment-variable substitution inside this file, so the tag here and the
+   * tag CI pushes have to be kept in step by hand.
+   */
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "POSTER_RENDERER",
+        "class_name": "PosterRendererContainer"
+      }
+    ]
+  },
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": ["PosterRendererContainer"]
+    }
+  ],
+  "containers": [
+    {
+      "class_name": "PosterRendererContainer",
+      "name": "aat-poster-renderer",
+      "image": "aat-poster-renderer:latest",
+      "max_instances": 1,
+      "instance_type": "lite",
+      "rollout_step_percentage": 100
+    }
+  ],
+
+  /*
+   * Non-secret tunables. Anything that would identify the deployment (hostname,
+   * relying-party id) is a secret instead — see "secrets" below.
+   */
+  "vars": {
+    /** Per-user storage ceiling applied on first use. Cost guard, adjustable per user by an admin. */
+    "AAT_DEFAULT_QUOTA_BYTES": "1073741824",
+    /** Largest accepted analysis snapshot (gzipped). Bounds Worker memory as well as storage. */
+    "AAT_MAX_SNAPSHOT_BYTES": "16777216",
+    /** Largest accepted original CSV backup. */
+    "AAT_MAX_SOURCE_BYTES": "33554432",
+    /** Largest accepted poster PNG returned by the renderer. */
+    "AAT_MAX_POSTER_BYTES": "8388608",
+    /**
+     * How many poster renders may be in flight across the whole deployment.
+     * Matches "max_instances": 1 above — a second concurrent render would queue
+     * inside the container and burn Worker wall-clock waiting for it.
+     */
+    "AAT_MAX_CONCURRENT_RENDERS": "1",
+    /** Seconds after which a poster stuck in 'rendering' is treated as abandoned and retryable. */
+    "AAT_RENDER_STALE_SECONDS": "300",
+    /** Seconds a quota reservation may stay pending before the sweeper reclaims it. */
+    "AAT_RESERVATION_TTL_SECONDS": "900"
+  },
+
+  /*
+   * Declared, never committed. `wrangler dev` warns when one is missing and
+   * `wrangler types` uses this list instead of guessing from .dev.vars.
+   *
+   * AAT_RP_ID is the WebAuthn relying-party id and AAT_TRUSTED_ORIGINS the
+   * exact origins allowed to complete a passkey ceremony. Both are derived from
+   * the production hostname, which is deliberately not in this repository.
+   * Getting the RP ID wrong does not degrade gracefully: every passkey already
+   * registered against the old value stops being offered by the authenticator,
+   * which is indistinguishable from every user losing their credential. The
+   * Worker therefore refuses to start an auth flow when they are absent rather
+   * than inventing a default from the request's Host header, which an attacker
+   * controls.
+   */
+  "secrets": {
+    "required": [
+      "BETTER_AUTH_SECRET",
+      "BETTER_AUTH_URL",
+      "AAT_RP_ID",
+      "AAT_RP_NAME",
+      "AAT_TRUSTED_ORIGINS"
+    ]
+  },
+
+  "observability": {
+    "enabled": true,
+    "head_sampling_rate": 1
+  },
+
+  /*
+   * A runaway request is a runaway bill. Nothing in this Worker legitimately
+   * needs 30 s of CPU: the heavy numerical work happens in the browser, and the
+   * poster render is wall-clock time spent waiting on the container, not CPU.
+   */
+  "limits": {
+    "cpu_ms": 30000
+  }
+}

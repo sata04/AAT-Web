@@ -14,7 +14,7 @@
 import { z } from 'zod'
 import { canonicalStringify, sha256Hex } from './codec.ts'
 import { POSTER_PRESET_VERSIONS, type PosterPresetVersion } from './presets.ts'
-import { decodeSeries, isWellFormedEncodedSeries, type EncodedFloat64Series } from './wire.ts'
+import { decodeSeries, type EncodedFloat64Series, isWellFormedEncodedSeries } from './wire.ts'
 
 // ---------------------------------------------------------------------------------------------
 // Limits
@@ -69,6 +69,7 @@ export const TITLE_MAX_LENGTH = 120
 /** Same run-code shape as `@aat/shared`'s `parseRunFilename` produces: `YYMMDD` plus an optional single lowercase suffix letter. */
 const RUN_CODE_PATTERN = /^\d{6}[a-z]?$/
 
+// biome-ignore lint/suspicious/noControlCharactersInRegex: matching control characters is the point; this pattern rejects them from titles.
 const CONTROL_CHARACTER_PATTERN = /[\u0000-\u001f\u007f]/
 
 export const PosterKindSchema = z.enum(['auto', 'custom'])
@@ -144,7 +145,11 @@ type SeriesKey = 'inner' | 'drag'
  * it contributes (0 if `entry` is absent) so the caller can enforce {@link MAX_PAYLOAD_BYTES}
  * across every series at once.
  */
-function validateSeriesEntry(key: SeriesKey, entry: PosterSeriesData | undefined, ctx: z.RefinementCtx): number {
+function validateSeriesEntry(
+  key: SeriesKey,
+  entry: PosterSeriesData | undefined,
+  ctx: z.RefinementCtx,
+): number {
   if (!entry) return 0
   const { time, values } = entry
 

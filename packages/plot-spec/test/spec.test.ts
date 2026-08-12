@@ -213,7 +213,7 @@ describe('PosterPlotSpecSchema: rejection rules', () => {
     const input = {
       ...base,
       data: {
-        ...(base['data'] as Record<string, unknown>),
+        ...(base.data as Record<string, unknown>),
         inner: { ...buildSeriesData([0, 0.1], [1, 2]), extra: true },
       },
     }
@@ -227,7 +227,9 @@ describe('PosterPlotSpecSchema: rejection rules', () => {
   })
 
   it('rejects an unknown posterPresetVersion', () => {
-    expect(safeParsePosterPlotSpec(validSpecInput({ posterPresetVersion: 'aat-poster-v2' })).success).toBe(false)
+    expect(safeParsePosterPlotSpec(validSpecInput({ posterPresetVersion: 'aat-poster-v2' })).success).toBe(
+      false,
+    )
   })
 
   it('rejects a base64 body whose length does not match the declared element count', () => {

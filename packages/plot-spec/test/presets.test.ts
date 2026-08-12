@@ -66,9 +66,9 @@ describe('aat-poster-v1: frozen desktop-compatible constants', () => {
     expect(Object.isFrozen(AAT_POSTER_V1_PRESET.lines.innerMean)).toBe(true)
     expect(Object.isFrozen(AAT_POSTER_V1_PRESET.watermark)).toBe(true)
     expect(() => {
-      // ESM runs in strict mode, so assigning into a frozen object throws a TypeError at runtime
-      // (TypeScript's own type for `figure.faceColor` is mutable `string`, so this is not a type error).
-      AAT_POSTER_V1_PRESET.figure.faceColor = '#000000'
+      // AAT_POSTER_V1_PRESET is typed DeepReadonly, so this is a compile error too — the cast
+      // proves the point at the type level while still exercising the runtime freeze below.
+      ;(AAT_POSTER_V1_PRESET.figure as { faceColor: string }).faceColor = '#000000'
     }).toThrow()
   })
 

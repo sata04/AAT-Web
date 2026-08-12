@@ -43,7 +43,7 @@ import {
 } from '@aat/analysis-core'
 import type { AnalysisConfig } from '@aat/shared'
 import { configHash, sha256Hex } from '@aat/shared'
-import { readCache, writeCache } from '../cache/analysis-cache.ts'
+import { readCache, sha256Hex as sha256Bytes, writeCache } from '../cache/analysis-cache.ts'
 import { ANALYSIS_ENGINE_VERSION } from '../app/version.ts'
 import { proposeMapping } from './mapping.ts'
 import type {
@@ -160,24 +160,13 @@ function reportError(requestId: string, error: unknown): void {
   scope.postMessage(message)
 }
 
-/**
- * `SHA-256` of the source bytes.
- *
- * Content, not filename or timestamp: a renamed file is the same data and a
- * touched file is not different data. The same digest identifies the retained
- * table, the cache entry and the cloud snapshot's provenance.
- */
-async function hashSource(bytes: Uint8Array): Promise<string> {
-  const digest = await crypto.subtle.digest('SHA-256', bytes)
-  return Array.from(new Uint8Array(digest))
-    .map((byte) => byte.toString(16).padStart(2, '0'))
-    .join('')
-}
-
 async function handleOpen(request: OpenRequest): Promise<void> {
   const bytes = new Uint8Array(request.bytes)
   progress(request.requestId, 'decoding', 5)
-  const sourceSha256 = await hashSource(bytes)
+  // Content-addressed, via Web Crypto: a renamed file is the same data and a
+  // touched file is not different data. The same digest identifies the retained
+  // table, the cache entry and the cloud snapshot's provenance.
+  const sourceSha256 = await sha256Bytes(bytes)
 
   const { text, encoding } = decodeCsv(bytes)
   progress(request.requestId, 'parsing', 20)
@@ -272,22 +261,25 @@ function readFilteredAcceleration(
   return slice
 }
 
-const EMPTY_SENSOR: SensorResult = {
-  present: false,
-  time: new Float64Array(0),
-  gravity: new Float64Array(0),
-  filteredTime: new Float64Array(0),
-  filteredGravity: new Float64Array(0),
-  filteredAcceleration: new Float64Array(0),
-  startIndex: null,
-  endIndex: null,
-}
-
+/**
+ * A disabled sensor's slot in the payload.
+ *
+ * Freshly allocated rather than a shared constant. Zero-length buffers are
+ * already excluded from the transfer list, but a module-level constant that
+ * ever did get transferred would be detached for the remaining lifetime of the
+ * worker — a failure mode worth designing out rather than relying on a filter.
+ */
 function emptySensor(): SensorResult {
-  // A fresh object each time: these arrays get transferred, and a shared
-  // constant would be detached on first use. Zero-length buffers are excluded
-  // from the transfer list as well, but the object itself must not be aliased.
-  return { ...EMPTY_SENSOR }
+  return {
+    present: false,
+    time: new Float64Array(0),
+    gravity: new Float64Array(0),
+    filteredTime: new Float64Array(0),
+    filteredGravity: new Float64Array(0),
+    filteredAcceleration: new Float64Array(0),
+    startIndex: null,
+    endIndex: null,
+  }
 }
 
 async function handleAnalyse(request: AnalyseRequest): Promise<void> {

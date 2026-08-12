@@ -14,7 +14,12 @@
  * (an infinite gravity level is never legitimate data, whereas NaN is the documented gap marker).
  */
 
-import { decodeFloat64Array, encodeFloat64Array, expectedBase64Length, STRICT_BASE64_PATTERN } from './codec.ts'
+import {
+  decodeFloat64Array,
+  encodeFloat64Array,
+  expectedBase64Length,
+  STRICT_BASE64_PATTERN,
+} from './codec.ts'
 
 /** A full-resolution numeric series as it appears on the wire. */
 export interface EncodedFloat64Series {
@@ -27,7 +32,9 @@ export interface EncodedFloat64Series {
 /** Encode a numeric series for the wire. `null` entries become `NaN` (see module docs on gaps). */
 export function encodeSeries(values: Float64Array | ReadonlyArray<number | null>): EncodedFloat64Series {
   const float64 =
-    values instanceof Float64Array ? values : Float64Array.from(values, (value) => (value === null ? NaN : value))
+    values instanceof Float64Array
+      ? values
+      : Float64Array.from(values, (value) => (value === null ? NaN : value))
   return { data: encodeFloat64Array(float64), length: float64.length }
 }
 

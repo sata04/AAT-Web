@@ -53,7 +53,11 @@ export const PosterFigureRecordSchema = PosterFigureRecordShape.superRefine((val
   }
   if (value.status === 'ready') {
     if (value.objectSize === 0) {
-      ctx.addIssue({ code: 'custom', message: 'objectSize must be nonzero when status is "ready"', path: ['objectSize'] })
+      ctx.addIssue({
+        code: 'custom',
+        message: 'objectSize must be nonzero when status is "ready"',
+        path: ['objectSize'],
+      })
     }
     if (value.objectSha256 === '') {
       ctx.addIssue({

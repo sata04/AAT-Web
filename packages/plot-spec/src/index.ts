@@ -6,30 +6,20 @@
  */
 
 export {
-  DPI_MAX,
-  DPI_MIN,
-  FIGURE_DIMENSION_MAX_INCHES,
-  FIGURE_DIMENSION_MIN_INCHES,
-  MAX_PAYLOAD_BYTES,
-  MAX_POINTS,
-  parsePosterPlotSpec,
-  PosterKindSchema,
-  PosterPlotSpecSchema,
-  PosterPresetVersionSchema,
-  safeParsePosterPlotSpec,
-  SeriesSelectionSchema,
-  specHash,
-  TITLE_MAX_LENGTH,
-} from './spec.ts'
-export type { EncodedFloat64Series, PosterKind, PosterPlotSpec, PosterSeriesData, SeriesSelection } from './spec.ts'
-
+  base64ToBytes,
+  bytesToBase64,
+  canonicalStringify,
+  decodeFloat64Array,
+  encodeFloat64Array,
+  sha256Hex,
+} from './codec.ts'
+export type { PosterFigureRecord, PosterFigureStatus } from './poster-record.ts'
 export {
-  AAT_POSTER_V1_PRESET,
-  getPosterPreset,
-  POSTER_PRESET_VERSIONS,
-  POSTER_PRESETS,
-  posterPresetContentHash,
-} from './presets.ts'
+  PosterFigureRecordSchema,
+  PosterFigureStatusSchema,
+  parsePosterFigureRecord,
+  safeParsePosterFigureRecord,
+} from './poster-record.ts'
 export type {
   PosterDefaultsSpec,
   PosterLabelsSpec,
@@ -38,15 +28,35 @@ export type {
   PosterPresetVersion,
   PosterWatermarkSpec,
 } from './presets.ts'
-
 export {
-  parsePosterFigureRecord,
-  PosterFigureRecordSchema,
-  PosterFigureStatusSchema,
-  safeParsePosterFigureRecord,
-} from './poster-record.ts'
-export type { PosterFigureRecord, PosterFigureStatus } from './poster-record.ts'
-
-export { base64ToBytes, bytesToBase64, canonicalStringify, decodeFloat64Array, encodeFloat64Array, sha256Hex } from './codec.ts'
+  AAT_POSTER_V1_PRESET,
+  getPosterPreset,
+  POSTER_PRESET_VERSIONS,
+  POSTER_PRESETS,
+  posterPresetContentHash,
+} from './presets.ts'
+export type {
+  EncodedFloat64Series,
+  PosterKind,
+  PosterPlotSpec,
+  PosterSeriesData,
+  SeriesSelection,
+} from './spec.ts'
+export {
+  DPI_MAX,
+  DPI_MIN,
+  FIGURE_DIMENSION_MAX_INCHES,
+  FIGURE_DIMENSION_MIN_INCHES,
+  MAX_PAYLOAD_BYTES,
+  MAX_POINTS,
+  PosterKindSchema,
+  PosterPlotSpecSchema,
+  PosterPresetVersionSchema,
+  parsePosterPlotSpec,
+  SeriesSelectionSchema,
+  safeParsePosterPlotSpec,
+  specHash,
+  TITLE_MAX_LENGTH,
+} from './spec.ts'
 
 export { decodeSeries, encodeSeries, isWellFormedEncodedSeries } from './wire.ts'
