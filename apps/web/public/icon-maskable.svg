@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="AAT">
+  <title>AAT</title>
+  <!-- Maskable: artwork stays inside the 40% safe zone so no platform mask clips it. -->
+  <rect width="64" height="64" fill="#0D1117" />
+  <path
+    d="M16 26 H22 L24 40 L26 18 L28 32 H36 L38 24 L40 42 H48"
+    fill="none"
+    stroke="#58A6FF"
+    stroke-width="3"
+    stroke-linecap="round"
+    stroke-linejoin="round"
+  />
+</svg>

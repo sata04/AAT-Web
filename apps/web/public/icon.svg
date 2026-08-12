@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="AAT">
+  <title>AAT</title>
+  <rect width="64" height="64" rx="12" fill="#0D1117" />
+  <!-- A drop-tower trace: quiet baseline, release transient, microgravity, recapture. -->
+  <path
+    d="M6 20 H18 L21 44 L24 12 L27 34 H38 L41 20 L44 46 H58"
+    fill="none"
+    stroke="#58A6FF"
+    stroke-width="3.5"
+    stroke-linecap="round"
+    stroke-linejoin="round"
+  />
+  <line x1="6" y1="54" x2="58" y2="54" stroke="#2D343C" stroke-width="2" stroke-linecap="round" />
+</svg>

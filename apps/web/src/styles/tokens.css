@@ -1,0 +1,128 @@
+/*
+ * Design tokens, carried over from `gui/styles.py`.
+ *
+ * The desktop file states the intent and it holds here unchanged: a quiet
+ * instrument panel for long analysis sessions. Chrome stays thin and
+ * low-contrast so the plot and the numbers carry the visual weight; the accent
+ * colour is spent only on state (checked / focused / active), never on
+ * decoration; spacing follows a 4px grid and radii stay small so the app reads
+ * as a native tool rather than a marketing page.
+ *
+ * Colours are `Colors.LIGHT_*` and `Colors.DARK_*` verbatim. The `--graph-*`
+ * values are marked "Frozen (export)" in the desktop source — they are baked
+ * into published figures, so they are copied rather than re-picked.
+ *
+ * Theme selection is by `data-theme` on `<html>`, written before first paint by
+ * the inline script in `index.html`. There is no media-query fallback path in
+ * this file on purpose: one mechanism, one source of truth, no window where the
+ * two disagree.
+ */
+
+:root {
+  /* --- Light theme (the default) --- */
+  --bg-primary: #ffffff;
+  --bg-secondary: #f6f8fa;
+  --bg-tertiary: #ebeff3;
+  --bg-selected: #ddebfb;
+  --accent: #0969da;
+  --accent-variant: #0757ba;
+  --accent-hover: #0862cc;
+  --success: #1a7f37;
+  --warning: #9a6700;
+  --error: #cf222e;
+  --text-primary: #1f2328;
+  --text-secondary: #5c6570;
+  --text-disabled: #8c959f;
+  --border: #dce1e6;
+  --border-strong: #b7bfc7;
+  --border-focus: #0969da;
+  --on-accent: #ffffff;
+
+  --graph-inner: #0969da;
+  --graph-drag: #cf222e;
+  --graph-inner-std: #218bff;
+  --graph-drag-std: #8250df;
+  --graph-span: #0969da;
+  --graph-highlight: #1a7f37;
+
+  /* Overlay tints. Expressed as rgb triples so opacity can vary per use. */
+  --graph-span-rgb: 9, 105, 218;
+  --scrim: rgb(31 35 40 / 38%);
+
+  /* --- Typography. System UI families first, matching the host platform. --- */
+  --font-sans: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', 'Hiragino Sans',
+    'Yu Gothic UI', 'Noto Sans CJK JP', Meiryo, sans-serif;
+  --font-mono: ui-monospace, 'SF Mono', Menlo, Consolas, 'Cascadia Mono', 'Noto Sans Mono',
+    monospace;
+
+  --size-header: 15px;
+  --size-subheader: 13px;
+  --size-body: 13px;
+  --size-small: 11px;
+
+  --weight-bold: 600;
+  --weight-medium: 500;
+  --weight-normal: 400;
+
+  /* --- Spacing: 4px grid, with 2px and 6px available for dense chrome. --- */
+  --space-3xs: 2px;
+  --space-2xs: 4px;
+  --space-xs: 6px;
+  --space-sm: 8px;
+  --space-md: 12px;
+  --space-lg: 16px;
+  --space-xl: 20px;
+  --space-2xl: 24px;
+  --space-3xl: 32px;
+
+  /* --- Radii: desktop chrome, not marketing cards. --- */
+  --radius-inner: 3px;
+  --radius-form: 4px;
+  --radius-panel: 6px;
+  --radius-pill: 10px;
+
+  --control-height: 30px;
+  --transition: 120ms ease;
+}
+
+:root[data-theme='dark'] {
+  --bg-primary: #0d1117;
+  --bg-secondary: #161b22;
+  --bg-tertiary: #21262d;
+  --bg-selected: #1f2a3a;
+  --accent: #58a6ff;
+  --accent-variant: #2f6fd0;
+  --accent-hover: #3b7ee0;
+  --success: #3fb950;
+  --warning: #d29922;
+  --error: #f85149;
+  --text-primary: #e6edf3;
+  --text-secondary: #9da7b3;
+  --text-disabled: #6e7681;
+  --border: #2d343c;
+  --border-strong: #414a54;
+  --border-focus: #58a6ff;
+  --on-accent: #ffffff;
+
+  --graph-inner: #58a6ff;
+  --graph-drag: #f85149;
+  --graph-inner-std: #79c0ff;
+  --graph-drag-std: #d2a8ff;
+  --graph-span: #58a6ff;
+  --graph-highlight: #3fb950;
+
+  --graph-span-rgb: 88, 166, 255;
+  --scrim: rgb(1 4 9 / 62%);
+
+  color-scheme: dark;
+}
+
+:root[data-theme='light'] {
+  color-scheme: light;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  :root {
+    --transition: 0ms;
+  }
+}
