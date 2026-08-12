@@ -47,7 +47,6 @@ from .limits import (
     SERIES_DATA_KEYS,
     SERIES_SELECTIONS,
     SPEC_ALLOWED_KEYS,
-    SPEC_OPTIONAL_KEYS,
     SPEC_REQUIRED_KEYS,
     STRICT_BASE64_PATTERN,
     TITLE_MAX_LENGTH,
@@ -432,7 +431,6 @@ def validate_spec(value: Any) -> PosterPlotSpec:
 __all__ = [
     "PosterPlotSpec",
     "SeriesArrays",
-    "SPEC_OPTIONAL_KEYS",
     "parse_request_json",
     "validate_spec",
 ]

@@ -1,215 +1,193 @@
 /**
- * Min/max-per-pixel decimation, for rendering only.
+ * Min/max-per-column decimation, for rendering only.
  *
  * A 20-second run at 1 kHz is 20,000 samples drawn onto maybe 1,200 device
  * pixels. Handing all of them to Canvas is wasted work — but *which* samples are
  * dropped decides whether the picture is still true. Stride sampling (take every
  * nth) silently deletes the release shock and any single-sample spike, which in
- * this application is exactly the feature an operator is looking for. Taking the
- * minimum and the maximum of each pixel column instead preserves the vertical
- * envelope: every extreme survives, at the pixel where it happened.
+ * this application is precisely the feature an operator is looking for. Taking
+ * the minimum and the maximum of each pixel column instead preserves the
+ * vertical envelope: every extreme survives, in the column where it happened.
+ *
+ * Decimation is onto a **shared time grid** rather than onto each sensor's own
+ * samples, for a structural reason: uPlot draws every series against one x
+ * array, and in AAT the Inner Capsule and the Drag Shield carry *different* time
+ * axes (each is zeroed at its own sync point). Without a common grid the two
+ * sensors could not be drawn on one plot at all.
  *
  * The result is a {@link DisplaySeries}, whose arrays are plain `Float64Array`
  * and therefore not assignable to `FullResolutionArray` (see
  * `src/analysis/series.ts`). That is the whole point: nothing that computes a
  * published number will accept this value.
+ *
+ * One honest limitation: the column scan assumes an ascending time axis. AAT
+ * only *warns* about a non-monotonic axis rather than rejecting it, so such a
+ * recording draws approximately. It never computes approximately — statistics,
+ * G-quality, range statistics and every export read the full-resolution arrays,
+ * which this module cannot reach.
  */
 
 import type { FullResolutionArray } from '../analysis/series.ts'
 
 declare const DISPLAY_SERIES: unique symbol
 
+/** The shared x axis every trace on one plot is decimated onto. */
+export interface DisplayGrid {
+  /** Two positions per column, so a column can show both its extremes. */
+  readonly x: Float64Array
+  readonly columns: number
+  readonly xMin: number
+  readonly xMax: number
+}
+
 /**
- * Samples prepared for drawing, and for nothing else.
+ * Values prepared for drawing, and for nothing else.
  *
- * Deliberately not a bare pair of arrays: the nominal marker means a
- * `DisplaySeries` cannot be mistaken for a sensor series anywhere, and its `x` /
- * `y` are unbranded so they cannot reach a statistics or export call either.
+ * Deliberately not a bare array: the nominal marker means a `DisplaySeries`
+ * cannot be mistaken for a sensor series anywhere, and `y` is unbranded so it
+ * cannot reach a statistics or export call either.
  */
 export interface DisplaySeries {
   readonly [DISPLAY_SERIES]: true
-  /** Time axis of the points to draw, ascending. */
-  readonly x: Float64Array
-  /** Values to draw. May contain NaN, which uPlot renders as a gap. */
+  /** Aligned to `grid.x`; NaN marks a position this sensor did not measure. */
   readonly y: Float64Array
-  /** How many source samples this was built from. */
+  readonly grid: DisplayGrid
+  /** How many source samples fell inside the grid's range. */
   readonly sourceLength: number
-  /** False when the source already fitted the target width and was copied as-is. */
-  readonly decimated: boolean
 }
 
-function makeDisplaySeries(
-  x: Float64Array,
-  y: Float64Array,
-  sourceLength: number,
-  decimated: boolean,
-): DisplaySeries {
-  return { [DISPLAY_SERIES]: true, x, y, sourceLength, decimated }
+/** Fewer columns than this is not a plot; more than a screen's width is waste. */
+const MIN_COLUMNS = 2
+const MAX_COLUMNS = 8192
+
+/**
+ * Build the shared grid for a viewport.
+ *
+ * Each column contributes two x positions, at a quarter and three quarters
+ * across it. Placing them inside the column rather than on its edges keeps
+ * consecutive columns from sharing an x value, which would make two distinct
+ * samples collapse into one vertical line.
+ */
+export function buildDisplayGrid(xMin: number, xMax: number, columns: number): DisplayGrid {
+  const safeColumns = Math.min(MAX_COLUMNS, Math.max(MIN_COLUMNS, Math.floor(columns)))
+  // A degenerate range would divide by zero; widen it to something drawable.
+  const span = xMax > xMin ? xMax - xMin : 1
+  const start = xMax > xMin ? xMin : xMin - 0.5
+  const step = span / safeColumns
+
+  const x = new Float64Array(safeColumns * 2)
+  for (let column = 0; column < safeColumns; column++) {
+    x[column * 2] = start + (column + 0.25) * step
+    x[column * 2 + 1] = start + (column + 0.75) * step
+  }
+  return { x, columns: safeColumns, xMin: start, xMax: start + span }
 }
 
 /**
- * Below this many samples decimation costs more than it saves, and an operator
- * zoomed into a few hundred points wants to see the actual samples.
- */
-const DECIMATION_FLOOR = 2
-
-/**
- * Decimate `values` against `time` for a target pixel width.
+ * Decimate one sensor's samples onto a grid.
  *
- * `targetPoints` is the number of pixel columns available. Each column
- * contributes at most two points — its minimum and its maximum — emitted in the
- * order they occur in the source so the polyline never doubles back on itself.
- *
- * Non-finite samples are carried through as NaN rather than dropped: a dropout
- * must read as a gap in the trace, not as a straight line bridging it.
+ * Per column: the minimum and the maximum of the samples that fall inside it.
+ * A column with no samples is filled by interpolating between its neighbours
+ * when it sits inside the sensor's measured span, and left as NaN when it does
+ * not. That distinction is what keeps two different things looking different —
+ * a zoomed-in view where the grid is finer than the sampling interval draws a
+ * continuous line, while a genuine dropout, or the region beyond a sensor's
+ * data, stays visibly empty.
  */
-export function decimateForDisplay(
+export function decimateToGrid(
+  grid: DisplayGrid,
   time: FullResolutionArray,
   values: FullResolutionArray,
-  targetPoints: number,
 ): DisplaySeries {
+  const y = new Float64Array(grid.x.length).fill(Number.NaN)
   const length = Math.min(time.length, values.length)
-  if (length === 0) return makeDisplaySeries(new Float64Array(0), new Float64Array(0), 0, false)
+  if (length === 0) return { [DISPLAY_SERIES]: true, y, grid, sourceLength: 0 }
 
-  const columns = Math.max(DECIMATION_FLOOR, Math.floor(targetPoints))
+  const step = (grid.xMax - grid.xMin) / grid.columns
+  let cursor = 0
+  let counted = 0
 
-  // Two points per column is the budget, so anything at or under that is already
-  // drawable exactly. Copy rather than alias: the caller owns full-resolution
-  // buffers whose lifetime is not tied to this frame.
-  if (length <= columns * 2) {
-    return makeDisplaySeries(time.slice(0, length), values.slice(0, length), length, false)
-  }
+  // Skip samples before the viewport, remembering the last one so the first
+  // visible column can interpolate back to it instead of starting mid-air.
+  while (cursor < length && (time[cursor] as number) < grid.xMin) cursor++
+  let previousIndex = cursor > 0 ? cursor - 1 : -1
 
-  const outX = new Float64Array(columns * 2)
-  const outY = new Float64Array(columns * 2)
-  let written = 0
+  for (let column = 0; column < grid.columns; column++) {
+    const columnEnd = grid.xMin + (column + 1) * step
 
-  for (let column = 0; column < columns; column++) {
-    // Bucket bounds computed from the column index rather than accumulated, so
-    // rounding cannot drift and leave the tail of the series unvisited.
-    const start = Math.floor((column * length) / columns)
-    const end = Math.floor(((column + 1) * length) / columns)
-    if (end <= start) continue
-
-    let minIndex = -1
-    let maxIndex = -1
     let minValue = Number.POSITIVE_INFINITY
     let maxValue = Number.NEGATIVE_INFINITY
-    let sawGap = false
+    let found = false
 
-    for (let index = start; index < end; index++) {
-      const value = values[index] as number
-      if (!Number.isFinite(value)) {
-        sawGap = true
-        continue
+    while (cursor < length && (time[cursor] as number) < columnEnd) {
+      const value = values[cursor] as number
+      if (Number.isFinite(value)) {
+        if (value < minValue) minValue = value
+        if (value > maxValue) maxValue = value
+        found = true
+        counted++
       }
-      if (value < minValue) {
-        minValue = value
-        minIndex = index
-      }
-      if (value > maxValue) {
-        maxValue = value
-        maxIndex = index
-      }
+      previousIndex = cursor
+      cursor++
     }
 
-    if (minIndex < 0) {
-      // The whole column is missing data. One NaN keeps the gap visible at the
-      // right place without pretending to know a value for it.
-      outX[written] = time[start] as number
-      outY[written] = Number.NaN
-      written++
+    if (found) {
+      y[column * 2] = minValue
+      y[column * 2 + 1] = maxValue
       continue
     }
 
-    // Emit in source order: drawing max-then-min for a column whose minimum came
-    // first would tilt the vertical stroke the wrong way.
-    const firstIndex = Math.min(minIndex, maxIndex)
-    const secondIndex = Math.max(minIndex, maxIndex)
+    // No sample landed here. Interpolate only between two real samples that
+    // bracket the column — never extrapolate past the ends of the data.
+    const nextIndex = nextFiniteIndex(time, values, cursor, length)
+    const priorIndex = previousFiniteIndex(time, values, previousIndex)
+    if (priorIndex < 0 || nextIndex < 0) continue
 
-    outX[written] = time[firstIndex] as number
-    outY[written] = values[firstIndex] as number
-    written++
-
-    if (secondIndex !== firstIndex) {
-      outX[written] = time[secondIndex] as number
-      outY[written] = values[secondIndex] as number
-      written++
-    }
-
-    if (sawGap) {
-      // A column that held both real samples and dropouts still has to show the
-      // dropout, otherwise a run with intermittent data reads as continuous.
-      const gapTime = time[end - 1] as number
-      if (gapTime > (outX[written - 1] as number)) {
-        outX[written] = gapTime
-        outY[written] = Number.NaN
-        written++
-      }
+    const x0 = time[priorIndex] as number
+    const x1 = time[nextIndex] as number
+    const v0 = values[priorIndex] as number
+    const v1 = values[nextIndex] as number
+    const denominator = x1 - x0
+    for (const slot of [0, 1] as const) {
+      const at = grid.x[column * 2 + slot] as number
+      y[column * 2 + slot] = denominator === 0 ? v0 : v0 + ((at - x0) / denominator) * (v1 - v0)
     }
   }
 
-  return makeDisplaySeries(outX.slice(0, written), outY.slice(0, written), length, true)
+  return { [DISPLAY_SERIES]: true, y, grid, sourceLength: counted }
+}
+
+function nextFiniteIndex(
+  time: Float64Array,
+  values: Float64Array,
+  from: number,
+  length: number,
+): number {
+  for (let index = from; index < length; index++) {
+    if (Number.isFinite(values[index] as number) && Number.isFinite(time[index] as number)) return index
+  }
+  return -1
+}
+
+function previousFiniteIndex(time: Float64Array, values: Float64Array, from: number): number {
+  for (let index = from; index >= 0; index--) {
+    if (Number.isFinite(values[index] as number) && Number.isFinite(time[index] as number)) return index
+  }
+  return -1
 }
 
 /**
- * Decimate only the part of the series inside `[xMin, xMax]`.
+ * How many columns a viewport of `pixelWidth` device pixels deserves.
  *
- * Zooming in must add detail. Decimating the whole run and then letting uPlot
- * clip would keep the zoomed view at the resolution of the full view, which is
- * the classic way a min/max plot looks blocky no matter how far you zoom.
- *
- * The window is widened by one sample on each side so the line still meets the
- * edges of the viewport instead of stopping short of them.
+ * One column per pixel is the honest ceiling — a second point in the same pixel
+ * cannot be seen. Anything finer costs memory and draw time to produce a picture
+ * identical to the coarser one.
  */
-export function decimateWindowForDisplay(
-  time: FullResolutionArray,
-  values: FullResolutionArray,
-  xMin: number,
-  xMax: number,
-  targetPoints: number,
-): DisplaySeries {
-  const length = Math.min(time.length, values.length)
-  if (length === 0) return decimateForDisplay(time, values, targetPoints)
-
-  const start = Math.max(0, lowerBound(time, length, xMin) - 1)
-  const end = Math.min(length, upperBound(time, length, xMax) + 1)
-  if (end - start >= length) return decimateForDisplay(time, values, targetPoints)
-  if (end <= start) return decimateForDisplay(time, values, targetPoints)
-
-  // `subarray` views the same buffer, so no copy is made for the common case of
-  // panning across a large run. The brand is preserved because these samples are
-  // still every original sample in the window.
-  const windowTime = time.subarray(start, end) as FullResolutionArray
-  const windowValues = values.subarray(start, end) as FullResolutionArray
-  return decimateForDisplay(windowTime, windowValues, targetPoints)
-}
-
-/** First index whose time is >= `x`, assuming an ascending axis. */
-function lowerBound(time: Float64Array, length: number, x: number): number {
-  let low = 0
-  let high = length
-  while (low < high) {
-    const middle = (low + high) >>> 1
-    if ((time[middle] as number) < x) low = middle + 1
-    else high = middle
-  }
-  return low
-}
-
-/** First index whose time is > `x`, assuming an ascending axis. */
-function upperBound(time: Float64Array, length: number, x: number): number {
-  let low = 0
-  let high = length
-  while (low < high) {
-    const middle = (low + high) >>> 1
-    if ((time[middle] as number) <= x) low = middle + 1
-    else high = middle
-  }
-  return low
+export function columnsForWidth(pixelWidth: number): number {
+  return Math.max(MIN_COLUMNS, Math.min(MAX_COLUMNS, Math.round(pixelWidth)))
 }
 
 /** Read-only accessor for the drawing layer. Nothing else should need this. */
-export function displayPoints(series: DisplaySeries): { x: Float64Array; y: Float64Array } {
-  return { x: series.x, y: series.y }
+export function displayValues(series: DisplaySeries): Float64Array {
+  return series.y
 }
