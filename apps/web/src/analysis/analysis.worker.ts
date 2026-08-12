@@ -403,6 +403,7 @@ async function handleAnalyse(request: AnalyseRequest): Promise<void> {
     inner,
     drag,
     sync: loaded.sync,
+    filterEndIndex: filtered.endIndex,
     statistics,
     gQuality: gQuality.rows,
     gQualityComputed: !request.skipGQuality,

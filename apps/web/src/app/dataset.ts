@@ -22,6 +22,10 @@ export interface SensorDataset {
   readonly filteredGravity: FullResolutionArray
   /** Full-length acceleration in m/s^2 on this sensor's sync-adjusted axis. */
   readonly acceleration: FullResolutionArray
+  /** Index of the first retained sample in the unfiltered series; null when empty. */
+  readonly startIndex: number | null
+  /** Index of the last retained sample in the unfiltered series; null when empty. */
+  readonly endIndex: number | null
 }
 
 export interface Dataset {
@@ -35,6 +39,8 @@ export interface Dataset {
   readonly inner: SensorDataset
   readonly drag: SensorDataset
   readonly sync: SyncResult
+  /** The later of the two sensors' end indices, or -1 when neither had data. */
+  readonly filterEndIndex: number
   readonly statistics: { readonly inner: WindowStatistics; readonly drag: WindowStatistics }
   readonly gQuality: readonly GQualityRow[]
   readonly gQualityComputed: boolean
@@ -59,6 +65,8 @@ function toSensorDataset(sensor: AnalysisPayload['inner']): SensorDataset {
     filteredTime: asFullResolution(sensor.filteredTime),
     filteredGravity: asFullResolution(sensor.filteredGravity),
     acceleration: asFullResolution(sensor.acceleration),
+    startIndex: sensor.startIndex,
+    endIndex: sensor.endIndex,
   }
 }
 
@@ -73,6 +81,7 @@ export function datasetFromPayload(payload: AnalysisPayload, fromCache: boolean)
     inner: toSensorDataset(payload.inner),
     drag: toSensorDataset(payload.drag),
     sync: payload.sync,
+    filterEndIndex: payload.filterEndIndex,
     statistics: payload.statistics,
     gQuality: payload.gQuality,
     gQualityComputed: payload.gQualityComputed,

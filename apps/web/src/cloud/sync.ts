@@ -68,13 +68,15 @@ export async function buildSnapshot(
       dragCandidateCount: dataset.sync.dragCandidateCount,
     },
     filter: {
-      endIndex: dataset.inner.filteredTime.length > 0 || dataset.drag.filteredTime.length > 0 ? 0 : null,
+      // -1 means "neither sensor had data" in the engine; null is how the
+      // snapshot format spells the same thing.
+      endIndex: dataset.filterEndIndex >= 0 ? dataset.filterEndIndex : null,
       innerLength: dataset.inner.filteredGravity.length,
       dragLength: dataset.drag.filteredGravity.length,
-      innerStartIndex: null,
-      innerEndIndex: null,
-      dragStartIndex: null,
-      dragEndIndex: null,
+      innerStartIndex: dataset.inner.startIndex,
+      innerEndIndex: dataset.inner.endIndex,
+      dragStartIndex: dataset.drag.startIndex,
+      dragEndIndex: dataset.drag.endIndex,
     },
     warnings: dataset.warnings.map((warning) => warning.code),
     series: {

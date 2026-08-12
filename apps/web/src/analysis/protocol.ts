@@ -127,6 +127,8 @@ export interface AnalysisPayload {
   inner: SensorResult
   drag: SensorResult
   sync: SyncResult
+  /** `FilterResult.endIndex`: the later of the two sensors' end indices, or -1. */
+  filterEndIndex: number
   statistics: { inner: WindowStatistics; drag: WindowStatistics }
   gQuality: GQualityRow[]
   gQualityComputed: boolean

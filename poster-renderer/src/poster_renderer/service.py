@@ -80,6 +80,10 @@ class PosterRequestHandler(BaseHTTPRequestHandler):
     def _config(self) -> ServiceConfig:
         return self.server.config  # type: ignore[attr-defined]
 
+    def version_string(self) -> str:
+        """The `Server` header. The default appends "Python/3.12.3"; disclosure with no upside."""
+        return self.server_version
+
     def log_message(self, format: str, *args: Any) -> None:
         """Silence `http.server`'s stderr logging; this service logs its own structured lines."""
 
