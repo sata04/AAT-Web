@@ -8,10 +8,10 @@
  * way arrives collected in one place for the provenance record.
  */
 
-import { detectColumns, type DetectedColumns } from './columns.ts'
+import { type DetectedColumns, detectColumns } from './columns.ts'
 import type { AnalysisConfig } from './config.ts'
+import { type CsvTable, parseCsvText } from './csv.ts'
 import { type CsvEncoding, decodeCsv } from './decode.ts'
-import { CsvTable, parseCsvText } from './csv.ts'
 import { calculateGQuality, type GQualityProgress, type GQualityResult } from './gquality.ts'
 import { type FilterResult, filterData, type LoadedData, loadAndProcessData } from './pipeline.ts'
 import { calculateStatistics, EMPTY_WINDOW_STATISTICS, type WindowStatistics } from './statistics.ts'

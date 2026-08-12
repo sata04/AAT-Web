@@ -190,11 +190,10 @@ export function toNumericColumn(column: CsvColumn): NumericColumn {
   }
 
   if (length > 0 && numericCount === 0) {
-    throw new DataProcessingError(
-      'COLUMN_NOT_NUMERIC',
-      `Column '${column.name}' contains no numeric data.`,
-      { column: column.name, rows: length },
-    )
+    throw new DataProcessingError('COLUMN_NOT_NUMERIC', `Column '${column.name}' contains no numeric data.`, {
+      column: column.name,
+      rows: length,
+    })
   }
 
   return { values, missingCount, coercedCount }

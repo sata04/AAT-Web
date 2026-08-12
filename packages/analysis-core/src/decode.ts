@@ -53,7 +53,10 @@ export function decodeCsv(bytes: Uint8Array): DecodedCsv {
 
   const shiftJis = decodeWith(bytes, 'shift_jis')
   if (shiftJis !== null) {
-    return { text: shiftJis.startsWith(BYTE_ORDER_MARK) ? shiftJis.slice(1) : shiftJis, encoding: 'shift_jis' }
+    return {
+      text: shiftJis.startsWith(BYTE_ORDER_MARK) ? shiftJis.slice(1) : shiftJis,
+      encoding: 'shift_jis',
+    }
   }
 
   throw new CsvDecodeError(

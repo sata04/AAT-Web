@@ -178,9 +178,9 @@ export function calculateStatistics(
   const validMask = new Uint8Array(gravity.length)
   let anyValid = false
   for (let index = 0; index < gravity.length; index++) {
-    const isFinite = Number.isFinite(gravity[index] as number)
-    validMask[index] = isFinite ? 1 : 0
-    if (isFinite) anyValid = true
+    const finite = Number.isFinite(gravity[index] as number)
+    validMask[index] = finite ? 1 : 0
+    if (finite) anyValid = true
   }
   if (!anyValid) return EMPTY_WINDOW_STATISTICS
 

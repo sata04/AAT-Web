@@ -116,9 +116,13 @@ function validateTimeAxis(time: Float64Array, config: AnalysisConfig): AnalysisW
   }
   if (finiteCount < time.length) {
     warnings.push(
-      warning('TIME_NON_FINITE_SAMPLES', `The time column has ${time.length - finiteCount} unusable sample(s).`, {
-        count: time.length - finiteCount,
-      }),
+      warning(
+        'TIME_NON_FINITE_SAMPLES',
+        `The time column has ${time.length - finiteCount} unusable sample(s).`,
+        {
+          count: time.length - finiteCount,
+        },
+      ),
     )
   }
 
@@ -207,11 +211,7 @@ function findSyncCandidates(values: Float64Array, threshold: number): SyncSearch
   return { index: first, count }
 }
 
-function readSensorColumn(
-  table: CsvTable,
-  columnName: string,
-  warnings: AnalysisWarning[],
-): Float64Array {
+function readSensorColumn(table: CsvTable, columnName: string, warnings: AnalysisWarning[]): Float64Array {
   const column = table.column(columnName) as CsvColumn
   const numeric = toNumericColumn(column)
   if (numeric.coercedCount > 0) warnings.push(coercionWarning(column, numeric.coercedCount))
@@ -301,7 +301,7 @@ export function loadAndProcessData(table: CsvTable, config: AnalysisConfig): Loa
       ? findSyncCandidates(innerAcceleration, threshold)
       : { index: -1, count: 0 }
 
-  let dragIndex = dragSearch.count > 0 ? dragSearch.index : 0
+  const dragIndex = dragSearch.count > 0 ? dragSearch.index : 0
   let innerIndex = innerSearch.count > 0 ? innerSearch.index : 0
   let innerFallback: SyncFallback | null = null
   let dragFallback: SyncFallback | null = null
@@ -309,9 +309,13 @@ export function loadAndProcessData(table: CsvTable, config: AnalysisConfig): Loa
   if (useDrag && dragSearch.count === 0) {
     dragFallback = 'first-sample'
     warnings.push(
-      warning('SYNC_POINT_NOT_FOUND', 'No Drag Shield sample fell below the sync threshold; using sample 0.', {
-        sensor: 'drag',
-      }),
+      warning(
+        'SYNC_POINT_NOT_FOUND',
+        'No Drag Shield sample fell below the sync threshold; using sample 0.',
+        {
+          sensor: 'drag',
+        },
+      ),
     )
   }
   if (useInner && innerSearch.count === 0 && dragSearch.count > 0) {

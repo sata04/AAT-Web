@@ -14,8 +14,8 @@
  */
 
 import type { AnalysisConfig } from './config.ts'
-import { AnalysisSizeError, calculateStatistics, windowSampleCount } from './statistics.ts'
 import type { FilterResult } from './pipeline.ts'
+import { AnalysisSizeError, calculateStatistics, windowSampleCount } from './statistics.ts'
 import { type AnalysisWarning, warning } from './warnings.ts'
 
 export interface GQualityRow {
@@ -137,11 +137,7 @@ export function calculateGQuality(
 
     if (hasInner && innerLength >= windowSamples) {
       try {
-        const statistics = calculateStatistics(
-          filtered.inner.gravity,
-          filtered.inner.time,
-          statisticsConfig,
-        )
+        const statistics = calculateStatistics(filtered.inner.gravity, filtered.inner.time, statisticsConfig)
         innerMean = statistics.mean
         innerStartTime = statistics.startTime
         innerStd = statistics.std
@@ -185,7 +181,11 @@ export function calculateGQuality(
  * would silently blank every point instead of telling the user their
  * configuration is unusable, so those still propagate.
  */
-function oversizedWindowWarning(error: unknown, sensor: 'inner' | 'drag', windowSize: number): AnalysisWarning {
+function oversizedWindowWarning(
+  error: unknown,
+  sensor: 'inner' | 'drag',
+  windowSize: number,
+): AnalysisWarning {
   if (!(error instanceof AnalysisSizeError)) throw error
   return warning(
     'GQUALITY_WINDOW_TOO_LARGE',
