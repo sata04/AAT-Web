@@ -2,20 +2,25 @@
  * A virtual WebAuthn authenticator.
  *
  * The tests exercise the real ceremony end to end — real ECDSA P-256 keys, real CBOR, real DER
- * signatures — rather than stubbing verification out. That matters because the ceremony code in
- * worker/auth/webauthn/ is hand-written (Better Auth 1.6.26 ships no passkey plugin), so it is
- * exactly the code that most needs to be tested against something that behaves like a real
- * authenticator rather than like the parser's own assumptions.
+ * signatures — rather than stubbing verification out. Verification itself is now
+ * `@simplewebauthn/server`'s, reached through `@better-auth/passkey`, so these tests are no longer
+ * proving that a hand-written parser is correct; they are proving that AAT has *configured* that
+ * verifier correctly. A software authenticator that produces genuine attestations and assertions is
+ * what makes "the wrong relying party is refused" an assertion about the deployed configuration
+ * rather than about a mock.
  *
  * What this deliberately mirrors from a real authenticator:
- *  - ES256 signatures, DER-encoded, as every platform authenticator emits them.
- *  - A COSE_Key credential public key inside attested credential data inside a CBOR attestation
- *    object with `fmt: "none"`.
- *  - A signature counter that advances on every assertion.
+ *  - the `RegistrationResponseJSON` / `AuthenticationResponseJSON` shapes the browser's
+ *    `navigator.credentials` API produces once serialised, with base64url fields and `id === rawId`,
+ *  - ES256 signatures, DER-encoded, as every platform authenticator emits them,
+ *  - a COSE_Key credential public key inside attested credential data inside a CBOR attestation
+ *    object with `fmt: "none"`,
+ *  - a signature counter that advances on every assertion,
+ *  - an all-zero AAGUID, which is what a privacy-preserving platform authenticator reports.
  */
 
 /* ------------------------------------------------------------------------------------------- */
-/* Minimal CBOR encoder (the mirror of worker/auth/webauthn/cbor.ts's decoder)                   */
+/* Minimal CBOR encoder                                                                          */
 /* ------------------------------------------------------------------------------------------- */
 
 function encodeHead(majorType: number, argument: number): Uint8Array {
@@ -141,18 +146,36 @@ const FLAG_UP = 0x01
 const FLAG_UV = 0x04
 const FLAG_AT = 0x40
 
-export interface RegistrationResponse {
+/**
+ * `RegistrationResponseJSON`, as `@simplewebauthn/server` expects to receive it. The server checks
+ * `id === rawId` (its way of asserting the client base64url-encoded the credential id) and
+ * `type === 'public-key'` before it looks at anything cryptographic.
+ */
+export interface RegistrationResponseJson {
   id: string
-  clientDataJson: string
-  attestationObject: string
-  transports: string[]
+  rawId: string
+  type: 'public-key'
+  authenticatorAttachment: 'platform'
+  clientExtensionResults: Record<string, never>
+  response: {
+    clientDataJSON: string
+    attestationObject: string
+    transports: string[]
+  }
 }
 
-export interface AssertionResponse {
+/** `AuthenticationResponseJSON`, likewise. */
+export interface AuthenticationResponseJson {
   id: string
-  clientDataJson: string
-  authenticatorData: string
-  signature: string
+  rawId: string
+  type: 'public-key'
+  authenticatorAttachment: 'platform'
+  clientExtensionResults: Record<string, never>
+  response: {
+    clientDataJSON: string
+    authenticatorData: string
+    signature: string
+  }
 }
 
 export class VirtualAuthenticator {
@@ -200,10 +223,12 @@ export class VirtualAuthenticator {
     )
   }
 
-  private clientData(type: 'webauthn.create' | 'webauthn.get', challenge: string): Uint8Array {
-    return new TextEncoder().encode(
-      JSON.stringify({ type, challenge, origin: this.origin, crossOrigin: false }),
-    )
+  private clientData(
+    type: 'webauthn.create' | 'webauthn.get',
+    challenge: string,
+    origin: string,
+  ): Uint8Array {
+    return new TextEncoder().encode(JSON.stringify({ type, challenge, origin, crossOrigin: false }))
   }
 
   private counterBytes(): Uint8Array {
@@ -212,8 +237,17 @@ export class VirtualAuthenticator {
     return bytes
   }
 
-  /** Produce a registration (attestation) response for `challenge`. */
-  async register(challenge: string, options: { userVerified?: boolean } = {}): Promise<RegistrationResponse> {
+  /**
+   * Produce a registration (attestation) response for `challenge`.
+   *
+   * `userVerified: false` models an authenticator that proved only presence — a security key
+   * tapped without a PIN. The credential is otherwise perfectly valid, which is the point: the
+   * server has to notice the missing flag rather than fail for some other reason.
+   */
+  async register(
+    challenge: string,
+    options: { userVerified?: boolean } = {},
+  ): Promise<RegistrationResponseJson> {
     await this.ensureKey()
     this.signCount += 1
 
@@ -241,31 +275,31 @@ export class VirtualAuthenticator {
 
     return {
       id: this.credentialId,
-      clientDataJson: toBase64Url(this.clientData('webauthn.create', challenge)),
-      attestationObject: toBase64Url(attestationObject),
-      transports: ['internal'],
+      rawId: this.credentialId,
+      type: 'public-key',
+      authenticatorAttachment: 'platform',
+      clientExtensionResults: {},
+      response: {
+        clientDataJSON: toBase64Url(this.clientData('webauthn.create', challenge, this.origin)),
+        attestationObject: toBase64Url(attestationObject),
+        transports: ['internal'],
+      },
     }
   }
 
   /** Produce an assertion for `challenge`. `signCountOverride` forges a stalled counter. */
   async authenticate(
     challenge: string,
-    options: { signCountOverride?: number; origin?: string } = {},
-  ): Promise<AssertionResponse> {
+    options: { signCountOverride?: number; origin?: string; userVerified?: boolean } = {},
+  ): Promise<AuthenticationResponseJson> {
     const keyPair = await this.ensureKey()
     if (options.signCountOverride === undefined) this.signCount += 1
     else this.signCount = options.signCountOverride
 
-    const authData = concat(await this.rpIdHash(), new Uint8Array([FLAG_UP | FLAG_UV]), this.counterBytes())
+    const flags = FLAG_UP | (options.userVerified === false ? 0 : FLAG_UV)
+    const authData = concat(await this.rpIdHash(), new Uint8Array([flags]), this.counterBytes())
 
-    const clientDataJson = new TextEncoder().encode(
-      JSON.stringify({
-        type: 'webauthn.get',
-        challenge,
-        origin: options.origin ?? this.origin,
-        crossOrigin: false,
-      }),
-    )
+    const clientDataJson = this.clientData('webauthn.get', challenge, options.origin ?? this.origin)
     const clientDataHash = new Uint8Array(
       await crypto.subtle.digest('SHA-256', clientDataJson as BufferSource),
     )
@@ -280,9 +314,15 @@ export class VirtualAuthenticator {
 
     return {
       id: this.credentialId,
-      clientDataJson: toBase64Url(clientDataJson),
-      authenticatorData: toBase64Url(authData),
-      signature: toBase64Url(rawSignatureToDer(raw)),
+      rawId: this.credentialId,
+      type: 'public-key',
+      authenticatorAttachment: 'platform',
+      clientExtensionResults: {},
+      response: {
+        clientDataJSON: toBase64Url(clientDataJson),
+        authenticatorData: toBase64Url(authData),
+        signature: toBase64Url(rawSignatureToDer(raw)),
+      },
     }
   }
 }

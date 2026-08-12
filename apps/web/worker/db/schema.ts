@@ -120,12 +120,14 @@ export const account = sqliteTable(
 )
 
 /**
- * Better Auth's verification table, used here as the store for short-lived single-use values:
- * WebAuthn challenges and registration contexts.
+ * Better Auth's verification table, used as the store for short-lived single-use values — here,
+ * the WebAuthn challenges the passkey plugin issues.
  *
  * It is used rather than a bespoke table because `internalAdapter.consumeVerificationValue()`
  * deletes and returns a row atomically, which is exactly the "exactly one caller may spend this
- * challenge" property a replay-resistant ceremony needs.
+ * challenge" property a replay-resistant ceremony needs. The plugin names the row from a signed
+ * cookie, so a replayed ceremony finds nothing left to consume and is refused without this
+ * project having to implement its own compare-and-delete.
  */
 export const verification = sqliteTable(
   'verification',
@@ -146,15 +148,27 @@ export const verification = sqliteTable(
 /**
  * Registered passkeys (WebAuthn credentials).
  *
- * Column names mirror the shape Better Auth's own passkey plugin uses, so a future migration onto
- * that plugin — once it is a dependency this project can take — is a code change and not a data
- * migration. `publicKey` holds the COSE key exactly as the authenticator produced it, base64url
- * encoded; re-deriving a CryptoKey from it on each assertion is cheap and avoids committing to a
- * WebCrypto-specific import format on disk.
+ * This is the `@better-auth/passkey` plugin's own model, spelled in Drizzle. The plugin writes
+ * every row here through Better Auth's adapter, which resolves a field by indexing this exported
+ * table object with the field name from the plugin's schema — so `publicKey`, `credentialID`,
+ * `deviceType` and `backedUp` are not free-choice names, they are the plugin's. `publicKey` holds
+ * the COSE key exactly as the authenticator produced it, base64 encoded by the plugin;
+ * `transports` is the comma-joined list the plugin stores, not JSON.
  *
  * `counter` is the authenticator's signature counter. A counter that fails to advance on an
- * authenticator that uses them is the documented clone signal, and it is checked on every
- * assertion.
+ * authenticator that uses them is the documented clone signal, and `@simplewebauthn/server` checks
+ * it on every assertion.
+ *
+ * Two deliberate departures from the plugin's schema, both additive so the plugin never notices:
+ *
+ *  - **`credential_id` is UNIQUE**, where the plugin asks only for an index. One credential
+ *    belonging to two accounts is not a state this system should be able to reach, and the
+ *    registration seam refuses it with a clean error before the constraint ever fires. The index
+ *    is the backstop for the case the seam misses.
+ *  - **`last_used_at` exists and is nullable.** The plugin does not maintain it; AAT does, from
+ *    the authentication seam, because "which of my passkeys is stale?" is the question the
+ *    credential-management screen exists to answer. Nullable is what keeps it invisible to the
+ *    plugin: the adapter only ever writes fields the plugin's schema declares.
  */
 export const passkey = sqliteTable(
   'passkey',
@@ -171,7 +185,6 @@ export const passkey = sqliteTable(
     backedUp: integer('backed_up', { mode: 'boolean' }).notNull().default(false),
     transports: text('transports'),
     aaguid: text('aaguid'),
-    algorithm: integer('algorithm').notNull(),
     createdAt: integer('created_at', { mode: 'timestamp' }).notNull(),
     lastUsedAt: integer('last_used_at', { mode: 'timestamp' }),
   },

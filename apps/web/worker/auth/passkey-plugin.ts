@@ -1,41 +1,86 @@
 /**
- * The passkey plugin: invitation redemption, passkey registration and passkey authentication,
- * implemented as Better Auth endpoints.
+ * AAT's integration with the official Better Auth passkey plugin.
  *
- * These live inside Better Auth rather than beside it in Hono so that session issuance goes
- * through `setSessionCookie` — the framework's own signed-cookie path, with its expiry, cookie
- * cache and `dontRememberMe` handling — instead of a second, parallel implementation of session
- * cookies that would inevitably drift from the first.
+ * The WebAuthn protocol is **not** implemented here and must never be again. `@better-auth/passkey`
+ * owns attestation and assertion verification (through `@simplewebauthn/server`), challenge
+ * issuance, the signed challenge cookie, the single-use verification row and the passkey table.
+ * What lives in this file is the part of onboarding that is AAT's and nobody else's: invitations,
+ * the synthetic identity, role assignment, the audit trail, rate limits, and the policy that a
+ * user may not remove the credential that *is* their account.
  *
- * The flow, end to end:
+ * ## The flow, end to end
  *
- *   POST /api/auth/aat/invitation/redeem   { token }
- *        → claims the invitation (race-safe, see auth/invitations.ts)
- *        → issues an opaque registration context and a WebAuthn challenge
- *   POST /api/auth/aat/passkey/register    { registrationContext, credential }
- *        → consumes the challenge, verifies attestation, spends the invitation,
- *          creates the user with a synthetic address, stores the credential, opens a session
- *   POST /api/auth/aat/passkey/authenticate/options  { }
- *        → issues a single-use challenge
- *   POST /api/auth/aat/passkey/authenticate/verify   { challengeId, credential }
- *        → verifies the assertion, advances the signature counter, opens a session
+ *   POST /api/auth/aat/invitation/redeem            { token }
+ *        → claims the invitation (race-safe, see ./invitations.ts) and returns a short-lived
+ *          opaque registration context. This is the only place that context exists in plaintext.
+ *   GET  /api/auth/passkey/generate-register-options?context=<registrationContext>
+ *        → the plugin's endpoint. `registration.requireSession: false` removes its session
+ *          middleware, so `registration.resolveUser` below is asked who is registering; it
+ *          validates the context and answers. The plugin stores the challenge and the context in
+ *          a verification row named by a signed cookie.
+ *   POST /api/auth/passkey/verify-registration      { response }
+ *        → the plugin verifies the attestation, then calls `registration.afterVerification`,
+ *          which is where the invitation is spent, the user created and the session opened.
  *
- * Challenges and registration contexts are stored in Better Auth's `verification` table and read
- * back with `consumeVerificationValue`, which deletes and returns a row atomically. That is what
- * makes a challenge single-use: a replayed ceremony finds nothing to consume and fails, without
- * this code having to implement its own compare-and-delete.
+ * ## Two seams, and why the work is split the way it is
+ *
+ * `resolveUser` runs *before* the user has touched their authenticator. It may only read: it
+ * decides which identity the ceremony is for, and a ceremony that is then abandoned — the user
+ * dismisses the platform prompt, which is a common and blameless thing to do — must leave the
+ * invitation redeemable.
+ *
+ * `afterVerification` runs once the attestation has verified and *before* the plugin writes the
+ * passkey row. That is the only correct place to spend the invitation: earlier and a failed
+ * ceremony burns it, later and there is no way to refuse the write. Inside it the order is fixed
+ * and load-bearing:
+ *
+ *   1. checks that must not consume anything (user verification, duplicate credential, the
+ *      identity the context implies),
+ *   2. `consumeInvitation` — a single conditional UPDATE, so two ceremonies racing one invitation
+ *      have exactly one winner and the loser is refused before it creates anything,
+ *   3. create the user, record the link, audit, open the session,
+ *   4. return, and let the plugin store the credential.
+ *
+ * Throwing at any point in 1 aborts the ceremony with the invitation untouched. Throwing in 2's
+ * losing branch does the same. Only a failure *after* step 2 can burn an invitation without
+ * producing a user, and that is the deliberate trade: the alternative ordering — create the user
+ * first — can produce two users from one invitation, which is unrecoverable.
+ *
+ * ## What this file compensates for in the plugin
+ *
+ *  - **`origin` is configured, never taken from the request.** The plugin falls back to
+ *    `ctx.headers.get('origin')` when `origin` is unset, which would let the caller nominate the
+ *    origin its own ceremony is checked against. `../config.ts` refuses to derive origins from a
+ *    request for exactly this reason, so the configured list is passed explicitly.
+ *  - **User verification is enforced here.** The plugin calls `verifyRegistrationResponse` and
+ *    `verifyAuthenticationResponse` with `requireUserVerification: false`. AAT requires UV — a
+ *    credential that only proves *presence* proves that someone touched the device, not that the
+ *    owner did. `registrationInfo.userVerified` / `authenticationInfo.userVerified` carry the flag,
+ *    so both seams re-impose the requirement rather than losing it.
+ *  - **The ban check.** `POST /passkey/verify-authentication` creates a session without consulting
+ *    `user.banned`; the authentication seam refuses first, so a banned user never gets a cookie.
+ *  - **The last-passkey rule.** `POST /passkey/delete-passkey` will happily delete the only
+ *    credential a user has. With no password and no email that is not a reversible mistake, so a
+ *    `before` hook refuses it.
  */
 
-import { ApiError, buildApiErrorPayload, capabilitiesForRole, type ErrorCode, type Role } from '@aat/shared'
+import { ApiError, buildApiErrorPayload, ERROR_CODES, type ErrorCode } from '@aat/shared'
+import { getAuthenticatorName, passkey } from '@better-auth/passkey'
 import type { BetterAuthPlugin } from 'better-auth'
-import { APIError, createAuthEndpoint } from 'better-auth/api'
+import {
+  APIError,
+  createAuthEndpoint,
+  createAuthMiddleware,
+  getSessionFromCtx,
+  isAPIError,
+} from 'better-auth/api'
 import { setSessionCookie } from 'better-auth/cookies'
-import { and, eq } from 'drizzle-orm'
+import { eq, sql } from 'drizzle-orm'
 import * as z from 'zod'
 import type { WorkerConfig } from '../config.ts'
 import type { Database } from '../db/client.ts'
 import { passkey as passkeyTable, user as userTable } from '../db/schema.ts'
-import { hashToken, newId, newSecretToken } from '../lib/ids.ts'
+import { newId } from '../lib/ids.ts'
 import { writeAuditLog } from '../services/audit.ts'
 import { clientAddress, consumeRateLimit, RATE_LIMITS, rateLimitKey } from '../services/rate-limit.ts'
 import { syntheticEmail } from './identity.ts'
@@ -45,8 +90,11 @@ import {
   recordInvitationUser,
   resolveRegistrationContext,
 } from './invitations.ts'
-import { CeremonyError, newChallenge, verifyAuthentication, verifyRegistration } from './webauthn/ceremony.ts'
-import { OFFERED_ALGORITHMS } from './webauthn/cose.ts'
+
+export interface AatPasskeyOptions {
+  db: Database
+  config: WorkerConfig
+}
 
 /** Translate an AAT error code into the HTTP error Better Auth's router will serialise. */
 function toApiError(code: ErrorCode, details?: Record<string, unknown>): APIError {
@@ -59,51 +107,313 @@ function rethrow(error: unknown): never {
   throw error
 }
 
-/** How long an authentication challenge stays valid. Long enough for a fingerprint, no longer. */
-const AUTHENTICATION_CHALLENGE_TTL_SECONDS = 300
-
-const REGISTER_CHALLENGE_PREFIX = 'aat-webauthn-register:'
-const AUTHENTICATE_CHALLENGE_PREFIX = 'aat-webauthn-authenticate:'
-
-const registrationCredentialSchema = z.object({
-  id: z.string().min(1).max(1400),
-  clientDataJson: z.string().min(1).max(20_000),
-  attestationObject: z.string().min(1).max(40_000),
-  transports: z.array(z.string().max(32)).max(8).optional(),
-})
-
-const authenticationCredentialSchema = z.object({
-  id: z.string().min(1).max(1400),
-  clientDataJson: z.string().min(1).max(20_000),
-  authenticatorData: z.string().min(1).max(10_000),
-  signature: z.string().min(1).max(10_000),
-  userHandle: z.string().max(1400).nullish(),
-})
-
-export interface AatPasskeyOptions {
-  db: Database
-  config: WorkerConfig
+/**
+ * Did this error come from AAT's own seams, or from inside the plugin?
+ *
+ * Both arrive as `APIError`; the difference is the `code`, which is one of the taxonomy's for
+ * everything {@link toApiError} builds and one of `PASSKEY_ERROR_CODES` for everything the plugin
+ * raises. That distinction is what stops the audit hooks from re-reporting a refusal the seam has
+ * already described precisely.
+ */
+function isAatErrorPayload(body: unknown): boolean {
+  const code = (body as { code?: unknown } | null | undefined)?.code
+  return typeof code === 'string' && (ERROR_CODES as readonly string[]).includes(code)
 }
 
-interface StoredRegistrationChallenge {
-  challenge: string
-  /** The id the user will be created with, fixed at claim time so the credential's user handle matches. */
-  pendingUserId: string
-  invitationId: string
-}
+/** The paths the plugin serves, spelled once so the hooks below cannot drift from each other. */
+const PATHS = {
+  generateRegisterOptions: '/passkey/generate-register-options',
+  verifyRegistration: '/passkey/verify-registration',
+  generateAuthenticateOptions: '/passkey/generate-authenticate-options',
+  verifyAuthentication: '/passkey/verify-authentication',
+  deletePasskey: '/passkey/delete-passkey',
+  updatePasskey: '/passkey/update-passkey',
+} as const
 
-interface StoredAuthenticationChallenge {
-  challenge: string
-}
+/** A device label, not a document. Matches the bound on every other client string in this API. */
+const MAX_PASSKEY_NAME_LENGTH = 120
+
+/* ------------------------------------------------------------------------------------------- */
+/* The official plugin, configured for AAT                                                      */
+/* ------------------------------------------------------------------------------------------- */
 
 export function aatPasskey({ db, config }: AatPasskeyOptions) {
+  return passkey({
+    rpID: config.rpId,
+    rpName: config.rpName,
+    // Explicit, and never `ctx.headers.get('origin')`. See the header comment.
+    origin: [...config.trustedOrigins],
+    authenticatorSelection: {
+      // Discoverable credentials, so sign-in needs no username and the server never has to publish
+      // which credentials exist for an account in order for one to be offered.
+      residentKey: 'required',
+      requireResidentKey: true,
+      userVerification: 'required',
+    },
+    registration: {
+      /**
+       * Registration is reachable without a session, because the first thing an invited researcher
+       * does is register — they have no session and no way to get one. A signed-in user adding a
+       * second credential still takes the session path: the plugin prefers a live session and only
+       * falls back to `resolveUser` when there is none.
+       */
+      requireSession: false,
+
+      /**
+       * Who is this ceremony for? Answered from the registration context alone, and only by
+       * reading — see the header comment on why nothing is spent here.
+       *
+       * A registration invitation has no user yet, so an id is minted now and carried through the
+       * plugin's verification row to `afterVerification`, which is what creates the row. A recovery
+       * invitation names the user it is restoring access to, and returning that id is also what
+       * makes the plugin populate `excludeCredentials` with the credentials that user already has,
+       * so their authenticator does not silently mint a duplicate.
+       */
+      resolveUser: async ({ context }) => {
+        if (!context) {
+          throw toApiError('INVITE_INVALID', { reason: 'registration_context_required' })
+        }
+        const resolved = await resolveRegistrationContext(db, context).catch(rethrow)
+        return {
+          id: resolved.targetUserId ?? newId(),
+          name: resolved.displayName,
+          displayName: resolved.displayName,
+        }
+      },
+
+      afterVerification: async ({ ctx, verification, user, context }) => {
+        const headers = ctx.headers ?? new Headers()
+        const now = new Date()
+
+        const info = verification.verified ? verification.registrationInfo : undefined
+        if (!info) {
+          // Unreachable: the plugin checks `verified` before calling this. Asserting it anyway is
+          // what keeps the user-verification check below from being silently skipped if that ever
+          // changes.
+          throw toApiError('INTERNAL', { reason: 'registration_not_verified' })
+        }
+
+        // The plugin verifies with `requireUserVerification: false`. AAT does not accept a
+        // presence-only credential, so the flag is checked here instead. Refused as FORBIDDEN
+        // rather than as an invitation error: the invitation is fine, the credential is not — and
+        // this branch is also reached on the signed-in path, where there is no invitation at all.
+        if (!info.userVerified) {
+          throw toApiError('FORBIDDEN', { reason: 'user_verification_required' })
+        }
+
+        // One credential, one account. `passkey_credential_id_unique` would also stop this, but a
+        // constraint violation is a 500; this is the same refusal with an answer a client can read.
+        const [duplicate] = await db
+          .select({ id: passkeyTable.id })
+          .from(passkeyTable)
+          .where(eq(passkeyTable.credentialID, info.credential.id))
+          .limit(1)
+        if (duplicate) {
+          throw toApiError('FORBIDDEN', { reason: 'credential_already_registered' })
+        }
+
+        const label = getAuthenticatorName(info.aaguid)
+        const named = (userId: string) => (label === undefined ? { userId } : { userId, name: label })
+
+        if (!context) {
+          /*
+           * No registration context: a signed-in user adding another credential to their own
+           * account. The plugin reached `resolveUser`'s alternative — a live session — so there is
+           * no invitation to spend and no user to create.
+           *
+           * The session is re-checked rather than assumed. The plugin reads the session at
+           * `generate-register-options` time and again at verification, but only refuses on a
+           * *mismatch*: a session that expired between the two calls leaves the challenge cookie
+           * as the sole credential. Requiring a live session closes that window.
+           */
+          const session = await getSessionFromCtx(ctx)
+          if (!session) throw toApiError('AUTH_REQUIRED', { reason: 'session_required' })
+          if (session.user.id !== user.id) {
+            throw toApiError('FORBIDDEN', { reason: 'passkey_user_mismatch' })
+          }
+          if ((session.user as { banned?: boolean | null }).banned) {
+            throw toApiError('FORBIDDEN', { reason: 'banned' })
+          }
+
+          await writeAuditLog(db, {
+            actorUserId: session.user.id,
+            action: 'passkey.register',
+            targetType: 'user',
+            targetId: session.user.id,
+            headers,
+          })
+          return named(session.user.id)
+        }
+
+        const resolved = await resolveRegistrationContext(db, context, now).catch(rethrow)
+
+        /*
+         * The identity the context implies must be the identity the ceremony was started for.
+         *
+         * Without this, a caller holding a valid context could sign in as somebody else first, let
+         * the plugin prefer that session, and reach here with a `user.id` the invitation never
+         * named. The invitation would be spent against the wrong account. Both branches are pure
+         * reads, so refusing costs the invitation nothing.
+         */
+        if (resolved.kind === 'recovery') {
+          if (resolved.targetUserId === null || resolved.targetUserId !== user.id) {
+            throw toApiError('RECOVERY_INVALID', { reason: 'registration_context_mismatch' })
+          }
+          const [target] = await db.select().from(userTable).where(eq(userTable.id, user.id)).limit(1)
+          if (!target) throw toApiError('RECOVERY_INVALID', { reason: 'unknown_user' })
+          if (target.banned) throw toApiError('FORBIDDEN', { reason: 'banned' })
+        } else {
+          const [clash] = await db
+            .select({ id: userTable.id })
+            .from(userTable)
+            .where(eq(userTable.id, user.id))
+            .limit(1)
+          if (clash) throw toApiError('FORBIDDEN', { reason: 'registration_context_mismatch' })
+        }
+
+        /*
+         * Spend the invitation BEFORE creating anything. If this fails, another ceremony has
+         * already completed against the same invitation and no second user must appear. The
+         * reverse order would leave a window in which a claim expires, the invitation returns to
+         * `pending`, and a second user is created from one invitation.
+         */
+        const spent = await consumeInvitation(db, resolved.invitationId, context, now)
+        if (!spent) throw toApiError('INVITE_USED')
+
+        if (resolved.kind === 'registration') {
+          await ctx.context.internalAdapter.createUser({
+            id: user.id,
+            name: resolved.displayName,
+            // Synthetic and non-routable — see ./identity.ts. No real address is ever collected.
+            email: syntheticEmail(user.id),
+            emailVerified: false,
+            role: resolved.role,
+            banned: false,
+          })
+        }
+
+        await recordInvitationUser(db, resolved.invitationId, user.id)
+
+        const [account] = await db.select().from(userTable).where(eq(userTable.id, user.id)).limit(1)
+        if (!account) {
+          throw toApiError('INTERNAL', { reason: 'user_missing_after_registration' })
+        }
+
+        await writeAuditLog(db, {
+          actorUserId: account.id,
+          action: resolved.kind === 'recovery' ? 'passkey.recover' : 'user.register',
+          targetType: 'user',
+          targetId: account.id,
+          details: { invitationId: resolved.invitationId, role: resolved.role },
+          headers,
+        })
+
+        /*
+         * `verify-registration` does not open a session — unlike `verify-authentication`, which
+         * does. A researcher who has just proved possession of a credential minted under an
+         * invitation only this deployment could issue is authenticated, and sending them to a
+         * sign-in screen would be theatre. The session is issued through Better Auth's own
+         * `setSessionCookie` so there is one cookie implementation in this system, not two.
+         */
+        const session = await ctx.context.internalAdapter.createSession(account.id)
+        await setSessionCookie(ctx, { session, user: account })
+
+        return named(account.id)
+      },
+    },
+
+    authentication: {
+      /**
+       * Runs after the assertion verifies and before the plugin advances the counter and opens the
+       * session. Everything refused here is refused before a cookie exists.
+       */
+      afterVerification: async ({ ctx, verification, clientData }) => {
+        const headers = ctx.headers ?? new Headers()
+
+        const [credential] = await db
+          .select()
+          .from(passkeyTable)
+          .where(eq(passkeyTable.credentialID, clientData.id))
+          .limit(1)
+        if (!credential) {
+          // The plugin looked the same row up a moment ago, so this is only reachable if it was
+          // deleted mid-request. Refused rather than reasoned about.
+          throw toApiError('AUTH_REQUIRED', { reason: 'unknown_credential' })
+        }
+
+        // As at registration: the plugin verifies with `requireUserVerification: false`.
+        if (!verification.authenticationInfo.userVerified) {
+          await writeAuditLog(db, {
+            actorUserId: credential.userId,
+            action: 'passkey.authenticate_failed',
+            targetType: 'passkey',
+            targetId: credential.id,
+            details: { reason: 'user_verification_required' },
+            headers,
+          })
+          throw toApiError('AUTH_REQUIRED', { reason: 'user_verification_required' })
+        }
+
+        const [account] = await db
+          .select()
+          .from(userTable)
+          .where(eq(userTable.id, credential.userId))
+          .limit(1)
+        if (!account) throw toApiError('AUTH_REQUIRED', { reason: 'unknown_user' })
+        if (account.banned) {
+          await writeAuditLog(db, {
+            actorUserId: account.id,
+            action: 'passkey.authenticate_failed',
+            targetType: 'passkey',
+            targetId: credential.id,
+            details: { reason: 'banned' },
+            headers,
+          })
+          throw toApiError('FORBIDDEN', { reason: 'banned' })
+        }
+
+        // The plugin maintains `counter`; `last_used_at` is AAT's column and AAT's job. It is what
+        // makes "this credential has not been used in a year" answerable on the management screen.
+        await db
+          .update(passkeyTable)
+          .set({ lastUsedAt: new Date() })
+          .where(eq(passkeyTable.id, credential.id))
+
+        await writeAuditLog(db, {
+          actorUserId: account.id,
+          action: 'passkey.authenticate',
+          targetType: 'passkey',
+          targetId: credential.id,
+          headers,
+        })
+      },
+    },
+  })
+}
+
+/* ------------------------------------------------------------------------------------------- */
+/* AAT policy around the official plugin                                                        */
+/* ------------------------------------------------------------------------------------------- */
+
+/**
+ * The AAT-owned half: the invitation endpoint, the rate limits on the credential paths, the
+ * last-passkey rule, and the audit of failures the plugin swallows.
+ *
+ * This is a second plugin rather than more options on the first because none of it is WebAuthn.
+ * Better Auth merges the endpoints and hooks of every plugin, so the split costs nothing at
+ * runtime and keeps the boundary visible: anything in here would still make sense if the passkey
+ * plugin were replaced tomorrow.
+ */
+export function aatPasskeyPolicy({ db }: AatPasskeyOptions) {
   return {
-    id: 'aat-passkey',
+    id: 'aat-passkey-policy',
     endpoints: {
       /**
-       * Exchange an invitation token for a registration context and a WebAuthn challenge.
+       * Exchange an invitation token for a registration context.
        *
-       * The response is the only place the registration context ever appears in plaintext.
+       * The response is the only place the registration context ever appears in plaintext; only a
+       * hash of it is stored. The client passes it straight to the plugin's
+       * `generate-register-options?context=…`.
        */
       aatRedeemInvitation: createAuthEndpoint(
         '/aat/invitation/redeem',
@@ -116,10 +426,9 @@ export function aatPasskey({ db, config }: AatPasskeyOptions) {
             RATE_LIMITS.inviteRedeem,
           ).catch(rethrow)
 
-          const now = new Date()
           let claimed: Awaited<ReturnType<typeof claimInvitation>>
           try {
-            claimed = await claimInvitation(db, ctx.body.token, now)
+            claimed = await claimInvitation(db, ctx.body.token, new Date())
           } catch (error) {
             await writeAuditLog(db, {
               actorUserId: null,
@@ -131,29 +440,6 @@ export function aatPasskey({ db, config }: AatPasskeyOptions) {
             })
             rethrow(error)
           }
-
-          const pendingUserId = claimed.targetUserId ?? newId()
-          const challenge = newChallenge()
-          const stored: StoredRegistrationChallenge = {
-            challenge,
-            pendingUserId,
-            invitationId: claimed.invitationId,
-          }
-          await ctx.context.internalAdapter.createVerificationValue({
-            identifier: REGISTER_CHALLENGE_PREFIX + (await hashToken(claimed.registrationContext)),
-            value: JSON.stringify(stored),
-            expiresAt: claimed.contextExpiresAt,
-          })
-
-          // On recovery, tell the authenticator which credentials this user already has so it can
-          // avoid silently creating a second credential on the same device.
-          const existing =
-            claimed.targetUserId === null
-              ? []
-              : await db
-                  .select({ credentialID: passkeyTable.credentialID, transports: passkeyTable.transports })
-                  .from(passkeyTable)
-                  .where(eq(passkeyTable.userId, claimed.targetUserId))
 
           await writeAuditLog(db, {
             actorUserId: null,
@@ -168,300 +454,191 @@ export function aatPasskey({ db, config }: AatPasskeyOptions) {
             registrationContext: claimed.registrationContext,
             expiresAt: claimed.contextExpiresAt.toISOString(),
             kind: claimed.kind,
-            options: {
-              challenge,
-              rp: { id: config.rpId, name: config.rpName },
-              user: {
-                id: pendingUserId,
-                name: claimed.displayName,
-                displayName: claimed.displayName,
-              },
-              pubKeyCredParams: OFFERED_ALGORITHMS.map((alg) => ({ type: 'public-key', alg })),
-              timeout: 120_000,
-              attestation: 'none',
-              authenticatorSelection: {
-                residentKey: 'required',
-                requireResidentKey: true,
-                userVerification: 'required',
-              },
-              excludeCredentials: existing.map((row) => ({
-                type: 'public-key',
-                id: row.credentialID,
-                ...(row.transports ? { transports: JSON.parse(row.transports) as string[] } : {}),
-              })),
-            },
+            // Enough for the page to say who it is welcoming. Everything the ceremony itself needs
+            // — challenge, RP, algorithms, excludeCredentials — comes from the plugin's own options
+            // endpoint; repeating an RP ID here is how a second source of truth for one starts.
+            displayName: claimed.displayName,
           })
         },
       ),
+    },
 
-      /** Complete a registration ceremony: create (or extend) the user and open a session. */
-      aatRegisterPasskey: createAuthEndpoint(
-        '/aat/passkey/register',
+    hooks: {
+      before: [
+        /**
+         * Rate limits on the credential paths.
+         *
+         * Both halves of a ceremony are counted, not just the verify: issuing options writes a
+         * verification row and sets a cookie, so an unlimited options endpoint is a cheap way to
+         * make a database expensive. Keyed by client address, never by the secret being presented
+         * — see ../services/rate-limit.ts.
+         */
         {
-          method: 'POST',
-          body: z.object({
-            registrationContext: z.string().min(1).max(512),
-            credential: registrationCredentialSchema,
+          matcher: (ctx: { path?: string }) =>
+            ctx.path === PATHS.generateRegisterOptions || ctx.path === PATHS.verifyRegistration,
+          handler: createAuthMiddleware(async (ctx) => {
+            const headers = ctx.headers ?? new Headers()
+            await consumeRateLimit(
+              db,
+              rateLimitKey('passkeyRegister', clientAddress(headers)),
+              RATE_LIMITS.passkeyRegister,
+            ).catch(rethrow)
           }),
         },
-        async (ctx) => {
-          const headers = ctx.headers ?? new Headers()
-          await consumeRateLimit(
-            db,
-            rateLimitKey('passkeyRegister', clientAddress(headers)),
-            RATE_LIMITS.passkeyRegister,
-          ).catch(rethrow)
+        {
+          matcher: (ctx: { path?: string }) =>
+            ctx.path === PATHS.generateAuthenticateOptions || ctx.path === PATHS.verifyAuthentication,
+          handler: createAuthMiddleware(async (ctx) => {
+            const headers = ctx.headers ?? new Headers()
+            await consumeRateLimit(
+              db,
+              rateLimitKey('passkeyAuthenticate', clientAddress(headers)),
+              RATE_LIMITS.passkeyAuthenticate,
+            ).catch(rethrow)
+          }),
+        },
 
-          const now = new Date()
-          const resolved = await resolveRegistrationContext(db, ctx.body.registrationContext, now).catch(
-            rethrow,
-          )
-
-          const contextHash = await hashToken(ctx.body.registrationContext)
-          const verification = await ctx.context.internalAdapter.consumeVerificationValue(
-            REGISTER_CHALLENGE_PREFIX + contextHash,
-          )
-          if (!verification) {
-            // No challenge left to consume: either this context already completed a ceremony, or
-            // the challenge expired. Both are replay-shaped, so both are refused.
-            throw toApiError('INVITE_INVALID', { reason: 'challenge_not_pending' })
-          }
-          const stored = JSON.parse(verification.value) as StoredRegistrationChallenge
-
-          let verified: Awaited<ReturnType<typeof verifyRegistration>>
-          try {
-            verified = await verifyRegistration(ctx.body.credential, {
-              rpId: config.rpId,
-              trustedOrigins: config.trustedOrigins,
-              expectedChallenge: stored.challenge,
-              requireUserVerification: true,
-            })
-          } catch (error) {
-            if (error instanceof CeremonyError) {
-              throw toApiError('INVITE_INVALID', { reason: 'ceremony_failed' })
+        /**
+         * Bound the one client-supplied string the plugin stores.
+         *
+         * `verify-registration` and `update-passkey` both accept a passkey `name` typed as an
+         * unbounded `z.string()`. Every schema AAT writes carries a `.max()`, because a value that
+         * is persisted and later rendered is a value whose size is the caller's choice unless
+         * somebody says otherwise. The limit is generous — this is a human label for a device.
+         */
+        {
+          matcher: (ctx: { path?: string }) =>
+            ctx.path === PATHS.verifyRegistration || ctx.path === PATHS.updatePasskey,
+          handler: createAuthMiddleware(async (ctx) => {
+            const name = (ctx.body as { name?: unknown } | undefined)?.name
+            if (typeof name === 'string' && name.length > MAX_PASSKEY_NAME_LENGTH) {
+              throw toApiError('FORBIDDEN', { reason: 'passkey_name_too_long' })
             }
-            throw error
-          }
-
-          const [duplicate] = await db
-            .select({ id: passkeyTable.id })
-            .from(passkeyTable)
-            .where(eq(passkeyTable.credentialID, verified.credentialId))
-            .limit(1)
-          if (duplicate) {
-            throw toApiError('FORBIDDEN', { reason: 'credential_already_registered' })
-          }
-
-          const userId = stored.pendingUserId
-
-          // Spend the invitation BEFORE creating anything. If this fails, another ceremony has
-          // already completed against the same invitation and no second user must appear. The
-          // reverse order would leave a window in which a claim expires, the invitation returns to
-          // `pending`, and a second user is created from one invitation.
-          const spent = await consumeInvitation(db, resolved.invitationId, ctx.body.registrationContext, now)
-          if (!spent) {
-            throw toApiError('INVITE_USED')
-          }
-
-          if (resolved.kind === 'registration') {
-            await ctx.context.internalAdapter.createUser({
-              id: userId,
-              name: resolved.displayName,
-              // Synthetic and non-routable — see auth/identity.ts. No real address is ever collected.
-              email: syntheticEmail(userId),
-              emailVerified: false,
-              role: resolved.role,
-              banned: false,
-            })
-          }
-
-          await recordInvitationUser(db, resolved.invitationId, userId)
-
-          const [account] = await db.select().from(userTable).where(eq(userTable.id, userId)).limit(1)
-          if (!account) {
-            throw toApiError('INTERNAL', { reason: 'user_missing_after_registration' })
-          }
-
-          await db.insert(passkeyTable).values({
-            id: newId(),
-            name: null,
-            publicKey: verified.publicKey,
-            userId,
-            credentialID: verified.credentialId,
-            counter: verified.signCount,
-            deviceType: verified.deviceType,
-            backedUp: verified.backedUp,
-            transports: ctx.body.credential.transports
-              ? JSON.stringify(ctx.body.credential.transports)
-              : null,
-            aaguid: verified.aaguid,
-            algorithm: verified.algorithm,
-            createdAt: now,
-            lastUsedAt: null,
-          })
-
-          await writeAuditLog(db, {
-            actorUserId: userId,
-            action: resolved.kind === 'recovery' ? 'passkey.recover' : 'user.register',
-            targetType: 'user',
-            targetId: userId,
-            details: { invitationId: resolved.invitationId, role: resolved.role },
-            headers,
-          })
-
-          const session = await ctx.context.internalAdapter.createSession(userId)
-          await setSessionCookie(ctx, { session, user: account })
-
-          return ctx.json({
-            user: { id: account.id, displayName: account.name, role: account.role },
-            capabilities: capabilitiesForRole(account.role as Role),
-          })
-        },
-      ),
-
-      /** Issue a single-use authentication challenge. */
-      aatAuthenticationOptions: createAuthEndpoint(
-        '/aat/passkey/authenticate/options',
-        { method: 'POST' },
-        async (ctx) => {
-          const headers = ctx.headers ?? new Headers()
-          await consumeRateLimit(
-            db,
-            rateLimitKey('passkeyAuthenticate', clientAddress(headers)),
-            RATE_LIMITS.passkeyAuthenticate,
-          ).catch(rethrow)
-
-          const challengeId = newSecretToken()
-          const challenge = newChallenge()
-          const stored: StoredAuthenticationChallenge = { challenge }
-          await ctx.context.internalAdapter.createVerificationValue({
-            identifier: AUTHENTICATE_CHALLENGE_PREFIX + (await hashToken(challengeId)),
-            value: JSON.stringify(stored),
-            expiresAt: new Date(Date.now() + AUTHENTICATION_CHALLENGE_TTL_SECONDS * 1000),
-          })
-
-          return ctx.json({
-            challengeId,
-            options: {
-              challenge,
-              rpId: config.rpId,
-              timeout: 120_000,
-              userVerification: 'required',
-              // Empty: credentials are discoverable (resident), so the authenticator offers the
-              // right one without the server first revealing which credentials exist for a user —
-              // which would be an account-enumeration oracle on an unauthenticated endpoint.
-              allowCredentials: [],
-            },
-          })
-        },
-      ),
-
-      /** Complete an authentication ceremony and open a session. */
-      aatAuthenticationVerify: createAuthEndpoint(
-        '/aat/passkey/authenticate/verify',
-        {
-          method: 'POST',
-          body: z.object({
-            challengeId: z.string().min(1).max(512),
-            credential: authenticationCredentialSchema,
           }),
         },
-        async (ctx) => {
-          const headers = ctx.headers ?? new Headers()
-          await consumeRateLimit(
-            db,
-            rateLimitKey('passkeyAuthenticate', clientAddress(headers)),
-            RATE_LIMITS.passkeyAuthenticate,
-          ).catch(rethrow)
 
-          const verification = await ctx.context.internalAdapter.consumeVerificationValue(
-            AUTHENTICATE_CHALLENGE_PREFIX + (await hashToken(ctx.body.challengeId)),
-          )
-          if (!verification) {
-            throw toApiError('AUTH_REQUIRED', { reason: 'challenge_not_pending' })
-          }
-          const stored = JSON.parse(verification.value) as StoredAuthenticationChallenge
+        /**
+         * A user may not delete their last passkey.
+         *
+         * With no password, no email and no social login, the last passkey *is* the account.
+         * Removing it does not lock a user out temporarily; it destroys their access with no
+         * self-service way back. The plugin's endpoint enforces ownership but not this, so the
+         * rule is imposed before it runs. The same rule guards the administrative path in
+         * ../routes/admin.ts and the self-service one in ../routes/me.ts — three doors, one policy.
+         */
+        {
+          matcher: (ctx: { path?: string }) => ctx.path === PATHS.deletePasskey,
+          handler: createAuthMiddleware(async (ctx) => {
+            const body = ctx.body as { id?: unknown } | undefined
+            const passkeyId = typeof body?.id === 'string' ? body.id : null
+            if (!passkeyId) return
 
-          const [credential] = await db
-            .select()
-            .from(passkeyTable)
-            .where(eq(passkeyTable.credentialID, ctx.body.credential.id))
-            .limit(1)
-          if (!credential) {
+            const session = await getSessionFromCtx(ctx)
+            // No session, or somebody else's credential: the plugin's own middleware answers those
+            // cases, and answering them differently here would be a second authorization model.
+            if (!session) return
+
+            const [target] = await db
+              .select({ userId: passkeyTable.userId })
+              .from(passkeyTable)
+              .where(eq(passkeyTable.id, passkeyId))
+              .limit(1)
+            if (!target || target.userId !== session.user.id) return
+
+            const [counted] = await db
+              .select({ count: sql<number>`count(*)` })
+              .from(passkeyTable)
+              .where(eq(passkeyTable.userId, target.userId))
+            if ((counted?.count ?? 0) <= 1) {
+              throw toApiError('FORBIDDEN', { reason: 'cannot_delete_last_passkey' })
+            }
+          }),
+        },
+      ],
+
+      after: [
+        /**
+         * Audit the sign-in failures the plugin swallows.
+         *
+         * `after` hooks run on the failure path too — a thrown `APIError` is carried in
+         * `ctx.context.returned` rather than propagated past them — which is the only place a
+         * ceremony refused *inside* the plugin can still be recorded. A failed sign-in that leaves
+         * no trace is a failed sign-in nobody can investigate.
+         *
+         * Failures the authentication seam itself raised are skipped: it has already written a row
+         * naming the actual reason (a banned account, a missing user-verification flag), and a
+         * second row saying "ceremony_failed" would only make the log less true.
+         */
+        {
+          matcher: (ctx: { path?: string }) => ctx.path === PATHS.verifyAuthentication,
+          handler: createAuthMiddleware(async (ctx) => {
+            const returned = ctx.context.returned
+            if (!isAPIError(returned)) return
+            if (isAatErrorPayload(returned.body)) return
+
+            const headers = ctx.headers ?? new Headers()
+            const response = (ctx.body as { response?: { id?: unknown } } | undefined)?.response
+            const credentialId = typeof response?.id === 'string' ? response.id : null
+            const [credential] = credentialId
+              ? await db
+                  .select({ id: passkeyTable.id, userId: passkeyTable.userId })
+                  .from(passkeyTable)
+                  .where(eq(passkeyTable.credentialID, credentialId))
+                  .limit(1)
+              : []
+
             await writeAuditLog(db, {
-              actorUserId: null,
+              actorUserId: credential?.userId ?? null,
               action: 'passkey.authenticate_failed',
-              details: { reason: 'unknown_credential' },
+              ...(credential ? { targetType: 'passkey', targetId: credential.id } : {}),
+              details: { reason: credential ? 'ceremony_failed' : 'unknown_credential' },
               headers,
             })
-            throw toApiError('AUTH_REQUIRED', { reason: 'unknown_credential' })
-          }
-
-          let result: Awaited<ReturnType<typeof verifyAuthentication>>
-          try {
-            result = await verifyAuthentication(
-              ctx.body.credential,
-              {
-                credentialId: credential.credentialID,
-                publicKey: credential.publicKey,
-                counter: credential.counter,
-              },
-              {
-                rpId: config.rpId,
-                trustedOrigins: config.trustedOrigins,
-                expectedChallenge: stored.challenge,
-                requireUserVerification: true,
-              },
-            )
-          } catch (error) {
-            if (error instanceof CeremonyError) {
-              await writeAuditLog(db, {
-                actorUserId: credential.userId,
-                action: 'passkey.authenticate_failed',
-                targetType: 'passkey',
-                targetId: credential.id,
-                details: { reason: 'ceremony_failed' },
-                headers,
-              })
-              throw toApiError('AUTH_REQUIRED', { reason: 'ceremony_failed' })
-            }
-            throw error
-          }
-
-          const [account] = await db
-            .select()
-            .from(userTable)
-            .where(eq(userTable.id, credential.userId))
-            .limit(1)
-          if (!account) {
-            throw toApiError('AUTH_REQUIRED', { reason: 'unknown_user' })
-          }
-          if (account.banned) {
-            throw toApiError('FORBIDDEN', { reason: 'banned' })
-          }
-
-          await db
-            .update(passkeyTable)
-            .set({ counter: result.newSignCount, backedUp: result.backedUp, lastUsedAt: new Date() })
-            .where(and(eq(passkeyTable.id, credential.id)))
-
-          await writeAuditLog(db, {
-            actorUserId: account.id,
-            action: 'passkey.authenticate',
-            targetType: 'passkey',
-            targetId: credential.id,
-            headers,
-          })
-
-          const session = await ctx.context.internalAdapter.createSession(account.id)
-          await setSessionCookie(ctx, { session, user: account })
-
-          return ctx.json({
-            user: { id: account.id, displayName: account.name, role: account.role },
-            capabilities: capabilitiesForRole(account.role as Role),
-          })
+          }),
         },
-      ),
+        {
+          matcher: (ctx: { path?: string }) => ctx.path === PATHS.deletePasskey,
+          handler: createAuthMiddleware(async (ctx) => {
+            if (isAPIError(ctx.context.returned)) return
+            const session = await getSessionFromCtx(ctx)
+            const passkeyId = (ctx.body as { id?: unknown } | undefined)?.id
+            if (!session || typeof passkeyId !== 'string') return
+            await writeAuditLog(db, {
+              actorUserId: session.user.id,
+              action: 'passkey.delete',
+              targetType: 'passkey',
+              targetId: passkeyId,
+              headers: ctx.headers ?? new Headers(),
+            })
+          }),
+        },
+      ],
+    },
+
+    /**
+     * A rejected ceremony is a client error, not a server one.
+     *
+     * The plugin wraps anything `@simplewebauthn/server` throws — a challenge that does not match,
+     * an origin that is not ours, an attestation signed for another relying party — in
+     * `INTERNAL_SERVER_ERROR`. Those are the *expected* answers on a credential endpoint: every one
+     * of them is reachable by an attacker at will, so leaving them as 500s means an alerting
+     * threshold that anybody on the internet can cross. The status is corrected on the way out; the
+     * plugin's body is left exactly as it was, so nothing downstream has to know this happened.
+     */
+    async onResponse(response: Response) {
+      if (response.status !== 500) return
+      const body = (await response
+        .clone()
+        .json()
+        .catch(() => null)) as { code?: unknown } | null
+      if (body?.code !== 'FAILED_TO_VERIFY_REGISTRATION') return
+      return {
+        response: new Response(response.body, {
+          status: 400,
+          statusText: 'Bad Request',
+          headers: response.headers,
+        }),
+      }
     },
   } satisfies BetterAuthPlugin
 }
