@@ -180,6 +180,68 @@ export function App(): React.JSX.Element {
     return rangeStatisticsFor(active, selection)
   }, [active, selection, selectionEnabled])
 
+  /* ---------------------------------------------------------------- cloud */
+
+  const applyPosterState = useCallback((state: { status: string; url?: string; message?: string }) => {
+    if (state.status === 'ready' && state.url !== undefined) {
+      setStatuses((current) => ({ ...current, poster: { kind: 'ready', url: state.url as string } }))
+      return
+    }
+    if (state.status === 'failed') {
+      setStatuses((current) => ({
+        ...current,
+        poster: { kind: 'failed', message: state.message ?? 'ポスターの生成に失敗しました。', retryable: true },
+      }))
+      return
+    }
+    setStatuses((current) => ({
+      ...current,
+      poster: { kind: state.status === 'rendering' ? 'rendering' : 'queued' },
+    }))
+  }, [])
+
+  const syncToCloud = useCallback(
+    async (dataset: Dataset) => {
+      setStatuses((current) => ({ ...current, sync: { kind: 'saving' } }))
+      const outcome = await syncDataset(dataset, config)
+      if (!outcome.ok) {
+        setStatuses((current) => ({
+          ...current,
+          sync: {
+            kind: 'failed',
+            message: outcome.kind === 'unavailable' ? outcome.message : outcome.message,
+            retryable: outcome.kind === 'unavailable' || outcome.retryable,
+          },
+        }))
+        return
+      }
+      const revisionId = outcome.value.revisionId
+      setLastRevisionId(revisionId)
+      setStatuses((current) => ({
+        ...current,
+        sync: { kind: 'saved', revisionId, at: Date.now() },
+        poster: { kind: 'queued' },
+      }))
+
+      // Poster generation is a separate lane on purpose: it can be slow, it can
+      // fail, and neither outcome touches the analysis the user already has.
+      const posterOutcome = await requestPoster(revisionId)
+      if (!posterOutcome.ok) {
+        setStatuses((current) => ({
+          ...current,
+          poster: {
+            kind: 'failed',
+            message: posterOutcome.message,
+            retryable: posterOutcome.kind === 'unavailable' || posterOutcome.retryable,
+          },
+        }))
+        return
+      }
+      applyPosterState(posterOutcome.value)
+    },
+    [config, applyPosterState],
+  )
+
   /* ------------------------------------------------------------- opening */
 
   const runAnalysis = useCallback(
@@ -293,68 +355,6 @@ export function App(): React.JSX.Element {
     },
     [],
   )
-
-  /* ---------------------------------------------------------------- cloud */
-
-  const syncToCloud = useCallback(
-    async (dataset: Dataset) => {
-      setStatuses((current) => ({ ...current, sync: { kind: 'saving' } }))
-      const outcome = await syncDataset(dataset, config)
-      if (!outcome.ok) {
-        setStatuses((current) => ({
-          ...current,
-          sync: {
-            kind: 'failed',
-            message: outcome.kind === 'unavailable' ? outcome.message : outcome.message,
-            retryable: outcome.kind === 'unavailable' || outcome.retryable,
-          },
-        }))
-        return
-      }
-      const revisionId = outcome.value.revisionId
-      setLastRevisionId(revisionId)
-      setStatuses((current) => ({
-        ...current,
-        sync: { kind: 'saved', revisionId, at: Date.now() },
-        poster: { kind: 'queued' },
-      }))
-
-      // Poster generation is a separate lane on purpose: it can be slow, it can
-      // fail, and neither outcome touches the analysis the user already has.
-      const posterOutcome = await requestPoster(revisionId)
-      if (!posterOutcome.ok) {
-        setStatuses((current) => ({
-          ...current,
-          poster: {
-            kind: 'failed',
-            message: posterOutcome.message,
-            retryable: posterOutcome.kind === 'unavailable' || posterOutcome.retryable,
-          },
-        }))
-        return
-      }
-      applyPosterState(posterOutcome.value)
-    },
-    [config],
-  )
-
-  const applyPosterState = (state: { status: string; url?: string; message?: string }) => {
-    if (state.status === 'ready' && state.url !== undefined) {
-      setStatuses((current) => ({ ...current, poster: { kind: 'ready', url: state.url as string } }))
-      return
-    }
-    if (state.status === 'failed') {
-      setStatuses((current) => ({
-        ...current,
-        poster: { kind: 'failed', message: state.message ?? 'ポスターの生成に失敗しました。', retryable: true },
-      }))
-      return
-    }
-    setStatuses((current) => ({
-      ...current,
-      poster: { kind: state.status === 'rendering' ? 'rendering' : 'queued' },
-    }))
-  }
 
   const retrySync = () => {
     if (active === null) return

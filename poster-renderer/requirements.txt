@@ -21,6 +21,10 @@
 #
 # PLATFORM COVERAGE
 # -----------------
+# PYTHON 3.12 OR NEWER IS REQUIRED: numpy 2.5.1 publishes no cp311 wheels and declares
+# `requires_python >= 3.12`, so a CI runner whose `python3` is older cannot install this file at
+# all. That is a property of the pinned NumPy, not of this list.
+#
 # Hashes cover linux x86_64 and aarch64 wheels for CPython 3.12-3.14 (manylinux and musllinux),
 # plus pure-Python wheels. That is CI (ubuntu-latest) and the container image (python:3.12-slim,
 # Debian bookworm, glibc 2.36). It is deliberately NOT a cross-platform lock file: for local work
