@@ -92,8 +92,31 @@ loudly instead of inventing `root@somebox.localdomain`.
 ## Commit messages
 
 - Explain **why**, not what — the diff already says what.
-- No project-name signatures, no invented co-authors.
+- No project-name signatures, and no co-author who did not write any of it.
 - Do not claim a test passed unless you ran it and saw it pass.
+
+### Attributing an agent that did the work
+
+Work written by Claude Code carries a trailer, at the owner's instruction:
+
+```
+Co-Authored-By: Claude <noreply@anthropic.com>
+```
+
+This is not an exception to the identity rule above, and it is worth being
+precise about why. The rule governs **author and committer** — who is
+accountable for the commit — and that remains `sata04` unconditionally. A
+`Co-Authored-By` trailer is a line in the message body; it changes neither
+field, and Git's identity plumbing never reads it. Nor is this an *invented*
+co-author of the kind the original incident produced: that was a project name
+paired with an address found lying around in an agent's context, standing in
+for a person who had not agreed to anything. `Claude <noreply@anthropic.com>`
+is Anthropic's published address for exactly this purpose, and it names
+something that genuinely wrote the diff.
+
+Add it to work an agent authored. Do not add it to a commit you merely
+rebased, reformatted or amended on an agent's behalf, and never add a human
+co-author who has not seen the change.
 
 ## Scope discipline
 
