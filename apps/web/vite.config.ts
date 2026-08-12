@@ -16,6 +16,11 @@ export default defineConfig({
   worker: { format: 'es' },
 
   build: {
+    // Assets go to dist/client, which is what wrangler.jsonc's assets.directory
+    // points at and what the CI verify job hands to the deploy job. Emitting to
+    // a bare dist/ leaves the Worker with no static assets to serve.
+    outDir: 'dist/client',
+    emptyOutDir: true,
     target: 'es2023',
     sourcemap: true,
     rollupOptions: {

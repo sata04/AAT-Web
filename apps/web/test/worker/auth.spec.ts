@@ -10,7 +10,7 @@
 
 import { eq } from 'drizzle-orm'
 import { describe, expect, it } from 'vitest'
-import { createInvitation, revokeInvitation } from '../../worker/auth/invitations.ts'
+import { createInvitation } from '../../worker/auth/invitations.ts'
 import { registrationInvites, user as userTable } from '../../worker/db/schema.ts'
 import { VirtualAuthenticator } from './helpers/authenticator.ts'
 import {
@@ -74,17 +74,28 @@ describe('invitation redemption', () => {
   })
 
   it('rejects a revoked token', async () => {
-    const invitation = await createInvitation(db(), {
-      kind: 'registration',
-      role: 'Researcher',
-      displayName: '取り消し済み',
-      ttlSeconds: 3600,
-      createdByUserId: null,
+    const admin = await createUser({ role: 'Admin' })
+    const created = await apiFetch('/api/v1/admin/invitations', {
+      method: 'POST',
+      cookie: admin.cookie,
+      body: JSON.stringify({
+        kind: 'registration',
+        role: 'Researcher',
+        displayName: '取り消し済み',
+        ttlHours: 24,
+      }),
     })
-    // Revocation is by id — the plaintext token is not needed and, in production, no longer exists.
-    expect(await revokeInvitation(db(), invitation.id, 'someone')).toBe(true)
+    expect(created.status).toBe(201)
+    const invitation = (await created.json()) as { invitation: { id: string; token: string } }
 
-    const response = await redeem(invitation.token)
+    // Revocation is by id — the plaintext token is not needed and, in production, no longer exists.
+    const revoked = await apiFetch(`/api/v1/admin/invitations/${invitation.invitation.id}/revoke`, {
+      method: 'POST',
+      cookie: admin.cookie,
+    })
+    expect(revoked.status).toBe(200)
+
+    const response = await redeem(invitation.invitation.token)
     expect(response.status).toBe(400)
     expect(await errorCode(response)).toBe('INVITE_INVALID')
   })

@@ -258,13 +258,7 @@ export function aatPasskey({ db, config }: AatPasskeyOptions) {
           // already completed against the same invitation and no second user must appear. The
           // reverse order would leave a window in which a claim expires, the invitation returns to
           // `pending`, and a second user is created from one invitation.
-          const spent = await consumeInvitation(
-            db,
-            resolved.invitationId,
-            ctx.body.registrationContext,
-            userId,
-            now,
-          )
+          const spent = await consumeInvitation(db, resolved.invitationId, ctx.body.registrationContext, now)
           if (!spent) {
             throw toApiError('INVITE_USED')
           }
