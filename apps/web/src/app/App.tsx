@@ -183,11 +183,12 @@ export function App(): React.JSX.Element {
   /* ---------------------------------------------------------------- cloud */
 
   const applyPosterState = useCallback((state: { status: string; url?: string; message?: string }) => {
-    if (state.status === 'ready' && state.url !== undefined) {
-      setStatuses((current) => ({ ...current, poster: { kind: 'ready', url: state.url as string } }))
+    const { status, url } = state
+    if (status === 'ready' && url !== undefined) {
+      setStatuses((current) => ({ ...current, poster: { kind: 'ready', url } }))
       return
     }
-    if (state.status === 'failed') {
+    if (status === 'failed') {
       setStatuses((current) => ({
         ...current,
         poster: { kind: 'failed', message: state.message ?? 'ポスターの生成に失敗しました。', retryable: true },
@@ -196,7 +197,7 @@ export function App(): React.JSX.Element {
     }
     setStatuses((current) => ({
       ...current,
-      poster: { kind: state.status === 'rendering' ? 'rendering' : 'queued' },
+      poster: { kind: status === 'rendering' ? 'rendering' : 'queued' },
     }))
   }, [])
 
@@ -209,7 +210,9 @@ export function App(): React.JSX.Element {
           ...current,
           sync: {
             kind: 'failed',
-            message: outcome.kind === 'unavailable' ? outcome.message : outcome.message,
+            message: outcome.message,
+            // An unreachable cloud is always worth retrying — it is usually a
+            // network that came back.
             retryable: outcome.kind === 'unavailable' || outcome.retryable,
           },
         }))
@@ -649,10 +652,13 @@ export function App(): React.JSX.Element {
               </div>
               <ul className="dataset-list">
                 {datasets.map((dataset) => (
-                  <li key={dataset.name}>
+                  // Two sibling buttons rather than one nested inside the other:
+                  // a button inside a button is invalid HTML, and assistive
+                  // technology cannot reach the inner one.
+                  <li className="dataset-list__item" key={dataset.name}>
                     <button
                       type="button"
-                      className="dataset-list__item"
+                      className="button button--flat dataset-list__name"
                       aria-current={dataset.name === activeName}
                       onClick={() => {
                         setActiveName(dataset.name)
@@ -660,24 +666,16 @@ export function App(): React.JSX.Element {
                         setViewport(null)
                       }}
                     >
-                      <span className="dataset-list__name">{dataset.name}</span>
-                      <span className="panel__hint">{dataset.fromCache ? 'キャッシュ' : ''}</span>
-                      <span
-                        className="button button--flat"
-                        role="button"
-                        tabIndex={0}
-                        onClick={(event) => {
-                          event.stopPropagation()
-                          closeDataset(dataset)
-                        }}
-                        onKeyDown={(event) => {
-                          if (event.key !== 'Enter' && event.key !== ' ') return
-                          event.stopPropagation()
-                          closeDataset(dataset)
-                        }}
-                      >
-                        閉じる
-                      </span>
+                      {dataset.name}
+                    </button>
+                    {dataset.fromCache ? <span className="panel__hint">キャッシュ</span> : null}
+                    <button
+                      type="button"
+                      className="button button--flat"
+                      aria-label={`${dataset.name} を閉じる`}
+                      onClick={() => closeDataset(dataset)}
+                    >
+                      閉じる
                     </button>
                   </li>
                 ))}
@@ -700,20 +698,32 @@ export function App(): React.JSX.Element {
               {active === null ? (
                 <p className="panel__hint">データセットを選択してください。</p>
               ) : (
-                <dl className="data-table">
-                  <div>
-                    <dt>文字コード</dt>
-                    <dd>{active.encoding}</dd>
-                  </div>
-                  <div>
-                    <dt>行数</dt>
-                    <dd>{active.sampleCount.toLocaleString()}</dd>
-                  </div>
-                  <div>
-                    <dt>時間列</dt>
-                    <dd>{active.mapping.timeColumn}</dd>
-                  </div>
-                </dl>
+                <div className="table-scroll">
+                  <table className="data-table">
+                    <tbody>
+                      <tr>
+                        <th scope="row">文字コード</th>
+                        <td>{active.encoding}</td>
+                      </tr>
+                      <tr>
+                        <th scope="row">行数</th>
+                        <td className="numeric">{active.sampleCount.toLocaleString()}</td>
+                      </tr>
+                      <tr>
+                        <th scope="row">時間列</th>
+                        <td>{active.mapping.timeColumn}</td>
+                      </tr>
+                      <tr>
+                        <th scope="row">Inner Capsule</th>
+                        <td>{active.mapping.useInner ? active.mapping.innerColumn : '未使用'}</td>
+                      </tr>
+                      <tr>
+                        <th scope="row">Drag Shield</th>
+                        <td>{active.mapping.useDrag ? active.mapping.dragColumn : '未使用'}</td>
+                      </tr>
+                    </tbody>
+                  </table>
+                </div>
               )}
               <button
                 type="button"

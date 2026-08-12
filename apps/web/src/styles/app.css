@@ -329,29 +329,24 @@ textarea {
   align-items: center;
   gap: var(--space-xs);
   width: 100%;
-  padding: var(--space-xs) var(--space-sm);
-  border: none;
+  padding: var(--space-3xs) var(--space-2xs);
   border-bottom: 1px solid var(--border);
-  background: transparent;
-  cursor: pointer;
-  text-align: left;
-}
-
-.dataset-list__item:hover {
-  background: var(--bg-tertiary);
-}
-
-.dataset-list__item[aria-current='true'] {
-  background: var(--bg-selected);
-  box-shadow: inset 2px 0 0 var(--accent);
 }
 
 .dataset-list__name {
   flex: 1 1 auto;
   min-width: 0;
+  justify-content: flex-start;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+/* Accent marks the active dataset — state, not decoration. */
+.dataset-list__name[aria-current='true'] {
+  background: var(--bg-selected);
+  color: var(--accent);
+  box-shadow: inset 2px 0 0 var(--accent);
 }
 
 /* ===== Status ===== */
