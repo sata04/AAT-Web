@@ -115,19 +115,35 @@ export async function requireOwnedRun(context: AppContext, runId: string) {
   return run
 }
 
-/** Resolve a revision the caller owns, or report it as absent. */
+/**
+ * Resolve a revision the caller owns, or report it as absent.
+ *
+ * The join to `runs` is the part that matters. A revision carries its own `owner_user_id`, so
+ * checking that alone looks sufficient — but a run is deleted by stamping `deleted_at` on the run
+ * row, and nothing propagates that to the revisions hanging off it. Without the join, every
+ * revision of a deleted run stays individually addressable by id: `GET /revisions/:id` would keep
+ * answering with its metrics, config hash and provenance after the user asked for the run to be
+ * gone.
+ *
+ * That is not a data leak — the caller is the owner either way, and the snapshot bytes already
+ * 404 because the object row is stamped too. It is worse in a quieter way: it makes deletion mean
+ * something different depending on which id you happen to hold, which is exactly the kind of
+ * ambiguity a deletion guarantee cannot afford. `requireOwnedRun` has always filtered
+ * `deleted_at`; this is the same rule reached through the other door.
+ */
 export async function requireOwnedRevision(context: AppContext, revisionId: string) {
   const db = context.get('db')
   const actor = context.get('actor')
-  const [revision] = await db
-    .select()
+  const [row] = await db
+    .select({ revision: analysisRevisions })
     .from(analysisRevisions)
-    .where(eq(analysisRevisions.id, revisionId))
+    .innerJoin(runs, eq(analysisRevisions.runId, runs.id))
+    .where(and(eq(analysisRevisions.id, revisionId), isNull(runs.deletedAt)))
     .limit(1)
-  if (!revision || revision.ownerUserId !== actor.userId) {
+  if (!row || row.revision.ownerUserId !== actor.userId) {
     throw new ApiError('RESOURCE_NOT_FOUND')
   }
-  return revision
+  return row.revision
 }
 
 /** Resolve a stored object the caller owns, or report it as absent. */
