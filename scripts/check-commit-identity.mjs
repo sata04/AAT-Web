@@ -69,7 +69,7 @@ const ALLOWED_IDENTITIES = new Map([
 const KNOWN_BAD = new Map([
   [
     '[redacted-personal-address]',
-    'the address that produced this repository\'s original bad history — never commit as this',
+    "the address that produced this repository's original bad history — never commit as this",
   ],
 ])
 
