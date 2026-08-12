@@ -117,12 +117,12 @@ function payloadTransfers(payload: AnalysisPayload): ArrayBuffer[] {
     payload.inner.gravity,
     payload.inner.filteredTime,
     payload.inner.filteredGravity,
-    payload.inner.filteredAcceleration,
+    payload.inner.acceleration,
     payload.drag.time,
     payload.drag.gravity,
     payload.drag.filteredTime,
     payload.drag.filteredGravity,
-    payload.drag.filteredAcceleration,
+    payload.drag.acceleration,
   ])
 }
 
@@ -133,7 +133,7 @@ function approximateBytes(payload: AnalysisPayload): number {
     total += sensor.gravity.byteLength
     total += sensor.filteredTime.byteLength
     total += sensor.filteredGravity.byteLength
-    total += sensor.filteredAcceleration.byteLength
+    total += sensor.acceleration.byteLength
   }
   return total
 }
@@ -218,47 +218,39 @@ async function analysisIdentityHash(config: AnalysisConfig, mapping: ColumnMappi
 }
 
 /**
- * Reconstruct a sensor's acceleration over its filtered segment.
+ * Reconstruct a sensor's acceleration series in m/s^2.
  *
  * The pipeline returns gravity, not acceleration, and the desktop's Excel export
  * has an Acceleration Data worksheet. Multiplying gravity back by the gravity
- * constant would be off by a rounding step per sample, so the column is re-read
- * and put through the same two transformations `loadAndProcessData` applies:
- * samples whose timestamp is unusable are masked, and the Inner Capsule is
- * negated when `invert_inner_acceleration` is set.
+ * constant would be wrong by a rounding step per sample, so the column is
+ * re-read and put through the same two transformations `loadAndProcessData`
+ * applies: samples whose timestamp is unusable are masked to NaN, and the Inner
+ * Capsule is negated when `invert_inner_acceleration` is set.
  *
- * Kept adjacent to the call site rather than hidden away, precisely because it
- * duplicates pipeline behaviour and has to be re-checked if that behaviour
- * changes.
+ * Kept next to its call site rather than tucked away, precisely because it
+ * duplicates pipeline behaviour and has to be re-checked whenever that changes.
  */
-function readFilteredAcceleration(
+function readSensorAcceleration(
   table: CsvTable,
   columnName: string,
   time: Float64Array,
   invert: boolean,
-  startIndex: number | null,
-  endIndex: number | null,
 ): Float64Array {
-  if (startIndex === null || endIndex === null) return new Float64Array(0)
   const column = table.column(columnName)
   if (column === undefined) return new Float64Array(0)
 
   const values = toNumericColumn(column).values
-  const length = endIndex - startIndex + 1
-  if (length <= 0) return new Float64Array(0)
-
-  const slice = new Float64Array(length)
-  for (let offset = 0; offset < length; offset++) {
-    const index = startIndex + offset
+  const result = new Float64Array(values.length)
+  for (let index = 0; index < values.length; index++) {
     const timestamp = time[index]
-    const value = values[index]
-    if (timestamp === undefined || value === undefined || !Number.isFinite(timestamp)) {
-      slice[offset] = Number.NaN
+    const value = values[index] as number
+    if (timestamp === undefined || !Number.isFinite(timestamp)) {
+      result[index] = Number.NaN
       continue
     }
-    slice[offset] = invert ? -value : value
+    result[index] = invert ? -value : value
   }
-  return slice
+  return result
 }
 
 /**
@@ -276,7 +268,7 @@ function emptySensor(): SensorResult {
     gravity: new Float64Array(0),
     filteredTime: new Float64Array(0),
     filteredGravity: new Float64Array(0),
-    filteredAcceleration: new Float64Array(0),
+    acceleration: new Float64Array(0),
     startIndex: null,
     endIndex: null,
   }
@@ -365,13 +357,11 @@ async function handleAnalyse(request: AnalyseRequest): Promise<void> {
         gravity: loaded.inner.gravity,
         filteredTime: filtered.inner.time,
         filteredGravity: filtered.inner.gravity,
-        filteredAcceleration: readFilteredAcceleration(
+        acceleration: readSensorAcceleration(
           table,
           engineConfig.accelerationColumnInnerCapsule,
           rawTime,
           engineConfig.invertInnerAcceleration,
-          filtered.inner.startIndex,
-          filtered.inner.endIndex,
         ),
         startIndex: filtered.inner.startIndex,
         endIndex: filtered.inner.endIndex,
@@ -385,13 +375,11 @@ async function handleAnalyse(request: AnalyseRequest): Promise<void> {
         gravity: loaded.drag.gravity,
         filteredTime: filtered.drag.time,
         filteredGravity: filtered.drag.gravity,
-        filteredAcceleration: readFilteredAcceleration(
+        acceleration: readSensorAcceleration(
           table,
           engineConfig.accelerationColumnDragShield,
           rawTime,
           false,
-          filtered.drag.startIndex,
-          filtered.drag.endIndex,
         ),
         startIndex: filtered.drag.startIndex,
         endIndex: filtered.drag.endIndex,

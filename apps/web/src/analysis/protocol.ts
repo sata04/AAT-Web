@@ -104,10 +104,15 @@ export interface SensorResult {
   filteredTime: Float64Array
   filteredGravity: Float64Array
   /**
-   * Acceleration in m/s^2 over the filtered segment, sign-corrected exactly as
-   * the pipeline corrected it. The desktop writes this as its own worksheet.
+   * Acceleration in m/s^2 on the sensor's sync-adjusted axis, full length and
+   * sign-corrected exactly as the pipeline corrected it.
+   *
+   * Full length rather than the filtered segment because that is what the
+   * desktop's Acceleration Data worksheet holds: `core/export.py` resamples the
+   * *unfiltered* series onto the unified axis, the same as the Gravity Level
+   * sheet, so the two sheets line up row for row.
    */
-  filteredAcceleration: Float64Array
+  acceleration: Float64Array
   startIndex: number | null
   endIndex: number | null
 }

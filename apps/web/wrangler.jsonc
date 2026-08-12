@@ -89,12 +89,17 @@
    * "instance_type": "lite" is the smallest shape available. Matplotlib Agg
    * rendering a 10.6x3.4in figure at 300 dpi fits comfortably.
    *
-   * The image reference is the account-scoped Cloudflare registry tag: Wrangler
-   * resolves a bare name against registry.cloudflare.com/<account_id>/. CI
-   * builds and tests the image in a credential-free job and pushes it from the
-   * deploy job (see .github/workflows/deploy.yml); Wrangler performs no
-   * environment-variable substitution inside this file, so the tag here and the
-   * tag CI pushes have to be kept in step by hand.
+   * The image is referenced by its Cloudflare managed-registry path, which
+   * embeds the account id — replace the placeholder id below together with
+   * d1_databases[0].database_id. Wrangler refuses an image whose account id is
+   * not the account being deployed to, so a placeholder fails loudly instead of
+   * pulling some other account's image.
+   *
+   * CI builds and tests the image in a credential-free job and pushes it from
+   * the deploy job (see .github/workflows/deploy.yml). Note that Wrangler does
+   * no environment-variable substitution inside this file: the digest the
+   * deploy step captures in POSTER_RENDERER_IMAGE cannot be injected here, so
+   * the tag below and the tag CI pushes have to be kept in step deliberately.
    */
   "durable_objects": {
     "bindings": [
@@ -114,7 +119,7 @@
     {
       "class_name": "PosterRendererContainer",
       "name": "aat-poster-renderer",
-      "image": "aat-poster-renderer:latest",
+      "image": "registry.cloudflare.com/00000000000000000000000000000000/aat-poster-renderer:latest",
       "max_instances": 1,
       "instance_type": "lite",
       "rollout_step_percentage": 100

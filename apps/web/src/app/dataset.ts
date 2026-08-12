@@ -20,7 +20,8 @@ export interface SensorDataset {
   /** The microgravity segment only — what the desktop calls the filtered data. */
   readonly filteredTime: FullResolutionArray
   readonly filteredGravity: FullResolutionArray
-  readonly filteredAcceleration: FullResolutionArray
+  /** Full-length acceleration in m/s^2 on this sensor's sync-adjusted axis. */
+  readonly acceleration: FullResolutionArray
 }
 
 export interface Dataset {
@@ -57,7 +58,7 @@ function toSensorDataset(sensor: AnalysisPayload['inner']): SensorDataset {
     gravity: asFullResolution(sensor.gravity),
     filteredTime: asFullResolution(sensor.filteredTime),
     filteredGravity: asFullResolution(sensor.filteredGravity),
-    filteredAcceleration: asFullResolution(sensor.filteredAcceleration),
+    acceleration: asFullResolution(sensor.acceleration),
   }
 }
 
