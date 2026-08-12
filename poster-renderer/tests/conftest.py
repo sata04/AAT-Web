@@ -23,6 +23,31 @@ if str(_SRC) not in sys.path:
 REFERENCE_DIR = Path(__file__).resolve().parent / "reference"
 
 
+def pytest_addoption(parser: pytest.Parser) -> None:
+    """Register `--update-reference`, used to re-baseline the checked-in PNG.
+
+    Regenerating is deliberately opt-in: the reference image is the record of
+    what the poster contract looked like when it was last reviewed, so a render
+    change must be seen and accepted by a person rather than silently absorbed
+    on the next test run.
+    """
+    parser.addoption(
+        "--update-reference",
+        action="store_true",
+        default=False,
+        help="Rewrite the checked-in reference PNG from the current renderer output.",
+    )
+
+
+def pytest_addoption(parser: pytest.Parser) -> None:
+    parser.addoption(
+        "--update-reference",
+        action="store_true",
+        default=False,
+        help="Rewrite the committed reference PNG from the current renderer output, then skip.",
+    )
+
+
 def encode_series(values: np.ndarray) -> dict[str, Any]:
     """Encode a float64 array the way `packages/plot-spec/src/wire.ts` does."""
     array = np.ascontiguousarray(values, dtype=np.dtype("<f8"))

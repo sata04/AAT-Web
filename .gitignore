@@ -11,3 +11,6 @@ playwright-report/
 .env
 .env.local
 *.tsbuildinfo
+.pytest_cache/
+htmlcov/
+.coverage
