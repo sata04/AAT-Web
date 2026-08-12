@@ -3,7 +3,8 @@
 /**
  * The Better Auth instance.
  *
- * What is enabled: passkeys (via the plugin in ./passkey-plugin.ts) and the Admin plugin.
+ * What is enabled: the official `@better-auth/passkey` plugin, AAT's invitation policy around it
+ * (both configured in ./passkey-plugin.ts) and the Admin plugin.
  * What is deliberately NOT enabled, and must stay that way:
  *
  *  - `emailAndPassword` — there is no password anywhere in this system.
@@ -23,7 +24,7 @@ import { resolveConfig } from '../config.ts'
 import { getDatabase } from '../db/client.ts'
 import * as schema from '../db/schema.ts'
 import { newId } from '../lib/ids.ts'
-import { aatPasskey } from './passkey-plugin.ts'
+import { aatPasskey, aatPasskeyPolicy } from './passkey-plugin.ts'
 
 /** Sessions last two weeks and slide forward a day at a time while in use. */
 const SESSION_EXPIRES_IN_SECONDS = 60 * 60 * 24 * 14
@@ -68,7 +69,10 @@ function buildAuth(env: Env) {
         defaultRole: 'Viewer',
         adminRoles: ['Admin'],
       }),
+      // The WebAuthn protocol, and AAT's invitation policy around it. Two plugins on purpose: the
+      // first is the upstream package configured, the second is everything that is AAT's own.
       aatPasskey({ db, config }),
+      aatPasskeyPolicy({ db, config }),
     ],
   })
 }

@@ -4,11 +4,14 @@
  * The migrations, and the constraints they are supposed to create.
  *
  * A schema test is only worth writing if it asserts the guarantees other code depends on rather
- * than restating the DDL. These three are load-bearing:
+ * than restating the DDL. These are load-bearing:
  *
  *  - the partial unique index that makes the automatic poster idempotent,
  *  - the unique index that makes an analysis identity (source + config + engine) one revision,
- *  - the per-owner uniqueness of a run code, which must NOT be global.
+ *  - the per-owner uniqueness of a run code, which must NOT be global,
+ *  - the shape of `passkey`, which is not AAT's to choose: `@better-auth/passkey` writes it
+ *    through Better Auth's adapter and a column the plugin does not know about is a failed INSERT
+ *    on the first registration after a deploy.
  */
 
 import { env } from 'cloudflare:test'
@@ -61,6 +64,75 @@ describe('migrations', () => {
     for (const name of names) {
       expect(name).not.toMatch(/sample|datapoint|series|waveform/i)
     }
+  })
+})
+
+describe('the passkey table', () => {
+  async function columns(table: string): Promise<Map<string, { notnull: number; dflt_value: unknown }>> {
+    const result = await env.DB.prepare(`PRAGMA table_info(${table})`).all<{
+      name: string
+      notnull: number
+      dflt_value: unknown
+    }>()
+    return new Map(
+      result.results.map((row) => [row.name, { notnull: row.notnull, dflt_value: row.dflt_value }]),
+    )
+  }
+
+  it("carries every column the plugin's model writes", async () => {
+    const passkey = await columns('passkey')
+    // The plugin's schema, field by field. Anything missing here is an INSERT that fails on the
+    // first real registration rather than in a test.
+    for (const column of [
+      'id',
+      'name',
+      'public_key',
+      'user_id',
+      'credential_id',
+      'counter',
+      'device_type',
+      'backed_up',
+      'transports',
+      'aaguid',
+      'created_at',
+    ]) {
+      expect(passkey.has(column)).toBe(true)
+    }
+  })
+
+  it('has no column the plugin does not write and cannot default', async () => {
+    const passkey = await columns('passkey')
+    // `algorithm` was part of the hand-written implementation and was NOT NULL with no default.
+    // The plugin never sets it, so leaving it behind would fail every registration.
+    expect(passkey.has('algorithm')).toBe(false)
+
+    // AAT's own additions must be nullable for exactly the same reason: the adapter only writes
+    // fields the plugin declares, so anything else has to be satisfiable by omission.
+    const pluginFields = new Set([
+      'id',
+      'name',
+      'public_key',
+      'user_id',
+      'credential_id',
+      'counter',
+      'device_type',
+      'backed_up',
+      'transports',
+      'aaguid',
+      'created_at',
+    ])
+    for (const [name, column] of passkey) {
+      if (pluginFields.has(name)) continue
+      expect(column.notnull === 0 || column.dflt_value !== null).toBe(true)
+    }
+  })
+
+  it('refuses to let one credential belong to two accounts', async () => {
+    const index = await env.DB.prepare(
+      "SELECT sql FROM sqlite_master WHERE type = 'index' AND name = 'passkey_credential_id_unique'",
+    ).first<{ sql: string }>()
+    expect(index?.sql).toContain('UNIQUE')
+    expect(index?.sql).toContain('credential_id')
   })
 })
 
