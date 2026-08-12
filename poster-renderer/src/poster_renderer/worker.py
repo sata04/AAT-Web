@@ -211,10 +211,14 @@ class RenderExecutor:
         startup_timeout_seconds: float = DEFAULT_STARTUP_TIMEOUT_SECONDS,
         max_queued: int = DEFAULT_MAX_QUEUED,
         queue_wait_seconds: float | None = None,
+        worker: RenderWorker | None = None,
     ) -> None:
         if max_queued < 0:
             raise ValueError("max_queued must be >= 0")
-        self._worker = RenderWorker(
+        # `worker` is injectable so the admission logic can be exercised on its own — a test can
+        # hold a render open at a known instant, which a real subprocess render is far too quick
+        # and far too opaque to allow.
+        self._worker = worker or RenderWorker(
             render_timeout_seconds=render_timeout_seconds,
             startup_timeout_seconds=startup_timeout_seconds,
         )
