@@ -94,8 +94,23 @@ function deepFreeze<T>(value: T): T {
   return value
 }
 
+/**
+ * Recursively `readonly`, so the frozen visual contract is un-mutable at the
+ * type level as well as at runtime.
+ *
+ * `deepFreeze` alone only fails on assignment at runtime, and only in strict
+ * mode. Since these values decide what every published research figure looks
+ * like, an accidental mutation should be a compile error, not a surprise in
+ * production.
+ */
+type DeepReadonly<T> = T extends (infer Element)[]
+  ? ReadonlyArray<DeepReadonly<Element>>
+  : T extends object
+    ? { readonly [Key in keyof T]: DeepReadonly<T[Key]> }
+    : T
+
 /** The frozen `aat-poster-v1` style. See the module doc for the source-of-truth files. */
-export const AAT_POSTER_V1_PRESET: PosterPreset = deepFreeze({
+export const AAT_POSTER_V1_PRESET: DeepReadonly<PosterPreset> = deepFreeze({
   version: 'aat-poster-v1',
   figure: { faceColor: '#FFFFFF' },
   axes: { faceColor: '#FFFFFF' },

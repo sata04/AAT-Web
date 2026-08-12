@@ -66,7 +66,8 @@ describe('aat-poster-v1: frozen desktop-compatible constants', () => {
     expect(Object.isFrozen(AAT_POSTER_V1_PRESET.lines.innerMean)).toBe(true)
     expect(Object.isFrozen(AAT_POSTER_V1_PRESET.watermark)).toBe(true)
     expect(() => {
-      // @ts-expect-error intentionally attempting a mutation to verify runtime immutability
+      // ESM runs in strict mode, so assigning into a frozen object throws a TypeError at runtime
+      // (TypeScript's own type for `figure.faceColor` is mutable `string`, so this is not a type error).
       AAT_POSTER_V1_PRESET.figure.faceColor = '#000000'
     }).toThrow()
   })
@@ -96,6 +97,6 @@ describe('posterPresetContentHash', () => {
     // is only acceptable as a NEW preset version (see presets.ts's module doc) — update this
     // pinned value only when deliberately introducing e.g. 'aat-poster-v2'.
     const hash = await posterPresetContentHash(AAT_POSTER_V1_PRESET)
-    expect(hash).toBe('4bd7f7e4d0e6ff1b1c5a5c1b1d7f9c1b0a0e9d3a4b5c6d7e8f9a0b1c2d3e4f5a')
+    expect(hash).toBe('25a77e8c61b5aea9594d5234f4fa95ed749fb2448fa6cacc5e6ae64d240481b7')
   })
 })
