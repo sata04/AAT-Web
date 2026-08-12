@@ -1,0 +1,619 @@
+/*
+ * Application chrome.
+ *
+ * Layout intent, in one line: the graph and the numbers get the space; the
+ * chrome gets a hairline. Every rule here is either structure or one of the
+ * borrowed desktop tokens — there are no gradients, no shadows beyond the
+ * single popover elevation, and no colour that is not carrying information.
+ */
+
+@import './tokens.css';
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  font-family: var(--font-sans);
+  font-size: var(--size-body);
+  line-height: 1.5;
+  color: var(--text-primary);
+  background: var(--bg-primary);
+  -webkit-font-smoothing: antialiased;
+}
+
+button,
+input,
+select,
+textarea {
+  font: inherit;
+  color: inherit;
+}
+
+/*
+ * One focus treatment for the whole app.
+ *
+ * `:focus-visible` rather than `:focus` so a mouse click does not leave a ring
+ * behind, while every keyboard path stays visibly traceable. The offset keeps
+ * the ring off the control's own border, which is what makes it readable
+ * against the quiet borders this palette uses.
+ */
+:where(a, button, input, select, textarea, [tabindex]):focus-visible {
+  outline: 2px solid var(--border-focus);
+  outline-offset: 2px;
+  border-radius: var(--radius-form);
+}
+
+/* ===== Application shell ===== */
+
+.app {
+  display: grid;
+  grid-template-rows: auto 1fr auto;
+  height: 100%;
+  min-height: 0;
+}
+
+.command-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-sm);
+  padding: var(--space-sm) var(--space-md);
+  background: var(--bg-secondary);
+  border-bottom: 1px solid var(--border);
+}
+
+.command-bar__brand {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-sm);
+  margin-right: var(--space-sm);
+}
+
+.command-bar__title {
+  font-size: var(--size-header);
+  font-weight: var(--weight-bold);
+  letter-spacing: 0.01em;
+}
+
+.command-bar__version {
+  font-family: var(--font-mono);
+  font-size: var(--size-small);
+  color: var(--text-secondary);
+}
+
+.command-bar__group {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2xs);
+}
+
+.command-bar__spacer {
+  flex: 1 1 auto;
+}
+
+.workspace {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(320px, 26rem);
+  min-height: 0;
+}
+
+.workspace--single {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.graph-area {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  padding: var(--space-md);
+  gap: var(--space-sm);
+}
+
+.side-panel {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  overflow-y: auto;
+  border-left: 1px solid var(--border);
+  background: var(--bg-secondary);
+}
+
+/* Below this the side panel stacks under the graph instead of squeezing it. */
+@media (max-width: 900px) {
+  .workspace {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: minmax(280px, 1fr) auto;
+    overflow-y: auto;
+  }
+
+  .side-panel {
+    border-left: none;
+    border-top: 1px solid var(--border);
+    overflow-y: visible;
+  }
+}
+
+/* ===== Controls ===== */
+
+.button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-xs);
+  min-height: var(--control-height);
+  padding: 0 var(--space-md);
+  background: var(--bg-tertiary);
+  color: var(--text-primary);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-form);
+  cursor: pointer;
+  transition: background var(--transition), border-color var(--transition);
+}
+
+.button:hover:not(:disabled) {
+  border-color: var(--accent);
+}
+
+.button:disabled {
+  color: var(--text-disabled);
+  border-color: var(--border);
+  cursor: not-allowed;
+}
+
+.button--primary {
+  background: var(--accent-variant);
+  border-color: var(--accent-variant);
+  color: var(--on-accent);
+}
+
+.button--primary:hover:not(:disabled) {
+  background: var(--accent-hover);
+  border-color: var(--accent-hover);
+}
+
+.button--flat {
+  background: transparent;
+  border-color: transparent;
+}
+
+.button--flat:hover:not(:disabled) {
+  background: var(--bg-tertiary);
+  border-color: var(--border);
+}
+
+/* Accent marks state, never decoration — this is the only "on" treatment. */
+.button[aria-pressed='true'] {
+  background: var(--bg-selected);
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.segmented {
+  display: inline-flex;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-form);
+  overflow: hidden;
+}
+
+.segmented .button {
+  border: none;
+  border-radius: 0;
+  background: transparent;
+}
+
+.segmented .button + .button {
+  border-left: 1px solid var(--border);
+}
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2xs);
+}
+
+.field__label {
+  font-size: var(--size-small);
+  color: var(--text-secondary);
+}
+
+.field__error {
+  font-size: var(--size-small);
+  color: var(--error);
+}
+
+.input,
+.select {
+  min-height: var(--control-height);
+  padding: 0 var(--space-sm);
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-form);
+  max-width: 100%;
+}
+
+.input--numeric {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+}
+
+.input:disabled,
+.select:disabled {
+  color: var(--text-disabled);
+  background: var(--bg-tertiary);
+}
+
+.checkbox-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-sm);
+  padding: var(--space-2xs) 0;
+}
+
+/* ===== Panels and tables ===== */
+
+.panel {
+  border-bottom: 1px solid var(--border);
+  padding: var(--space-md);
+}
+
+.panel__header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--space-sm);
+  margin-bottom: var(--space-sm);
+}
+
+.panel__title {
+  font-size: var(--size-subheader);
+  font-weight: var(--weight-bold);
+}
+
+.panel__hint {
+  font-size: var(--size-small);
+  color: var(--text-secondary);
+}
+
+.data-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: var(--size-small);
+}
+
+.data-table th,
+.data-table td {
+  padding: var(--space-2xs) var(--space-xs);
+  border-bottom: 1px solid var(--border);
+  text-align: left;
+  white-space: nowrap;
+}
+
+.data-table th {
+  color: var(--text-secondary);
+  font-weight: var(--weight-medium);
+}
+
+/* Digits must line up between rows; this is why the numeric family exists. */
+.data-table td.numeric,
+.data-table th.numeric {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+
+.table-scroll {
+  overflow-x: auto;
+}
+
+.dataset-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.dataset-list__item {
+  display: flex;
+  align-items: center;
+  gap: var(--space-xs);
+  width: 100%;
+  padding: var(--space-xs) var(--space-sm);
+  border: none;
+  border-bottom: 1px solid var(--border);
+  background: transparent;
+  cursor: pointer;
+  text-align: left;
+}
+
+.dataset-list__item:hover {
+  background: var(--bg-tertiary);
+}
+
+.dataset-list__item[aria-current='true'] {
+  background: var(--bg-selected);
+  box-shadow: inset 2px 0 0 var(--accent);
+}
+
+.dataset-list__name {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* ===== Status ===== */
+
+.status-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-md);
+  padding: var(--space-xs) var(--space-md);
+  background: var(--bg-secondary);
+  border-top: 1px solid var(--border);
+  font-size: var(--size-small);
+  color: var(--text-secondary);
+}
+
+.status-lane {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-xs);
+}
+
+.status-lane__dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--text-disabled);
+  flex: none;
+}
+
+.status-lane__dot--busy {
+  background: var(--accent);
+}
+
+.status-lane__dot--good {
+  background: var(--success);
+}
+
+.status-lane__dot--bad {
+  background: var(--error);
+}
+
+.status-lane__value {
+  color: var(--text-primary);
+}
+
+.progress {
+  width: 100%;
+  height: 4px;
+  background: var(--bg-tertiary);
+  border-radius: var(--radius-inner);
+  overflow: hidden;
+}
+
+.progress__bar {
+  height: 100%;
+  background: var(--accent);
+  transition: width var(--transition);
+}
+
+.notice {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-sm);
+  padding: var(--space-sm) var(--space-md);
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--text-secondary);
+  border-radius: var(--radius-form);
+  background: var(--bg-secondary);
+  font-size: var(--size-small);
+}
+
+.notice--warning {
+  border-left-color: var(--warning);
+}
+
+.notice--error {
+  border-left-color: var(--error);
+}
+
+.notice--info {
+  border-left-color: var(--accent);
+}
+
+.notice__body {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+/* ===== Graph ===== */
+
+.plot-frame {
+  position: relative;
+  flex: 1 1 auto;
+  min-height: 260px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-panel);
+  background: var(--bg-primary);
+  overflow: hidden;
+}
+
+.plot-frame__empty {
+  display: grid;
+  place-items: center;
+  height: 100%;
+  padding: var(--space-2xl);
+  text-align: center;
+  color: var(--text-secondary);
+}
+
+.selection-overlay {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+
+.selection-overlay__band {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  background: rgb(var(--graph-span-rgb) / 18%);
+  border-left: 1px solid var(--graph-span);
+  border-right: 1px solid var(--graph-span);
+}
+
+/*
+ * Edge grips.
+ *
+ * Wider than they look: the visible line is 1px, the hit area is 11px, because
+ * a 1px grab target is unusable with a mouse and impossible with a finger.
+ */
+.selection-overlay__handle {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 11px;
+  margin-left: -5px;
+  cursor: ew-resize;
+  pointer-events: auto;
+  touch-action: none;
+}
+
+.selection-overlay__handle::after {
+  content: '';
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 5px;
+  width: 1px;
+  background: var(--graph-span);
+}
+
+.selection-readout {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: var(--space-sm);
+}
+
+.selection-readout .field {
+  min-width: 8rem;
+}
+
+/* ===== Dialogs ===== */
+
+.dialog-backdrop {
+  position: fixed;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  padding: var(--space-lg);
+  background: var(--scrim);
+  z-index: 20;
+}
+
+.dialog {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-lg);
+  width: min(40rem, 100%);
+  max-height: min(90vh, 48rem);
+  overflow-y: auto;
+  padding: var(--space-2xl);
+  background: var(--bg-primary);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-panel);
+  /* The one elevation in the app: it separates a modal from the panel below it. */
+  box-shadow: 0 12px 32px rgb(0 0 0 / 24%);
+}
+
+.dialog__title {
+  margin: 0;
+  font-size: var(--size-header);
+  font-weight: var(--weight-bold);
+}
+
+.dialog__description {
+  margin: 0;
+  color: var(--text-secondary);
+  white-space: pre-line;
+}
+
+.dialog__section {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-sm);
+}
+
+.dialog__grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(13rem, 1fr));
+  gap: var(--space-md);
+}
+
+.dialog__actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--space-sm);
+}
+
+.separator {
+  height: 1px;
+  border: none;
+  margin: 0;
+  background: var(--border);
+}
+
+/* ===== Drop zone ===== */
+
+.dropzone {
+  display: grid;
+  place-items: center;
+  gap: var(--space-md);
+  height: 100%;
+  min-height: 16rem;
+  padding: var(--space-3xl);
+  border: 1px dashed var(--border-strong);
+  border-radius: var(--radius-panel);
+  background: var(--bg-primary);
+  text-align: center;
+  color: var(--text-secondary);
+  transition: border-color var(--transition), background var(--transition);
+}
+
+.dropzone--active {
+  border-color: var(--accent);
+  background: var(--bg-selected);
+}
+
+.dropzone__title {
+  font-size: var(--size-header);
+  font-weight: var(--weight-bold);
+  color: var(--text-primary);
+}
+
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
