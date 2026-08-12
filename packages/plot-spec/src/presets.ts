@@ -28,6 +28,18 @@ export const POSTER_PRESET_VERSIONS = ['aat-poster-v1'] as const
 
 export type PosterPresetVersion = (typeof POSTER_PRESET_VERSIONS)[number]
 
+/**
+ * The preset every newly created poster is rendered with.
+ *
+ * Written out as a literal rather than derived from the end of {@link POSTER_PRESET_VERSIONS},
+ * because adding a version to that array must never be what changes the style of every new
+ * figure. A `v2` will exist for a while before it becomes the default — long enough to render
+ * both and compare them — and promoting it is then a one-line, reviewable, deliberate change
+ * here. Existing posters are unaffected either way: each stored figure records the version it was
+ * rendered with, which is the whole reason the presets are versioned rather than edited.
+ */
+export const DEFAULT_POSTER_PRESET_VERSION: PosterPresetVersion = 'aat-poster-v1'
+
 export interface PosterLineStyle {
   color: string
   /** Omitted where the desktop app never overrides Matplotlib's default line width. */
@@ -158,6 +170,18 @@ export const POSTER_PRESETS: Readonly<Record<PosterPresetVersion, PosterPreset>>
 
 export function getPosterPreset(version: PosterPresetVersion): PosterPreset {
   return POSTER_PRESETS[version]
+}
+
+/**
+ * Whether a string names a preset this build knows.
+ *
+ * Exists because preset versions outlive the code that reads them in both directions: a browser
+ * holds a chosen version in local settings, and a deployment can be rolled back to a build that
+ * predates it. Checking a stored or received string here turns "the poster dialog throws on open"
+ * into "fall back to {@link DEFAULT_POSTER_PRESET_VERSION}".
+ */
+export function isPosterPresetVersion(value: unknown): value is PosterPresetVersion {
+  return typeof value === 'string' && (POSTER_PRESET_VERSIONS as readonly string[]).includes(value)
 }
 
 /**
