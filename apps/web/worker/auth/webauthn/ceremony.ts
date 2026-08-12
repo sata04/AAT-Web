@@ -195,7 +195,7 @@ export interface RegistrationCredential {
   id: string
   clientDataJson: string
   attestationObject: string
-  transports?: readonly string[]
+  transports?: readonly string[] | undefined
 }
 
 export interface VerifiedRegistration {
@@ -268,7 +268,7 @@ export interface AuthenticationCredential {
   clientDataJson: string
   authenticatorData: string
   signature: string
-  userHandle?: string | null
+  userHandle?: string | null | undefined
 }
 
 export interface StoredCredential {

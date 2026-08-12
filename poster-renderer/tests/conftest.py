@@ -39,15 +39,6 @@ def pytest_addoption(parser: pytest.Parser) -> None:
     )
 
 
-def pytest_addoption(parser: pytest.Parser) -> None:
-    parser.addoption(
-        "--update-reference",
-        action="store_true",
-        default=False,
-        help="Rewrite the committed reference PNG from the current renderer output, then skip.",
-    )
-
-
 def encode_series(values: np.ndarray) -> dict[str, Any]:
     """Encode a float64 array the way `packages/plot-spec/src/wire.ts` does."""
     array = np.ascontiguousarray(values, dtype=np.dtype("<f8"))
