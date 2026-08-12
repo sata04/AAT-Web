@@ -1,0 +1,290 @@
+name: Deploy
+
+# Design note — what this workflow is defending against
+#
+# The threat model is "the repository itself is hostile": a compromised
+# dependency, or a commit nobody read carefully enough. The mitigation is that
+# repository code and production credentials never occupy the same job.
+#
+# - `verify` runs everything that executes repository code — install scripts,
+#   linters, tests, the frontend build, the container build — and holds no
+#   Cloudflare token, no Doppler access and no OIDC capability.
+# - `deploy` holds the credentials and runs almost nothing: it downloads the
+#   artefacts `verify` already produced, pushes an image that was already built
+#   and tested, applies reviewed migrations, and calls `wrangler deploy`.
+#   It does NOT run `pnpm build`, does NOT run `docker build`, and does NOT run
+#   the test suite.
+#
+# Why the split has to be this strict: `id-token: write` can only be granted per
+# job, and GitHub injects the OIDC request variables into *every step* of that
+# job (they cannot be unset per step). Any code running in `deploy` can mint an
+# OIDC token and read the whole Doppler production config. There is no way to
+# fence that off, so the response is to minimise what runs there at all.
+#
+# Residual risk that is accepted: `wrangler` itself runs in `deploy` and does
+# have that reach. It is already trusted with the Cloudflare token and the
+# Worker secrets, so the marginal exposure is small — and `renovate.json5` holds
+# it (and the pinned actions) to a 30-day release age for exactly this reason.
+
+on:
+  push:
+    branches: ["main"]
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: deploy-production
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    name: Verify and build (no credentials)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install pnpm
+        run: npm install -g "$(node -p "require('./package.json').packageManager")"
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Lint
+        run: pnpm lint
+
+      - name: Typecheck
+        run: pnpm typecheck
+
+      - name: Test
+        run: pnpm test
+
+      - name: Install pinned Python dependencies
+        run: |
+          python3 -m pip install --require-hashes -r reference/python/requirements.txt
+          python3 -m pip install --require-hashes -r poster-renderer/requirements.txt
+
+      - name: Golden fixtures are current
+        env:
+          AAT_LOG_LEVEL: ERROR
+        run: python3 reference/python/generate_golden.py --check
+
+      - name: Poster renderer visual regression
+        run: python3 -m pytest poster-renderer/tests -q
+
+      # The production client bundle is built HERE, not in the deploy job, so
+      # vite/tailwind/workbox/tsc and their transitive dependencies never run
+      # alongside credentials.
+      - name: Build
+        run: pnpm build
+
+      # The container image is likewise built and tested here, then handed over
+      # as an artefact. The deploy job pushes it without ever reading the
+      # Dockerfile — this is the point of the whole split, and the reason
+      # wrangler's convenience "build my Dockerfile during deploy" path is
+      # deliberately not used.
+      - name: Build poster renderer image
+        run: docker build -t aat-poster-renderer:${{ github.sha }} poster-renderer
+
+      - name: Test image
+        run: docker run --rm --network none aat-poster-renderer:${{ github.sha }} python -m pytest /app/tests -q
+
+      - name: Export image
+        run: docker save aat-poster-renderer:${{ github.sha }} | gzip > "$RUNNER_TEMP/poster-renderer.tar.gz"
+
+      - name: Upload client bundle
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: web-client
+          path: apps/web/dist/client
+          retention-days: 1
+          if-no-files-found: error
+
+      - name: Upload renderer image
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: poster-renderer-image
+          path: ${{ runner.temp }}/poster-renderer.tar.gz
+          retention-days: 1
+          if-no-files-found: error
+
+  deploy:
+    name: Deploy (credentials, no repository build)
+    needs: verify
+    # A workflow_dispatch from a non-main branch must not reach the secrets.
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    permissions:
+      contents: read
+      # Mint the short-lived GitHub OIDC token that authenticates to Doppler.
+      # Scoped to this job; it grants no additional repository write access.
+      id-token: write
+    environment: production
+    steps:
+      - name: Check Doppler identity configuration
+        env:
+          DOPPLER_IDENTITY_ID: ${{ secrets.DOPPLER_IDENTITY_ID }}
+        run: |
+          if [ -z "$DOPPLER_IDENTITY_ID" ]; then
+            echo "::error::GitHub Environment 'production' secret DOPPLER_IDENTITY_ID is unset. See docs/deployment.md."
+            exit 1
+          fi
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install pnpm
+        run: npm install -g "$(node -p "require('./package.json').packageManager")"
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+          cache: pnpm
+
+      # Needed to run wrangler. Only the allowBuilds-approved install scripts
+      # execute, so the third-party code running here is wrangler, its
+      # dependencies, those few scripts, and the SHA-pinned actions.
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Download client bundle
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: web-client
+          path: apps/web/dist/client
+
+      - name: Download renderer image
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: poster-renderer-image
+          path: ${{ runner.temp }}
+
+      # Short-lived credentials only: GitHub's OIDC token is exchanged for
+      # Doppler access, so no long-lived Doppler service token lives in GitHub.
+      # Authorisation is constrained on the Doppler side by claim rules
+      # (aud / sub / ref / job_workflow_ref) so only this job, on main, qualifies.
+      - name: Fetch secrets from Doppler
+        id: doppler
+        uses: DopplerHQ/secrets-fetch-action@451892f16195f9ac360e1a5bcbf0b5fd0e957534 # v2.0.0
+        with:
+          auth-method: oidc
+          doppler-identity-id: ${{ secrets.DOPPLER_IDENTITY_ID }}
+          doppler-project: aat-web
+          doppler-config: prd
+
+      # Fail closed rather than deploying something subtly broken. Without
+      # DEPLOY_HOSTNAME the Worker has no public route; without
+      # BETTER_AUTH_SECRET / AAT_RP_ID passkeys cannot be verified, and an RP ID
+      # mismatch would invalidate every credential users have registered.
+      - name: Validate required secrets
+        env:
+          CF_DEPLOY_TOKEN_VALUE: ${{ steps.doppler.outputs.CF_DEPLOY_TOKEN_VALUE }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ steps.doppler.outputs.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_ZONE_ID: ${{ steps.doppler.outputs.CLOUDFLARE_ZONE_ID }}
+          DEPLOY_HOSTNAME: ${{ steps.doppler.outputs.DEPLOY_HOSTNAME }}
+          BETTER_AUTH_SECRET: ${{ steps.doppler.outputs.BETTER_AUTH_SECRET }}
+          BETTER_AUTH_URL: ${{ steps.doppler.outputs.BETTER_AUTH_URL }}
+          AAT_RP_ID: ${{ steps.doppler.outputs.AAT_RP_ID }}
+          AAT_TRUSTED_ORIGINS: ${{ steps.doppler.outputs.AAT_TRUSTED_ORIGINS }}
+        run: |
+          missing=""
+          for key in CF_DEPLOY_TOKEN_VALUE CLOUDFLARE_ACCOUNT_ID CLOUDFLARE_ZONE_ID DEPLOY_HOSTNAME \
+                     BETTER_AUTH_SECRET BETTER_AUTH_URL AAT_RP_ID AAT_TRUSTED_ORIGINS; do
+            if [ -z "${!key}" ]; then missing="$missing $key"; fi
+          done
+          if [ -n "$missing" ]; then
+            echo "::error::Doppler (prd) is missing required secrets:$missing"
+            exit 1
+          fi
+          echo "All required secrets are present"
+
+      # Push the ALREADY-BUILT image to Cloudflare's registry and deploy by
+      # digest. Nothing here reads poster-renderer/Dockerfile.
+      - name: Push prebuilt renderer image
+        id: image
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ steps.doppler.outputs.CF_DEPLOY_TOKEN_VALUE }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ steps.doppler.outputs.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          gunzip -c "$RUNNER_TEMP/poster-renderer.tar.gz" | docker load
+          pnpm --filter @aat/web exec wrangler containers push \
+            "aat-poster-renderer:${{ github.sha }}" | tee "$RUNNER_TEMP/push.log"
+          # wrangler prints the registry reference it pushed; capture it so the
+          # deploy step references an immutable digest rather than a tag.
+          ref=$(grep -oE '[a-z0-9./-]+@sha256:[0-9a-f]{64}' "$RUNNER_TEMP/push.log" | tail -1)
+          if [ -z "$ref" ]; then
+            echo "::error::Could not determine the pushed image digest from wrangler output."
+            exit 1
+          fi
+          echo "ref=$ref" >> "$GITHUB_OUTPUT"
+
+      # Migrations are reviewed SQL from the repository, applied before the code
+      # that depends on them. Schema changes follow expand/migrate/contract so
+      # this ordering is safe.
+      - name: Apply D1 migrations
+        working-directory: apps/web
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ steps.doppler.outputs.CF_DEPLOY_TOKEN_VALUE }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ steps.doppler.outputs.CLOUDFLARE_ACCOUNT_ID }}
+        run: pnpm exec wrangler d1 migrations apply aat-db --remote
+
+      # Allowlist, not passthrough: only these keys reach the Worker, so the
+      # deployment credentials themselves can never end up as Worker secrets.
+      # --secrets-file ships code and secrets in one deploy, avoiding an
+      # intermediate state where the new code runs without its configuration.
+      - name: Deploy Worker
+        working-directory: apps/web
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ steps.doppler.outputs.CF_DEPLOY_TOKEN_VALUE }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ steps.doppler.outputs.CLOUDFLARE_ACCOUNT_ID }}
+          POSTER_RENDERER_IMAGE: ${{ steps.image.outputs.ref }}
+          BETTER_AUTH_SECRET: ${{ steps.doppler.outputs.BETTER_AUTH_SECRET }}
+          BETTER_AUTH_URL: ${{ steps.doppler.outputs.BETTER_AUTH_URL }}
+          AAT_RP_ID: ${{ steps.doppler.outputs.AAT_RP_ID }}
+          AAT_RP_NAME: ${{ steps.doppler.outputs.AAT_RP_NAME }}
+          AAT_TRUSTED_ORIGINS: ${{ steps.doppler.outputs.AAT_TRUSTED_ORIGINS }}
+        run: |
+          jq -n 'env | {
+            BETTER_AUTH_SECRET,
+            BETTER_AUTH_URL,
+            AAT_RP_ID,
+            AAT_RP_NAME,
+            AAT_TRUSTED_ORIGINS
+          } | with_entries(select(.value != null and .value != ""))' \
+            > "$RUNNER_TEMP/worker-secrets.json"
+          pnpm exec wrangler deploy --secrets-file "$RUNNER_TEMP/worker-secrets.json"
+          rm -f "$RUNNER_TEMP/worker-secrets.json"
+
+      # The production hostname is deliberately not committed to the repository;
+      # it comes from Doppler. The Workers Domains API is idempotent, so
+      # re-running converges on the same record.
+      - name: Ensure custom domain
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ steps.doppler.outputs.CF_DEPLOY_TOKEN_VALUE }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ steps.doppler.outputs.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_ZONE_ID: ${{ steps.doppler.outputs.CLOUDFLARE_ZONE_ID }}
+          DEPLOY_HOSTNAME: ${{ steps.doppler.outputs.DEPLOY_HOSTNAME }}
+        run: |
+          jq -n 'env | {
+            zone_id: .CLOUDFLARE_ZONE_ID,
+            hostname: .DEPLOY_HOSTNAME,
+            service: "aat-web",
+            environment: "production"
+          }' | curl -sS --fail-with-body -o /dev/null \
+            -X PUT "https://api.cloudflare.com/client/v4/accounts/${CLOUDFLARE_ACCOUNT_ID}/workers/domains" \
+            -H "Authorization: Bearer ${CLOUDFLARE_API_TOKEN}" \
+            -H "Content-Type: application/json" \
+            --data @-
+          echo "Custom domain assignment confirmed"

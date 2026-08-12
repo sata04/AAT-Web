@@ -1,0 +1,123 @@
+{
+  $schema: "https://docs.renovatebot.com/renovate-schema.json",
+  extends: [
+    // pinDigests (keeps GitHub Actions SHA-pinned), dependency pinning,
+    // config auto-migration.
+    "config:best-practices",
+    ":timezone(Asia/Tokyo)",
+  ],
+
+  // Second layer of supply-chain defence: do not even open a PR for a release
+  // younger than 7 days. The first layer is pnpm-workspace.yaml's
+  // minimumReleaseAge, which refuses the install outright.
+  minimumReleaseAge: "7 days",
+  // When the newest version is still inside the window, propose the newest
+  // version that is outside it rather than nothing.
+  internalChecksFilter: "strict",
+
+  // Transitive dependencies are refreshed weekly. Everything that lands here
+  // has already passed the three pnpm gates (7-day wait, blockExoticSubdeps,
+  // trustPolicy: no-downgrade), so a large batch is not a batch of unvetted
+  // code. Left unmerged these PRs simply rot, so they auto-merge on green CI.
+  lockFileMaintenance: {
+    enabled: true,
+    automerge: true,
+    schedule: ["before 7am on monday"],
+  },
+
+  packageRules: [
+    {
+      // config:best-practices pulls in security:minimumReleaseAgeNpm, which
+      // overrides the npm datasource to 3 days and defeats the top-level
+      // 7 days. The result would be PRs proposing versions that pnpm then
+      // refuses to install, failing with ERR_PNPM_OUTDATED_LOCKFILE. Realign
+      // the two. Scoped to ordinary updates so the preset's exemptions for
+      // lockFileMaintenance / pin / bump / rollback stay intact.
+      description: "Hold npm-registry dependencies to the same 7 days pnpm enforces",
+      matchDatasources: ["npm"],
+      matchUpdateTypes: ["major", "minor", "patch"],
+      minimumReleaseAge: "7 days",
+      internalChecksFilter: "strict",
+    },
+    {
+      description: "minor / patch auto-merge on green CI (branch protection enforces the checks)",
+      matchUpdateTypes: ["minor", "patch"],
+      matchCurrentVersion: "!/^0\\./",
+      automerge: true,
+    },
+    {
+      description: "0.x minors can be breaking, so auto-merge patches only",
+      matchCurrentVersion: "/^0\\./",
+      matchUpdateTypes: ["patch"],
+      automerge: true,
+    },
+    {
+      description: "GitHub Actions SHA (digest) updates auto-merge",
+      matchManagers: ["github-actions"],
+      matchUpdateTypes: ["minor", "patch", "pin", "digest"],
+      automerge: true,
+    },
+    {
+      description: "Majors get a PR and a human review",
+      matchUpdateTypes: ["major"],
+      automerge: false,
+    },
+    {
+      // THE POSTER RENDERER IS A VISUAL CONTRACT.
+      //
+      // Matplotlib, NumPy, the Python base image, FreeType and the font stack
+      // all change rendered pixels. A "harmless" patch bump can silently move
+      // a tick label and invalidate the compatibility guarantee that is the
+      // entire reason the container exists. These are therefore NEVER
+      // auto-merged, at any update type, and require visual regression review
+      // (poster-renderer/tests compares against checked-in reference images).
+      //
+      // See docs/poster-renderer.md for the review procedure.
+      description: "Poster renderer dependencies never auto-merge — they change research figures",
+      matchManagers: ["dockerfile", "pip_requirements", "pip-compile", "pep621"],
+      matchFileNames: ["poster-renderer/**"],
+      automerge: false,
+      minimumReleaseAge: "7 days",
+      addLabels: ["visual-contract", "needs-visual-review"],
+    },
+    {
+      // Everything below runs where production credentials exist, or produces
+      // the artefact that gets deployed:
+      //   wrangler                  — runs in the deploy job holding the
+      //                               Cloudflare token and Worker secrets
+      //   pnpm                      — drives every CI job via packageManager
+      //   actions/*, DopplerHQ/*    — execute on the deploy runner with OIDC
+      //   @cloudflare/vite-plugin   — builds the bundle that reaches production
+      //
+      // Marking these automerge:false would just leave them stale, which is its
+      // own risk. Instead of "a human looks at it" the mitigation is "wait
+      // longer": account takeovers are typically detected within days, so these
+      // sit for 30 days and then auto-merge on green CI. To take one sooner,
+      // open the PR manually from the Dependency Dashboard.
+      //
+      // Must stay last — Renovate applies later rules on top.
+      description: "Deployment-path dependencies wait 30 days (auto-merge retained)",
+      matchPackageNames: [
+        "wrangler",
+        "@cloudflare/vite-plugin",
+        "@cloudflare/vitest-pool-workers",
+        "pnpm",
+        // The github-actions manager uses the literal `uses:` string as depName.
+        "actions/checkout",
+        "actions/setup-node",
+        "actions/download-artifact",
+        "actions/upload-artifact",
+        "DopplerHQ/secrets-fetch-action",
+      ],
+      minimumReleaseAge: "30 days",
+      internalChecksFilter: "strict",
+    },
+  ],
+
+  // OSV advisories jump the queue. If the fixed version is younger than 7 days
+  // pnpm will still refuse it, so the emergency procedure is to add
+  // "name@version" to minimumReleaseAgeExclude in pnpm-workspace.yaml, land the
+  // fix, and remove the entry afterwards. Never disable the policy globally.
+  // Full procedure: docs/supply-chain.md.
+  osvVulnerabilityAlerts: true,
+}

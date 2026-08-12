@@ -1,0 +1,125 @@
+name: CI
+
+on:
+  push:
+    branches: ["main", "claude/**"]
+  pull_request:
+
+# Do not inherit the repository default (Settings -> Actions -> Workflow
+# permissions). Declaring it here means a later change to that setting cannot
+# quietly widen what this workflow can do.
+permissions: {}
+
+jobs:
+  web:
+    name: Lint, typecheck, test, build
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      # checkout needs to read the repository. This job pushes nothing.
+      contents: read
+    steps:
+      # Actions are pinned to full commit SHAs: a moved tag then changes
+      # nothing. Renovate keeps the digests current.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # Do not leave GITHUB_TOKEN in .git/config. No job here pushes, so it
+          # is not needed, and a dependency that manages to run code cannot
+          # pick it up.
+          persist-credentials: false
+
+      # pnpm comes from the packageManager field rather than a third-party
+      # action, so there is one source of truth and Renovate updates it there.
+      - name: Install pnpm
+        run: npm install -g "$(node -p "require('./package.json').packageManager")"
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+          cache: pnpm
+
+      # --frozen-lockfile: CI never resolves a version the lockfile does not
+      # already pin, so the supply-chain gates in pnpm-workspace.yaml cannot be
+      # bypassed by a stale lockfile.
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Lint
+        run: pnpm lint
+
+      - name: Typecheck
+        run: pnpm typecheck
+
+      - name: Test
+        run: pnpm test
+
+      - name: Build
+        run: pnpm build
+
+      # Measures the Worker in the shape that would actually be uploaded.
+      # --dry-run needs no Cloudflare credentials, which is why it belongs in
+      # this secretless job (see deploy.yml for the verify/deploy split).
+      - name: Worker bundle size
+        run: |
+          pnpm --filter @aat/web exec wrangler deploy --dry-run --outdir dist/worker-bundle
+          node scripts/check-worker-bundle-size.mjs apps/web/dist/worker-bundle
+
+  numerical:
+    name: Python reference and golden fixtures
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # ubuntu-latest ships Python 3.12, which is the interpreter the vendored
+      # reference resolves its pinned NumPy/pandas for. Using it directly keeps
+      # one more third-party action out of CI.
+      - name: Check interpreter
+        run: python3 --version
+
+      - name: Install pinned reference dependencies
+        run: python3 -m pip install --require-hashes -r reference/python/requirements.txt
+
+      # The goldens must match what the vendored reference produces right now.
+      # If the reference or a fixture moved without the goldens being
+      # regenerated, this fails rather than letting the TypeScript suite
+      # compare against stale expectations.
+      - name: Golden fixtures are current
+        env:
+          AAT_LOG_LEVEL: ERROR
+        run: python3 reference/python/generate_golden.py --check
+
+  poster-renderer:
+    name: Poster renderer
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install pinned renderer dependencies
+        run: python3 -m pip install --require-hashes -r poster-renderer/requirements.txt
+
+      # The visual-contract suite. These assertions are what stop a Matplotlib
+      # or font update from silently changing every research figure the project
+      # has ever produced.
+      - name: Renderer tests
+        run: python3 -m pytest poster-renderer/tests -q
+
+      # Building the image here, in a job with no credentials, is half of the
+      # deployment trust boundary: deploy.yml consumes an image that was already
+      # built and tested, and never builds from repository source itself.
+      - name: Build container image
+        run: docker build -t aat-poster-renderer:ci poster-renderer
+
+      - name: Renderer tests inside the image
+        run: |
+          docker run --rm --network none aat-poster-renderer:ci \
+            python -m pytest /app/tests -q

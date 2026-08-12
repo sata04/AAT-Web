@@ -1,0 +1,5 @@
+# Dependencies of the vendored AAT desktop core (reference/python/core).
+# Versions match what /home/user/AAT/uv.lock resolves for Python >= 3.12, so the
+# oracle in CI is the same oracle the desktop application runs.
+numpy==2.5.1
+pandas==3.0.5
