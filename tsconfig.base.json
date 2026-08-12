@@ -15,9 +15,19 @@
     "esModuleInterop": true,
     "resolveJsonModule": true,
     "forceConsistentCasingInFileNames": true,
-    "declaration": true,
-    "declarationMap": true,
-    "sourceMap": true,
-    "composite": true
+
+    /*
+     * The workspace packages are consumed as TypeScript source: apps/web
+     * imports @aat/analysis-core straight from src/ and Vite bundles it. No
+     * package emits build output, so `.ts` import specifiers are the honest
+     * spelling — they name the file that actually exists, and nothing has to
+     * rewrite them at publish time.
+     *
+     * Consequences: allowImportingTsExtensions requires noEmit, which rules out
+     * project references (composite). That is fine here — `tsc -b` in each
+     * package is a typecheck, and the bundler does the building.
+     */
+    "allowImportingTsExtensions": true,
+    "noEmit": true
   }
 }
