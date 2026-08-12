@@ -118,15 +118,43 @@ when none is configured, so a missing setting fails loudly instead of silently
 committing as `root@somebox.localdomain`. It is a *global developer* setting and
 is recommended rather than required; this repository sets it locally regardless.
 
-## Signing
+## Signing — why every commit shows as unverified
 
-The environment's global configuration enables SSH commit signing
-(`commit.gpgsign=true`, `gpg.format=ssh`). No commit in this repository is
-signed — `git log --format=%G?` reports `N` throughout — and the rewrite did not
-invalidate any signature, because there were none.
+**No commit in this repository carries a signature.** `git log --format=%G?`
+reports `N` throughout, and no commit object contains a `gpgsig` header.
 
-No signing configuration was invented here. If signed commits are wanted,
-configure `user.signingkey` with a key registered on the `sata04` GitHub account
-and enable branch protection requiring signatures. Note that history rewrites
-invalidate signatures, so this should be settled before the repository is
-published.
+If GitHub displays these commits as *Unverified*, that is the expected result of
+unsigned commits — and it is shown prominently if the account has **vigilant
+mode** enabled (Settings → SSH and GPG keys → *Flag unsigned commits as
+unverified*). It is not a broken or invalid signature; there is no signature to
+be invalid.
+
+Two independent reasons no signature could be produced:
+
+1. **Signing is inert in the environment these commits were created in.** The
+   global config sets `commit.gpgsign=true` and `gpg.format=ssh`, but a probe
+   commit made with an explicit `-S` exited 0 and produced no `gpgsig` header,
+   so the configured `gpg.ssh.program` does not actually sign.
+2. **The only key available belongs to the build environment, not to sata04.**
+   Signing commits attributed to the repository owner with an unrelated key
+   would be misattribution — worse than leaving them unsigned, and GitHub would
+   still report *Unverified* because the key is not on the owner's account.
+
+No signing configuration was invented to paper over this.
+
+### To get verified commits
+
+1. Register a signing key (SSH or GPG) on the **sata04** GitHub account.
+2. In each working copy, set `user.signingkey` to that key and
+   `commit.gpgsign=true`.
+3. Optionally require signatures via branch protection on `main`.
+
+**Settle this before the repository is published.** Signatures are computed over
+the commit object, so any later history rewrite invalidates every one of them —
+and the whole point of a rewrite is that it is cheap only while the repository is
+private and unreferenced.
+
+The existing 40 commits cannot be retroactively signed without rewriting them
+again. Whether that is worth doing is a judgement call: if verified history
+matters from the first commit, do it now, in one pass, together with the
+signing-key setup.

@@ -26,9 +26,22 @@ name: Deploy
 # Worker secrets, so the marginal exposure is small — and `renovate.json5` holds
 # it (and the pinned actions) to a 30-day release age for exactly this reason.
 
+# Manual-only until the production infrastructure exists.
+#
+# The Cloudflare account, D1 and R2 bindings, the Doppler `aat-web/prd` config
+# and the `production` environment secret DOPPLER_IDENTITY_ID have not been
+# provisioned yet, so an automatic push trigger would fail on every commit to
+# main — training everyone to ignore a red Deploy badge, which is exactly how a
+# genuine deployment failure gets missed later.
+#
+# The fail-closed secret check below means nothing is ever deployed half
+# configured; this trigger change only stops the pointless attempt.
+#
+# Restore the automatic trigger once the infrastructure is in place, by adding:
+#   push:
+#     branches: ["main"]
+# See docs/deployment.md.
 on:
-  push:
-    branches: ["main"]
   workflow_dispatch:
 
 permissions: {}

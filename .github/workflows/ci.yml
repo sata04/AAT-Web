@@ -41,9 +41,15 @@ jobs:
         run: node scripts/check-commit-identity.mjs --range "${{ github.event.pull_request.base.sha }}..${{ github.event.pull_request.head.sha }}"
 
       # On a push, inspect exactly what was pushed. The before-SHA is all zeroes
-      # for a newly created branch and can point at a discarded commit after a
-      # force push, so fall back to auditing every reachable commit instead of
-      # silently checking nothing.
+      # for a newly created branch and points at a discarded commit after a
+      # force push, so fall back to the pushed commit's own ancestry — which
+      # includes the root commit that `A..B` would skip.
+      #
+      # The fallback deliberately does NOT use --all. `git log --all` includes
+      # remote-tracking refs, so an unrelated branch left behind by someone else
+      # would fail this push. That is the wrong signal on a push event: this job
+      # answers "is what I just pushed clean?", not "is every branch in the
+      # repository clean?". Use `--all` locally for a whole-repository audit.
       - name: Check commit identity (push)
         if: github.event_name == 'push'
         env:
@@ -54,8 +60,8 @@ jobs:
              && git cat-file -e "$BEFORE^{commit}" 2>/dev/null; then
             node scripts/check-commit-identity.mjs --range "$BEFORE..$AFTER"
           else
-            echo "No usable before-SHA (new branch or force push); auditing all reachable commits."
-            node scripts/check-commit-identity.mjs --all
+            echo "No usable before-SHA (new branch or force push); auditing the pushed ref's full history."
+            node scripts/check-commit-identity.mjs --range "$AFTER"
           fi
 
       # pnpm comes from the packageManager field rather than a third-party
