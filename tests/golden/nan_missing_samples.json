@@ -1,0 +1,283 @@
+{
+  "goldenFormatVersion": 1,
+  "analysisEngineVersion": "1.0.0",
+  "name": "nan_missing_samples",
+  "description": "NaN gaps in both sensors",
+  "csv": "csv/nan_missing_samples.csv",
+  "csvEncoding": "utf-8",
+  "csvSha256": "e55c9c5f436e6e2d2add627242b21f98701ecf8e2946da3128d1b15431a4226e",
+  "config": {
+    "time_column": "Time (s)",
+    "acceleration_column_inner_capsule": "Z-axis acceleration 1(m/s2)",
+    "acceleration_column_drag_shield": "Z-axis acceleration 2(m/s2)",
+    "use_inner_acceleration": true,
+    "use_drag_acceleration": true,
+    "sampling_rate": 1000,
+    "gravity_constant": 9.797578,
+    "ylim_min": -1.0,
+    "ylim_max": 1.0,
+    "acceleration_threshold": 5.0,
+    "end_gravity_level": 8.0,
+    "window_size": 0.1,
+    "g_quality_start": 0.1,
+    "g_quality_end": 1.0,
+    "g_quality_step": 0.05,
+    "min_seconds_after_start": 0.7,
+    "invert_inner_acceleration": true,
+    "default_graph_duration": 1.45
+  },
+  "detectedColumns": {
+    "time": [
+      "Time (s)"
+    ],
+    "acceleration": [
+      "Z-axis acceleration 1(m/s2)",
+      "Z-axis acceleration 2(m/s2)"
+    ]
+  },
+  "sync": {
+    "innerIndex": 304,
+    "dragIndex": 305,
+    "innerFallback": null,
+    "dragFallback": null,
+    "innerCandidateCount": 1196,
+    "dragCandidateCount": 1195
+  },
+  "arrays": {
+    "innerAdjustedTime": {
+      "file": "arrays/439e9496950667f6704bbfdabfe96e9b242290d9241b3a70103c0c588903ccf3.f64",
+      "sha256": "439e9496950667f6704bbfdabfe96e9b242290d9241b3a70103c0c588903ccf3",
+      "length": 2500,
+      "finiteCount": 2500,
+      "nanCount": 0,
+      "posInfCount": 0,
+      "negInfCount": 0
+    },
+    "dragAdjustedTime": {
+      "file": "arrays/a82f72ba8dfe20d06ea2db9f8430cea52f68918568533ed8b8d747b71e3b80a1.f64",
+      "sha256": "a82f72ba8dfe20d06ea2db9f8430cea52f68918568533ed8b8d747b71e3b80a1",
+      "length": 2500,
+      "finiteCount": 2500,
+      "nanCount": 0,
+      "posInfCount": 0,
+      "negInfCount": 0
+    },
+    "innerGravity": {
+      "file": "arrays/a8a5612b0f3d5004ecf6251fa7d819a34d36ee4924c73856602694059c2f723c.f64",
+      "sha256": "a8a5612b0f3d5004ecf6251fa7d819a34d36ee4924c73856602694059c2f723c",
+      "length": 2500,
+      "finiteCount": 2496,
+      "nanCount": 4,
+      "posInfCount": 0,
+      "negInfCount": 0
+    },
+    "dragGravity": {
+      "file": "arrays/f67ce3224ab6f18b3856c31959e75448cbfc38a3ab5ecb4687e5182573b52c12.f64",
+      "sha256": "f67ce3224ab6f18b3856c31959e75448cbfc38a3ab5ecb4687e5182573b52c12",
+      "length": 2500,
+      "finiteCount": 2496,
+      "nanCount": 4,
+      "posInfCount": 0,
+      "negInfCount": 0
+    },
+    "filteredTime": {
+      "file": "arrays/62b7c44a41639f7b2791593e6bd8956debb97e8fad39aa4524ffca866347605f.f64",
+      "sha256": "62b7c44a41639f7b2791593e6bd8956debb97e8fad39aa4524ffca866347605f",
+      "length": 1264,
+      "finiteCount": 1264,
+      "nanCount": 0,
+      "posInfCount": 0,
+      "negInfCount": 0
+    },
+    "filteredAdjustedTime": {
+      "file": "arrays/4cd754fe56cc9106c84ebc9e3391c321fbf42313214e8ad276fd7edc88a17e22.f64",
+      "sha256": "4cd754fe56cc9106c84ebc9e3391c321fbf42313214e8ad276fd7edc88a17e22",
+      "length": 1261,
+      "finiteCount": 1261,
+      "nanCount": 0,
+      "posInfCount": 0,
+      "negInfCount": 0
+    },
+    "filteredInnerGravity": {
+      "file": "arrays/c310bffac794de8d901ca9f045c45eecd8d1c5a4cce4c76978f22c857126c3ab.f64",
+      "sha256": "c310bffac794de8d901ca9f045c45eecd8d1c5a4cce4c76978f22c857126c3ab",
+      "length": 1264,
+      "finiteCount": 1260,
+      "nanCount": 4,
+      "posInfCount": 0,
+      "negInfCount": 0
+    },
+    "filteredDragGravity": {
+      "file": "arrays/ce5cd5990d5d04b4f177e3c351f149f59e535944a80e7f6e00f6d7bcd729c188.f64",
+      "sha256": "ce5cd5990d5d04b4f177e3c351f149f59e535944a80e7f6e00f6d7bcd729c188",
+      "length": 1261,
+      "finiteCount": 1257,
+      "nanCount": 4,
+      "posInfCount": 0,
+      "negInfCount": 0
+    }
+  },
+  "filter": {
+    "endIndex": 1567,
+    "innerLength": 1264,
+    "dragLength": 1261,
+    "innerStartIndex": 304,
+    "innerEndIndex": 1567,
+    "dragStartIndex": 305,
+    "dragEndIndex": 1565
+  },
+  "statistics": {
+    "inner": {
+      "mean": 0.0010680565586606676,
+      "startTime": 0.911,
+      "std": 0.0010623481558281593
+    },
+    "drag": {
+      "mean": 0.0010690037382617634,
+      "startTime": 0.05399999999999999,
+      "std": 0.0010102176542638773
+    }
+  },
+  "gQuality": [
+    {
+      "windowSize": 0.1,
+      "innerStartTime": 0.911,
+      "innerMean": 0.0010680565586606676,
+      "innerStd": 0.0010623481558281593,
+      "dragStartTime": 0.05399999999999999,
+      "dragMean": 0.0010690037382617634,
+      "dragStd": 0.0010102176542638773
+    },
+    {
+      "windowSize": 0.15000000000000002,
+      "innerStartTime": 0.9219999999999999,
+      "innerMean": 0.0012159258941274297,
+      "innerStd": 0.0014421735427406382,
+      "dragStartTime": 0.07200000000000001,
+      "dragMean": 0.001235517537841325,
+      "dragStd": 0.001443539133014268
+    },
+    {
+      "windowSize": 0.20000000000000004,
+      "innerStartTime": 0.6859999999999999,
+      "innerMean": 0.0012298041428882754,
+      "innerStd": 0.0014169229742442449,
+      "dragStartTime": 0.03600000000000003,
+      "dragMean": 0.0012269014533150175,
+      "dragStd": 0.0014241530975539563
+    },
+    {
+      "windowSize": 0.25000000000000006,
+      "innerStartTime": 0.762,
+      "innerMean": 0.0012021426490059588,
+      "innerStd": 0.0013866561012517706,
+      "dragStartTime": 0.5489999999999999,
+      "dragMean": 0.0012287777361213524,
+      "dragStd": 0.0014082890798773002
+    },
+    {
+      "windowSize": 0.30000000000000004,
+      "innerStartTime": 0.7729999999999999,
+      "innerMean": 0.0012401302883602854,
+      "innerStd": 0.001450950125797584,
+      "dragStartTime": 0.5549999999999999,
+      "dragMean": 0.0012800080011767074,
+      "dragStd": 0.0014783480214161503
+    },
+    {
+      "windowSize": 0.3500000000000001,
+      "innerStartTime": 0.7489999999999999,
+      "innerMean": 0.0012584341260855963,
+      "innerStd": 0.0014616876428145019,
+      "dragStartTime": 0.5309999999999999,
+      "dragMean": 0.0012968247415784822,
+      "dragStd": 0.0014822685628740394
+    },
+    {
+      "windowSize": 0.40000000000000013,
+      "innerStartTime": 0.6890000000000001,
+      "innerMean": 0.0012350537535523543,
+      "innerStd": 0.001436485040281002,
+      "dragStartTime": 0.40199999999999997,
+      "dragMean": 0.0012703412353836502,
+      "dragStd": 0.0014638636283453002
+    },
+    {
+      "windowSize": 0.45000000000000007,
+      "innerStartTime": 0.631,
+      "innerMean": 0.0012490066295835428,
+      "innerStd": 0.0014591705534722844,
+      "dragStartTime": 0.413,
+      "dragMean": 0.0012855444302867372,
+      "dragStd": 0.0014866945680706697
+    },
+    {
+      "windowSize": 0.5000000000000001,
+      "innerStartTime": 0.687,
+      "innerMean": 0.0012791214194552711,
+      "innerStd": 0.0014816060697414022,
+      "dragStartTime": 0.35800000000000004,
+      "dragMean": 0.00132321064816383,
+      "dragStd": 0.0015081646160516285
+    },
+    {
+      "windowSize": 0.5500000000000002,
+      "innerStartTime": 0.611,
+      "innerMean": 0.0012665902909503406,
+      "innerStd": 0.0014679946983206862,
+      "dragStartTime": 0.334,
+      "dragMean": 0.0013015283930216707,
+      "dragStd": 0.0014933698701303003
+    }
+  ],
+  "rangeStatistics": [
+    {
+      "xMin": 0.1,
+      "xMax": 0.5,
+      "inner": {
+        "mean": 8.028852157171504e-05,
+        "abs_mean": 0.0013280420262724861,
+        "std": 0.0015103989745815303,
+        "min": -0.0034118105219309103,
+        "max": 0.002975387935934524,
+        "range": 0.006387198457865434,
+        "count": 399,
+        "missing": 2
+      },
+      "drag": {
+        "mean": 0.00013468367352038505,
+        "abs_mean": 0.0013221320196415908,
+        "std": 0.0015138012692435278,
+        "min": -0.002919241166077127,
+        "max": 0.0033538496480049152,
+        "range": 0.006273090814082042,
+        "count": 400,
+        "missing": 1
+      }
+    },
+    {
+      "xMin": 0.0,
+      "xMax": 1.45,
+      "inner": {
+        "mean": 0.22226880101368726,
+        "abs_mean": 0.2234651643388538,
+        "std": 1.0701722094593435,
+        "min": -0.0034118105219309103,
+        "max": 8.091999879970336,
+        "range": 8.095411690492266,
+        "count": 1260,
+        "missing": 4
+      },
+      "drag": {
+        "mean": 0.21394397787478478,
+        "abs_mean": 0.21515698985574339,
+        "std": 1.045962146003955,
+        "min": -0.00305902014735798,
+        "max": 8.012184235736628,
+        "range": 8.015243255883986,
+        "count": 1257,
+        "missing": 4
+      }
+    }
+  ]
+}

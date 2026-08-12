@@ -1,0 +1,168 @@
+{
+  "goldenFormatVersion": 1,
+  "analysisEngineVersion": "1.0.0",
+  "name": "short_data",
+  "description": "Shorter than one window",
+  "csv": "csv/short_data.csv",
+  "csvEncoding": "utf-8",
+  "csvSha256": "09eb3297eaa8e612b52a0d30d8787ed38e970e7977165b5dde16bb48659f00da",
+  "config": {
+    "time_column": "Time (s)",
+    "acceleration_column_inner_capsule": "Z-axis acceleration 1(m/s2)",
+    "acceleration_column_drag_shield": "Z-axis acceleration 2(m/s2)",
+    "use_inner_acceleration": true,
+    "use_drag_acceleration": true,
+    "sampling_rate": 1000,
+    "gravity_constant": 9.797578,
+    "ylim_min": -1.0,
+    "ylim_max": 1.0,
+    "acceleration_threshold": 5.0,
+    "end_gravity_level": 8.0,
+    "window_size": 0.1,
+    "g_quality_start": 0.1,
+    "g_quality_end": 1.0,
+    "g_quality_step": 0.05,
+    "min_seconds_after_start": 0.7,
+    "invert_inner_acceleration": true,
+    "default_graph_duration": 1.45
+  },
+  "detectedColumns": {
+    "time": [
+      "Time (s)"
+    ],
+    "acceleration": [
+      "Z-axis acceleration 1(m/s2)",
+      "Z-axis acceleration 2(m/s2)"
+    ]
+  },
+  "sync": {
+    "innerIndex": 0,
+    "dragIndex": 0,
+    "innerFallback": null,
+    "dragFallback": null,
+    "innerCandidateCount": 40,
+    "dragCandidateCount": 40
+  },
+  "arrays": {
+    "innerAdjustedTime": {
+      "file": "arrays/f5ea66205d4dadc65fc289fb556c83861095d836525db026bec20e56f6590f0a.f64",
+      "sha256": "f5ea66205d4dadc65fc289fb556c83861095d836525db026bec20e56f6590f0a",
+      "length": 40,
+      "finiteCount": 40,
+      "nanCount": 0,
+      "posInfCount": 0,
+      "negInfCount": 0
+    },
+    "dragAdjustedTime": {
+      "file": "arrays/f5ea66205d4dadc65fc289fb556c83861095d836525db026bec20e56f6590f0a.f64",
+      "sha256": "f5ea66205d4dadc65fc289fb556c83861095d836525db026bec20e56f6590f0a",
+      "length": 40,
+      "finiteCount": 40,
+      "nanCount": 0,
+      "posInfCount": 0,
+      "negInfCount": 0
+    },
+    "innerGravity": {
+      "file": "arrays/99cbb1cfe27a2816e93fa49aa2a553bdc0d06122668dc043ffbb8753afb8f2d6.f64",
+      "sha256": "99cbb1cfe27a2816e93fa49aa2a553bdc0d06122668dc043ffbb8753afb8f2d6",
+      "length": 40,
+      "finiteCount": 40,
+      "nanCount": 0,
+      "posInfCount": 0,
+      "negInfCount": 0
+    },
+    "dragGravity": {
+      "file": "arrays/99cbb1cfe27a2816e93fa49aa2a553bdc0d06122668dc043ffbb8753afb8f2d6.f64",
+      "sha256": "99cbb1cfe27a2816e93fa49aa2a553bdc0d06122668dc043ffbb8753afb8f2d6",
+      "length": 40,
+      "finiteCount": 40,
+      "nanCount": 0,
+      "posInfCount": 0,
+      "negInfCount": 0
+    },
+    "filteredTime": {
+      "file": "arrays/f5ea66205d4dadc65fc289fb556c83861095d836525db026bec20e56f6590f0a.f64",
+      "sha256": "f5ea66205d4dadc65fc289fb556c83861095d836525db026bec20e56f6590f0a",
+      "length": 40,
+      "finiteCount": 40,
+      "nanCount": 0,
+      "posInfCount": 0,
+      "negInfCount": 0
+    },
+    "filteredAdjustedTime": {
+      "file": "arrays/f5ea66205d4dadc65fc289fb556c83861095d836525db026bec20e56f6590f0a.f64",
+      "sha256": "f5ea66205d4dadc65fc289fb556c83861095d836525db026bec20e56f6590f0a",
+      "length": 40,
+      "finiteCount": 40,
+      "nanCount": 0,
+      "posInfCount": 0,
+      "negInfCount": 0
+    },
+    "filteredInnerGravity": {
+      "file": "arrays/99cbb1cfe27a2816e93fa49aa2a553bdc0d06122668dc043ffbb8753afb8f2d6.f64",
+      "sha256": "99cbb1cfe27a2816e93fa49aa2a553bdc0d06122668dc043ffbb8753afb8f2d6",
+      "length": 40,
+      "finiteCount": 40,
+      "nanCount": 0,
+      "posInfCount": 0,
+      "negInfCount": 0
+    },
+    "filteredDragGravity": {
+      "file": "arrays/99cbb1cfe27a2816e93fa49aa2a553bdc0d06122668dc043ffbb8753afb8f2d6.f64",
+      "sha256": "99cbb1cfe27a2816e93fa49aa2a553bdc0d06122668dc043ffbb8753afb8f2d6",
+      "length": 40,
+      "finiteCount": 40,
+      "nanCount": 0,
+      "posInfCount": 0,
+      "negInfCount": 0
+    }
+  },
+  "filter": {
+    "endIndex": 39,
+    "innerLength": 40,
+    "dragLength": 40,
+    "innerStartIndex": 0,
+    "innerEndIndex": 39,
+    "dragStartIndex": 0,
+    "dragEndIndex": 39
+  },
+  "statistics": {
+    "inner": {
+      "mean": null,
+      "startTime": null,
+      "std": null
+    },
+    "drag": {
+      "mean": null,
+      "startTime": null,
+      "std": null
+    }
+  },
+  "gQuality": [],
+  "rangeStatistics": [
+    {
+      "xMin": 0.0,
+      "xMax": 0.03,
+      "inner": {
+        "mean": 0.0014132221091941088,
+        "abs_mean": 0.0014132221091941088,
+        "std": 0.00023407857062693788,
+        "min": 0.001020660412195749,
+        "max": 0.0018057838061924694,
+        "range": 0.0007851233939967204,
+        "count": 31,
+        "missing": 0
+      },
+      "drag": {
+        "mean": 0.0014132221091941088,
+        "abs_mean": 0.0014132221091941088,
+        "std": 0.00023407857062693788,
+        "min": 0.001020660412195749,
+        "max": 0.0018057838061924694,
+        "range": 0.0007851233939967204,
+        "count": 31,
+        "missing": 0
+      }
+    }
+  ]
+}

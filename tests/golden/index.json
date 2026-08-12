@@ -1,0 +1,15 @@
+{
+  "goldenFormatVersion": 1,
+  "analysisEngineVersion": "1.0.0",
+  "referenceCommit": "4e8378e444d3b4d644ba02fef8b75ba7b2357745",
+  "fixtures": [
+    {
+      "name": "tie_equal_minimum",
+      "description": "Equal minima -> earliest window wins",
+      "golden": "tie_equal_minimum.json",
+      "csv": "csv/tie_equal_minimum.csv",
+      "csvSha256": "e63df8cab97e07db9d419afdee510218c6ac618aad83c4f5f6eba043d00c6f52",
+      "encoding": "utf-8"
+    }
+  ]
+}
