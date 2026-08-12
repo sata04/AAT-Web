@@ -240,24 +240,41 @@ posterRoutes.post(
         .limit(1)
       if (!existing) throw new ApiError('INTERNAL')
 
-      // Ready, rendering, or failed: all three are answered with the existing figure and NO new
+      // Ready, rendering or failed: all three are answered with the existing figure and NO new
       // render. A failed figure is retried explicitly, through the retry endpoint, so that a
       // client polling this one cannot turn a persistent renderer fault into a render loop.
-      if (existing.status !== 'queued') {
-        const stale = await takeOverStaleRender(db, existing.id, config.renderStaleSeconds, now)
-        if (!stale) {
-          return context.json({ poster: figureResponse(existing), created: false })
-        }
-      } else if (!(await claimForRender(db, existing.id, ['queued'], now))) {
+      const staleBefore = now.getTime() - config.renderStaleSeconds * 1000
+      const isStale =
+        existing.status === 'rendering' &&
+        existing.startedAt !== null &&
+        existing.startedAt.getTime() <= staleBefore
+      if (existing.status !== 'queued' && !isStale) {
         return context.json({ poster: figureResponse(existing), created: false })
       }
 
+      // Capacity is checked BEFORE the claim, never after: a check that ran afterwards would count
+      // the row this request had just moved into `rendering` and refuse its own work.
       await assertRenderCapacity(db, config.maxConcurrentRenders, config.renderStaleSeconds, now)
+
+      const claimed = isStale
+        ? await takeOverStaleRender(db, existing.id, config.renderStaleSeconds, now)
+        : await claimForRender(db, existing.id, ['queued'], now)
+      if (!claimed) {
+        // Another request claimed it in between. There is exactly one render, and it is theirs.
+        const [fresh] = await db
+          .select()
+          .from(posterFigures)
+          .where(eq(posterFigures.id, existing.id))
+          .limit(1)
+        return context.json({ poster: figureResponse(fresh ?? existing), created: false })
+      }
       return performRender(context, existing.id, spec, revision)
     }
 
     await assertRenderCapacity(db, config.maxConcurrentRenders, config.renderStaleSeconds, now)
     if (!(await claimForRender(db, figureId, ['queued'], now))) {
+      const [fresh] = await db.select().from(posterFigures).where(eq(posterFigures.id, figureId)).limit(1)
+      if (fresh) return context.json({ poster: figureResponse(fresh), created: false })
       throw new ApiError('POSTER_BUSY', { details: { reason: 'already_claimed' } })
     }
     return performRender(context, figureId, spec, revision)

@@ -95,7 +95,8 @@ export default defineConfig({
       main: path.join(appRoot, 'worker/index.ts'),
       miniflare: {
         compatibilityDate: '2026-07-30',
-        compatibilityFlags: [],
+        // Same flags as wrangler.jsonc: the tests must run the Worker in the shape it deploys in.
+        compatibilityFlags: ['nodejs_compat'],
         d1Databases: { DB: 'aat-test-db' },
         r2Buckets: ['AAT_OBJECTS'],
         durableObjects: {

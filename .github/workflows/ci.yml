@@ -50,6 +50,12 @@ jobs:
       - name: Typecheck
         run: pnpm typecheck
 
+      # `pnpm test` in apps/web runs both projects: the Node suite and the
+      # Workers-runtime suite, which executes inside workerd against a real
+      # local D1 with the committed migrations applied. The invitation race,
+      # the quota reservation and the auto-poster uniqueness constraint are
+      # properties of SQLite statements, so a mocked database would test the
+      # mock instead of the guarantee.
       - name: Test
         run: pnpm test
 

@@ -7,11 +7,22 @@
   // must not be newer than the runtime that is actually installed.
   "compatibility_date": "2026-07-30",
 
-  // Deliberately no "nodejs_compat": nothing on the Worker's import graph pulls
-  // a node: builtin (better-auth only does so from its test-utils entry, which
-  // is never imported here), and the polyfill costs bundle size that
-  // scripts/check-worker-bundle-size.mjs would then have to carry forever.
-  "compatibility_flags": [],
+  /*
+   * "nodejs_compat" is required, not optional, and it is worth knowing why.
+   *
+   * Better Auth resolves @better-auth/utils/password through its "workerd"
+   * export condition, which is a build that does `import { randomBytes, scrypt }
+   * from "node:crypto"` at the top level. AAT never hashes a password — there is
+   * no password anywhere in this system — but that import is static, so without
+   * the flag the module graph fails to evaluate and the Worker does not boot at
+   * all. Better Auth's own AsyncLocalStorage-based request context (used to
+   * attach the request's IP and user agent to a session) also comes from
+   * node:async_hooks.
+   *
+   * The cost is bundle size, which scripts/check-worker-bundle-size.mjs
+   * measures on every CI run against a limit with generous headroom.
+   */
+  "compatibility_flags": ["nodejs_compat"],
 
   /*
    * Asset-first routing (Workers Static Assets, not the legacy Workers Sites).

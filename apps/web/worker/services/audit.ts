@@ -45,7 +45,8 @@ export type AuditAction =
   | 'renderer.circuit_breaker'
 
 /** Keys whose values must never reach the audit log, whatever a caller passes. */
-const FORBIDDEN_DETAIL_KEYS = /token|secret|password|challenge|credential|cookie|authorization/i
+const FORBIDDEN_DETAIL_KEYS =
+  /token|secret|password|challenge|credential|cookie|authorization|registrationcontext|signature|assertion/i
 
 export function redactDetails(details: Record<string, unknown>): Record<string, unknown> {
   const safe: Record<string, unknown> = {}
