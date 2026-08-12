@@ -1,11 +1,29 @@
 import { describe, expect, it } from 'vitest'
 import {
   AAT_POSTER_V1_PRESET,
+  DEFAULT_POSTER_PRESET_VERSION,
   getPosterPreset,
+  isPosterPresetVersion,
   POSTER_PRESET_VERSIONS,
   POSTER_PRESETS,
   posterPresetContentHash,
 } from '../src/presets.ts'
+
+describe('DEFAULT_POSTER_PRESET_VERSION', () => {
+  it('names a preset this build actually has', () => {
+    expect(POSTER_PRESET_VERSIONS).toContain(DEFAULT_POSTER_PRESET_VERSION)
+    expect(getPosterPreset(DEFAULT_POSTER_PRESET_VERSION).version).toBe(DEFAULT_POSTER_PRESET_VERSION)
+  })
+})
+
+describe('isPosterPresetVersion', () => {
+  it('accepts every known version and nothing else', () => {
+    for (const version of POSTER_PRESET_VERSIONS) expect(isPosterPresetVersion(version)).toBe(true)
+    expect(isPosterPresetVersion('aat-poster-v0')).toBe(false)
+    expect(isPosterPresetVersion(undefined)).toBe(false)
+    expect(isPosterPresetVersion(1)).toBe(false)
+  })
+})
 
 describe('aat-poster-v1: frozen desktop-compatible constants', () => {
   it('matches the verified figure/axes/line/grid/spine/tick/text/legend constants', () => {
