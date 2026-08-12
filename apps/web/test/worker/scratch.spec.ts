@@ -1,6 +1,6 @@
 /// <reference types="@cloudflare/vitest-pool-workers/types" />
 import { env } from 'cloudflare:test'
-import { describe, it } from 'vitest'
+import { describe, expect, it } from 'vitest'
 import { getAuth } from '../../worker/auth/auth.ts'
 import { VirtualAuthenticator } from './helpers/authenticator.ts'
 import { issueInvitationToken, apiFetch, ORIGIN, RP_ID } from './helpers/client.ts'
@@ -20,15 +20,16 @@ describe('scratch', () => {
     const credential = await authenticator.register(redeemed.options.challenge)
 
     const auth = getAuth(env)
+    let outcome = 'not-run'
     try {
       await auth.api.aatRegisterPasskey({
         body: { registrationContext: redeemed.registrationContext, credential },
         headers: new Headers({ origin: ORIGIN }),
       })
-      console.log('SCRATCH: registration succeeded')
+      outcome = 'succeeded'
     } catch (error) {
-      console.log('SCRATCH ERROR:', (error as Error).message)
-      console.log('SCRATCH STACK:', (error as Error).stack?.split('\n').slice(0, 12).join('\n'))
+      outcome = `${(error as Error).message} :: ${(error as Error).stack?.split('\n').slice(0, 8).join(' | ')}`
     }
+    expect(outcome).toBe('SHOW ME')
   })
 })
