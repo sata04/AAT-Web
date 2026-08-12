@@ -31,7 +31,7 @@ import type { ChartGeometry } from '../graph/geometry.ts'
 import { buildPlotModel, modelDataRange } from '../graph/plot-model.ts'
 import { SelectionOverlay } from '../graph/SelectionOverlay.tsx'
 import type { SelectionRange } from '../graph/selection.ts'
-import { graphPalette, prefersDarkScheme, resolveTheme } from '../graph/theme.ts'
+import { graphPalette, prefersDarkScheme, resolveTheme, themeSettingFrom } from '../graph/theme.ts'
 import { type ChartViewport, UPlotChart } from '../graph/UPlotChart.tsx'
 import {
   canSelectRange,
@@ -41,7 +41,7 @@ import {
   transition,
   type ViewMode,
 } from '../graph/view-mode.ts'
-import { type Dataset, datasetFromPayload, datasetNameFromFilename } from './dataset.ts'
+import { type Dataset, datasetFromPayload, sensorModeFrom } from './dataset.ts'
 import { rangeStatisticsFor } from './range-statistics.ts'
 import { loadConfig, saveConfig } from './settings.ts'
 import { APP_VERSION } from './version.ts'
@@ -114,7 +114,7 @@ export function App(): React.JSX.Element {
     return () => query.removeEventListener('change', listener)
   }, [])
 
-  const theme = resolveTheme(config.theme, systemDark)
+  const theme = resolveTheme(themeSettingFrom(config.theme), systemDark)
   useEffect(() => {
     document.documentElement.dataset.theme = theme
   }, [theme])
@@ -143,7 +143,7 @@ export function App(): React.JSX.Element {
         datasets,
         active,
         mode,
-        sensorMode: config.graph_sensor_mode,
+        sensorMode: sensorModeFrom(config.graph_sensor_mode),
         palette,
         ylimMin: config.ylim_min,
         ylimMax: config.ylim_max,
@@ -170,11 +170,8 @@ export function App(): React.JSX.Element {
     }
   }, [dataRange, defaultViewport])
 
-  // Switching dataset or mode re-frames the graph, exactly as the desktop
-  // redraws from scratch on both.
-  useEffect(() => {
-    setViewport(null)
-  }, [])
+  // `null` means "follow the mode's default framing". Switching dataset or mode
+  // clears it, which is how the desktop re-frames the graph on both.
   const effectiveViewport = viewport ?? defaultViewport
 
   const selectionEnabled = canSelectRange(mode)
@@ -245,10 +242,7 @@ export function App(): React.JSX.Element {
         notify('error', `${source.filename}: ${message}`)
       }
     },
-    // `syncToCloud` is declared below and is stable for the life of the render;
-    // listing it would create a cycle with no benefit.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [config, signedIn, notify],
+    [config, signedIn, notify, syncToCloud],
   )
 
   const openFiles = useCallback(
@@ -529,7 +523,7 @@ export function App(): React.JSX.Element {
               className="select"
               value={config.graph_sensor_mode}
               onChange={(event) => {
-                const next = { ...config, graph_sensor_mode: event.target.value as typeof config.graph_sensor_mode }
+                const next = { ...config, graph_sensor_mode: sensorModeFrom(event.target.value) }
                 setConfig(next)
                 saveConfig(next)
               }}
@@ -785,5 +779,3 @@ export function App(): React.JSX.Element {
     </div>
   )
 }
-
-export { datasetNameFromFilename }

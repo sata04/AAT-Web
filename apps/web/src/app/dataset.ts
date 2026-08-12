@@ -95,6 +95,17 @@ export function datasetFromPayload(payload: AnalysisPayload, fromCache: boolean)
 export type SensorMode = 'both' | 'inner_only' | 'drag_only'
 
 /**
+ * Narrow a stored `graph_sensor_mode` to the union.
+ *
+ * Same reason as `themeSettingFrom`: the shared schema validates the value at
+ * runtime but its inferred type is `string`. `both` is the default and the only
+ * safe fallback — showing everything can mislead nobody.
+ */
+export function sensorModeFrom(value: string): SensorMode {
+  return value === 'inner_only' || value === 'drag_only' ? value : 'both'
+}
+
+/**
  * `MainWindow._resolve_sensor_visibility`.
  *
  * The fallbacks matter: asking for Inner-only on a file that has no Inner

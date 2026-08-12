@@ -31,6 +31,18 @@ export function resolveTheme(setting: ThemeSetting, prefersDark: boolean): Resol
   return prefersDark ? 'dark' : 'light'
 }
 
+/**
+ * Narrow a stored `theme` value to the union.
+ *
+ * `AnalysisConfigSchema` guarantees at runtime that it is one of the three, but
+ * the schema's `preprocess` wrapper widens the inferred type to `string`, so the
+ * narrowing has to be written out. Anything unexpected defers to the platform,
+ * which is the safe answer rather than an arbitrary one.
+ */
+export function themeSettingFrom(value: string): ThemeSetting {
+  return value === 'light' || value === 'dark' ? value : 'system'
+}
+
 /** Read the platform preference. Returns `false` where `matchMedia` is absent. */
 export function prefersDarkScheme(): boolean {
   if (typeof window === 'undefined' || typeof window.matchMedia !== 'function') return false
