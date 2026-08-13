@@ -7,7 +7,7 @@
     "build": "tsc -b && vite build",
     "preview": "pnpm build && vite preview",
     "typecheck": "tsc -b",
-    "test": "vitest run && vitest run --config test/worker/vitest.config.ts",
+    "test": "vitest run && vitest run --config vitest.dom.config.ts && vitest run --config test/worker/vitest.config.ts",
     "test:watch": "vitest",
     "cf-typegen": "wrangler types",
     "db:generate": "drizzle-kit generate",
