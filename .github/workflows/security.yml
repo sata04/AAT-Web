@@ -1,0 +1,288 @@
+name: Security
+
+# Secret scanning and dependency scanning, separated from ci.yml because they
+# answer a different question on a different clock: ci.yml asks "does this change
+# work", this asks "is anything here known-bad *today*" — which changes without
+# anyone touching the repository.
+#
+# Static analysis is deliberately absent. GitHub's CodeQL default setup covers
+# JavaScript/TypeScript and Python for public repositories, is configured in
+# Settings rather than in a workflow file, handles fork pull requests correctly
+# without anyone reasoning about it, and reports into the Security tab. Adding a
+# second SAST here would mean running two engines over one small codebase for
+# largely the same findings, and pinning a rule set that is published to float.
+# See docs/security-scanning.md.
+on:
+  pull_request:
+  push:
+    branches: ["main"]
+  schedule:
+    # Deliberately off the hour: GitHub queues scheduled workflows and the top of
+    # the hour is where everyone else's are.
+    #
+    # Daily, dependencies. An advisory published today affects a lockfile nobody
+    # edited, so this is the only trigger that would ever find it.
+    - cron: "37 16 * * *"
+    # Weekly, everything, including the whole git history and the container image.
+    - cron: "37 17 * * 1"
+  workflow_dispatch:
+
+# Nothing here needs a token. Every job is read-only and secretless, which is
+# what makes it safe to run unchanged on a pull request from a fork: there is
+# nothing in scope for untrusted code to reach. `pull_request_target` is
+# deliberately not used anywhere in this repository.
+permissions: {}
+
+concurrency:
+  group: security-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  # Pinned, with the checksum of the exact release artefact.
+  #
+  # Updating one of these is a two-line change: bump the version, then replace
+  # the digest with the matching line from the release's checksums file
+  #   gitleaks: gitleaks_<version>_checksums.txt
+  #   osv-scanner: osv-scanner_SHA256SUMS
+  # Renovate is not wired up to these on purpose. It can bump the version string
+  # but cannot compute the new digest, so it would open a pull request that fails
+  # verification — a broken build that looks like an attack. The weekly run below
+  # reports when a newer release exists instead.
+  GITLEAKS_VERSION: "8.30.1"
+  GITLEAKS_SHA256: "551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb"
+  OSV_VERSION: "2.4.0"
+  OSV_SHA256: "15314940c10d26af9c6649f150b8a47c1262e8fc7e17b1d1029b0e479e8ed8a0"
+
+jobs:
+  scope:
+    name: Scan scope
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    outputs:
+      deps: ${{ steps.detect.outputs.deps }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+
+      # The same detector ci.yml uses, for the same reason: the rules are
+      # unit-tested rather than embedded in YAML nobody can run.
+      - name: Detect what changed
+        id: detect
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD: ${{ github.event.pull_request.head.sha }}
+        run: |
+          if [ "$EVENT_NAME" = "pull_request" ]; then
+            node scripts/detect-changes.mjs --base "$BASE" --head "$HEAD"
+          else
+            node scripts/detect-changes.mjs --all
+          fi
+
+  secrets:
+    name: Secret scan
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # Both modes below read history: the pull request scans its own
+          # commits, everything else scans all of them.
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+
+      # Into RUNNER_TEMP, not the working tree, so the scan never has the
+      # scanner in front of it.
+      - name: Install gitleaks
+        working-directory: ${{ runner.temp }}
+        run: |
+          curl --fail --silent --show-error --location \
+            --output gitleaks.tar.gz \
+            "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          echo "${GITLEAKS_SHA256}  gitleaks.tar.gz" | sha256sum --check --strict -
+          tar -xzf gitleaks.tar.gz gitleaks
+          ./gitleaks version
+
+      # Before anything is scanned, prove the scanner still finds a secret.
+      #
+      # "no leaks found, exit 0" is the same output whether the repository is
+      # clean or the scanner is broken — a truncated download, a rule set that
+      # failed to load, an allowlist that grew a `.*`. This hands it a synthetic
+      # credential in a temporary directory and fails the job if it comes back
+      # clean. Read scripts/scanner-canary.mjs for why the fixture is generated
+      # rather than committed.
+      - name: Scanner canary
+        run: node scripts/scanner-canary.mjs "${RUNNER_TEMP}/gitleaks"
+
+      # A pull request only needs its own commits looked at: everything already
+      # on main was scanned when it landed, and is scanned again weekly below.
+      # `--no-merges` because a merge commit's diff re-reports both sides.
+      #
+      # `--verbose` prints the file, line and rule for each finding; without it
+      # gitleaks reports only a count, which is not enough to act on. `--redact`
+      # keeps the secret itself out of a log that, on a public repository,
+      # anyone can read — the point of the job is to say where to look, not to
+      # republish what it found.
+      - name: Scan the pull request's commits
+        if: github.event_name == 'pull_request'
+        env:
+          BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD: ${{ github.event.pull_request.head.sha }}
+        run: |
+          "${RUNNER_TEMP}/gitleaks" git . \
+            --config .gitleaks.toml \
+            --log-opts "--no-merges ${BASE}..${HEAD}" \
+            --redact --verbose --no-banner
+
+      # Everything else — a push to main, either cron, a manual run — scans the
+      # whole history.
+      #
+      # This is not redundant with the per-pull-request scan. Rules are added to
+      # gitleaks over time, so a credential format that was invisible when a
+      # commit landed becomes visible later, and only a full re-scan finds it.
+      # It costs about a second: this repository is 14 MB of history.
+      - name: Scan the full history
+        if: github.event_name != 'pull_request'
+        run: |
+          "${RUNNER_TEMP}/gitleaks" git . \
+            --config .gitleaks.toml \
+            --redact --verbose --no-banner
+
+  dependencies:
+    name: Known vulnerabilities
+    needs: scope
+    # On a pull request, only when something that can change the dependency
+    # graph moved. On every other trigger, always — the daily cron exists
+    # precisely to catch advisories published against a lockfile nobody touched.
+    if: needs.scope.outputs.deps == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install osv-scanner
+        working-directory: ${{ runner.temp }}
+        run: |
+          curl --fail --silent --show-error --location \
+            --output osv-scanner \
+            "https://github.com/google/osv-scanner/releases/download/v${OSV_VERSION}/osv-scanner_linux_amd64"
+          echo "${OSV_SHA256}  osv-scanner" | sha256sum --check --strict -
+          chmod +x osv-scanner
+          ./osv-scanner --version
+
+      # Both ecosystems, from the files that pin them. Every requirement in the
+      # two Python files is already hash-pinned (`pip install --require-hashes`
+      # refuses otherwise), so what is scanned is exactly what gets installed.
+      #
+      # osv-scanner.toml lists the advisories that have been looked at, each with
+      # a reason and an expiry date. That file is what lets this be a blocking
+      # check rather than a wall of known output: a finding that is not in it
+      # fails the job.
+      #
+      # Independent of Renovate's `osvVulnerabilityAlerts`, not a replacement.
+      # Renovate proposes an upgrade when one exists; this reports the exposure
+      # whether or not a fix has been published, which is the more important half
+      # for a dependency that is deliberately pinned.
+      - name: Scan lockfiles
+        run: |
+          "${RUNNER_TEMP}/osv-scanner" scan source \
+            --config osv-scanner.toml \
+            --lockfile pnpm-lock.yaml \
+            --lockfile reference/python/requirements.txt \
+            --lockfile poster-renderer/requirements.txt
+
+  container:
+    name: Renderer image vulnerabilities
+    # Weekly and on demand only. It builds the image, which is two minutes that
+    # buy nothing on a pull request the poster-renderer job already covers.
+    if: github.event_name == 'workflow_dispatch' || github.event.schedule == '37 17 * * 1'
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install osv-scanner
+        working-directory: ${{ runner.temp }}
+        run: |
+          curl --fail --silent --show-error --location \
+            --output osv-scanner \
+            "https://github.com/google/osv-scanner/releases/download/v${OSV_VERSION}/osv-scanner_linux_amd64"
+          echo "${OSV_SHA256}  osv-scanner" | sha256sum --check --strict -
+          chmod +x osv-scanner
+
+      - name: Build the image
+        run: docker build -t aat-poster-renderer:scan poster-renderer
+
+      # The layer the lockfile scan cannot see: Debian packages in the pinned
+      # base image, which is where a poster renderer that installs no system
+      # font package and runs no server framework still inherits CVEs.
+      #
+      # REPORTING ONLY, and honestly labelled as such. The base image is pinned
+      # by digest and Renovate never auto-merges a poster-renderer change, so a
+      # finding here does not have a one-click fix — it has a visual-contract
+      # review behind it. Nobody has triaged this layer yet, so failing the job
+      # on its first run would mean starting a weekly red badge with no path to
+      # green, which is how a red badge stops meaning anything.
+      #
+      # To make it blocking: run it once, triage what it reports into
+      # osv-scanner.toml the way the lockfile findings are recorded there, and
+      # delete the `|| true`.
+      - name: Scan the image
+        run: |
+          {
+            echo '## Renderer base image — OSV report'
+            echo
+            echo 'Informational. See the comment in .github/workflows/security.yml.'
+            echo
+            echo '```'
+            "${RUNNER_TEMP}/osv-scanner" scan image aat-poster-renderer:scan \
+              --config osv-scanner.toml 2>&1 || true
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # The scanners are pinned by digest, which is the right trade for
+      # reproducibility and the wrong one for rule freshness — gitleaks ships its
+      # rules in the binary. Nothing here changes what ran; it just makes a
+      # year-old pin visible instead of silent.
+      - name: Report newer scanner releases
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          latest() {
+            curl --fail --silent --show-error \
+              -H "Authorization: Bearer ${GH_TOKEN}" \
+              "https://api.github.com/repos/$1/releases/latest" \
+              | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>process.stdout.write(JSON.parse(s).tag_name??"?"))'
+          }
+          {
+            echo '## Pinned scanner versions'
+            echo
+            echo "| tool | pinned | latest |"
+            echo "| --- | --- | --- |"
+            echo "| gitleaks | v${GITLEAKS_VERSION} | $(latest gitleaks/gitleaks) |"
+            echo "| osv-scanner | v${OSV_VERSION} | $(latest google/osv-scanner) |"
+            echo
+            echo 'Update both the version and its checksum together; see the env block in this workflow.'
+          } >> "$GITHUB_STEP_SUMMARY"

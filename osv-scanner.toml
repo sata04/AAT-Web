@@ -1,0 +1,296 @@
+# Known vulnerabilities that have been looked at, and why CI is not red for them.
+#
+# ## READ THIS BEFORE ADDING AN ENTRY
+#
+# This file exists so the scanner can be a *blocking* check. A scanner that
+# reports the same findings on every run is a scanner nobody reads, and the next
+# one — the new one, the one that matters — arrives into a job that has been
+# failing for months and gets skimmed past. Enumerating today's findings by id is
+# what makes "OSV is red" mean "something changed".
+#
+# So: never ignore a *package*, only individual advisory ids. A package-level
+# override would also hide every future advisory for that package, which is
+# precisely the finding this arrangement is built to surface.
+#
+# Every entry carries `ignoreUntil`. An acceptance made once and never revisited
+# is indistinguishable from an acceptance nobody remembers making; the date
+# forces the question again. When one expires, the answer is either "upgrade" or
+# "re-read the advisory and re-date it" — not "extend the date".
+#
+# ## Most of this file is temporary, and should be deleted rather than renewed
+#
+# The Python groups below describe `poster-renderer/requirements.txt` as it
+# stands on main. The V1 completion branch already moves Pillow to 12.3.0 and
+# pytest to 9.1.1, and `osv-scanner scan source -L poster-renderer/requirements.txt`
+# against that branch reports nothing at all. So those two groups are not a risk
+# acceptance with a long life ahead of it: they keep the check usable on main
+# until that branch lands, and the correct action when it does is to delete them
+# and confirm the scan is still green without them.
+#
+# What survives the merge is the npm group — six advisories in devDependencies
+# reached through drizzle-kit and miniflare, neither of which is in the deployed
+# Worker. Those wait for Renovate.
+#
+# Consumed by .github/workflows/security.yml via `--config osv-scanner.toml`.
+
+# ---------------------------------------------------------------------------
+# esbuild 0.18.20 — 1 advisory
+#
+# esbuild 0.18.20 is reached only through drizzle-kit ->
+# @esbuild-kit/esm-loader -> @esbuild-kit/core-utils, a devDependency used
+# to generate migrations. GHSA-67mh-4wv8-2f99 is exploitable against
+# `esbuild --serve`; nothing in this repository starts an esbuild dev
+# server, and esbuild is not in the deployed Worker bundle.
+# ---------------------------------------------------------------------------
+
+[[IgnoredVulns]]
+id = "GHSA-67mh-4wv8-2f99"
+ignoreUntil = 2026-10-12
+reason = "esbuild: not reachable in this deployment; see the note above."
+
+# ---------------------------------------------------------------------------
+# undici 7.28.0 — 5 advisories
+#
+# undici 7.28.0 is reached only through miniflare, i.e. wrangler and the
+# Vitest Workers pool. It runs on developer machines and CI runners, never
+# in the deployed Worker (workerd supplies its own fetch). Fixed in 7.29.0;
+# arrives when wrangler bumps miniflare.
+# ---------------------------------------------------------------------------
+
+[[IgnoredVulns]]
+id = "GHSA-4cwx-7wf7-3272"
+ignoreUntil = 2026-10-12
+reason = "undici: not reachable in this deployment; see the note above."
+
+[[IgnoredVulns]]
+id = "GHSA-8xcm-r25x-g524"
+ignoreUntil = 2026-10-12
+reason = "undici: not reachable in this deployment; see the note above."
+
+[[IgnoredVulns]]
+id = "GHSA-jr45-8vmc-qm54"
+ignoreUntil = 2026-10-12
+reason = "undici: not reachable in this deployment; see the note above."
+
+[[IgnoredVulns]]
+id = "GHSA-m8rv-5g2x-5cg5"
+ignoreUntil = 2026-10-12
+reason = "undici: not reachable in this deployment; see the note above."
+
+[[IgnoredVulns]]
+id = "GHSA-v3r7-h72x-cjcm"
+ignoreUntil = 2026-10-12
+reason = "undici: not reachable in this deployment; see the note above."
+
+# ---------------------------------------------------------------------------
+# pillow 11.3.0 — 36 advisories
+#
+# Pillow is pinned because it encodes the poster PNG, so its version is part
+# of the visual contract (docs/poster-renderer.md). The renderer only ever
+# ENCODES: it draws a Matplotlib figure from a Zod-validated JSON plot spec
+# and writes a PNG. It never opens, decodes or parses an image, has no
+# network (enableInternet: false in production, --network none in CI), and
+# runs as an unprivileged user in a container whose only writable path is
+# the Matplotlib cache. The remediation is Pillow 12.x, which moves rendered
+# bytes and therefore needs the visual review in poster-renderer/README.md
+# plus a regenerated reference image.
+# ---------------------------------------------------------------------------
+
+[[IgnoredVulns]]
+id = "GHSA-45hq-cxwh-f6vc"
+ignoreUntil = 2026-10-12
+reason = "pillow: encode-only use; fixed by the Pillow 12.3.0 bump on the V1 branch."
+
+[[IgnoredVulns]]
+id = "GHSA-4x4j-2g7c-83w6"
+ignoreUntil = 2026-10-12
+reason = "pillow: encode-only use; fixed by the Pillow 12.3.0 bump on the V1 branch."
+
+[[IgnoredVulns]]
+id = "GHSA-5x94-69rx-g8h2"
+ignoreUntil = 2026-10-12
+reason = "pillow: encode-only use; fixed by the Pillow 12.3.0 bump on the V1 branch."
+
+[[IgnoredVulns]]
+id = "GHSA-5xmw-vc9v-4wf2"
+ignoreUntil = 2026-10-12
+reason = "pillow: encode-only use; fixed by the Pillow 12.3.0 bump on the V1 branch."
+
+[[IgnoredVulns]]
+id = "GHSA-62p4-gmf7-7g93"
+ignoreUntil = 2026-10-12
+reason = "pillow: encode-only use; fixed by the Pillow 12.3.0 bump on the V1 branch."
+
+[[IgnoredVulns]]
+id = "GHSA-6r8x-57c9-28j4"
+ignoreUntil = 2026-10-12
+reason = "pillow: encode-only use; fixed by the Pillow 12.3.0 bump on the V1 branch."
+
+[[IgnoredVulns]]
+id = "GHSA-8v84-f9pq-wr9x"
+ignoreUntil = 2026-10-12
+reason = "pillow: encode-only use; fixed by the Pillow 12.3.0 bump on the V1 branch."
+
+[[IgnoredVulns]]
+id = "GHSA-9hw9-ch79-4vh6"
+ignoreUntil = 2026-10-12
+reason = "pillow: encode-only use; fixed by the Pillow 12.3.0 bump on the V1 branch."
+
+[[IgnoredVulns]]
+id = "GHSA-cfh3-3jmp-rvhc"
+ignoreUntil = 2026-10-12
+reason = "pillow: encode-only use; fixed by the Pillow 12.3.0 bump on the V1 branch."
+
+[[IgnoredVulns]]
+id = "GHSA-fj7v-r99m-22gq"
+ignoreUntil = 2026-10-12
+reason = "pillow: encode-only use; fixed by the Pillow 12.3.0 bump on the V1 branch."
+
+[[IgnoredVulns]]
+id = "GHSA-jjj6-mw9f-p565"
+ignoreUntil = 2026-10-12
+reason = "pillow: encode-only use; fixed by the Pillow 12.3.0 bump on the V1 branch."
+
+[[IgnoredVulns]]
+id = "GHSA-phj9-mv4w-65pm"
+ignoreUntil = 2026-10-12
+reason = "pillow: encode-only use; fixed by the Pillow 12.3.0 bump on the V1 branch."
+
+[[IgnoredVulns]]
+id = "GHSA-pwv6-vv43-88gr"
+ignoreUntil = 2026-10-12
+reason = "pillow: encode-only use; fixed by the Pillow 12.3.0 bump on the V1 branch."
+
+[[IgnoredVulns]]
+id = "GHSA-r73j-pqj5-w3x7"
+ignoreUntil = 2026-10-12
+reason = "pillow: encode-only use; fixed by the Pillow 12.3.0 bump on the V1 branch."
+
+[[IgnoredVulns]]
+id = "GHSA-vjc4-5qp5-m44j"
+ignoreUntil = 2026-10-12
+reason = "pillow: encode-only use; fixed by the Pillow 12.3.0 bump on the V1 branch."
+
+[[IgnoredVulns]]
+id = "GHSA-whj4-6x5x-4v2j"
+ignoreUntil = 2026-10-12
+reason = "pillow: encode-only use; fixed by the Pillow 12.3.0 bump on the V1 branch."
+
+[[IgnoredVulns]]
+id = "GHSA-wjx4-4jcj-g98j"
+ignoreUntil = 2026-10-12
+reason = "pillow: encode-only use; fixed by the Pillow 12.3.0 bump on the V1 branch."
+
+[[IgnoredVulns]]
+id = "GHSA-xj96-63gp-2gmr"
+ignoreUntil = 2026-10-12
+reason = "pillow: encode-only use; fixed by the Pillow 12.3.0 bump on the V1 branch."
+
+[[IgnoredVulns]]
+id = "PYSEC-2026-165"
+ignoreUntil = 2026-10-12
+reason = "pillow: encode-only use; fixed by the Pillow 12.3.0 bump on the V1 branch."
+
+[[IgnoredVulns]]
+id = "PYSEC-2026-2249"
+ignoreUntil = 2026-10-12
+reason = "pillow: encode-only use; fixed by the Pillow 12.3.0 bump on the V1 branch."
+
+[[IgnoredVulns]]
+id = "PYSEC-2026-2250"
+ignoreUntil = 2026-10-12
+reason = "pillow: encode-only use; fixed by the Pillow 12.3.0 bump on the V1 branch."
+
+[[IgnoredVulns]]
+id = "PYSEC-2026-2251"
+ignoreUntil = 2026-10-12
+reason = "pillow: encode-only use; fixed by the Pillow 12.3.0 bump on the V1 branch."
+
+[[IgnoredVulns]]
+id = "PYSEC-2026-2252"
+ignoreUntil = 2026-10-12
+reason = "pillow: encode-only use; fixed by the Pillow 12.3.0 bump on the V1 branch."
+
+[[IgnoredVulns]]
+id = "PYSEC-2026-2253"
+ignoreUntil = 2026-10-12
+reason = "pillow: encode-only use; fixed by the Pillow 12.3.0 bump on the V1 branch."
+
+[[IgnoredVulns]]
+id = "PYSEC-2026-2254"
+ignoreUntil = 2026-10-12
+reason = "pillow: encode-only use; fixed by the Pillow 12.3.0 bump on the V1 branch."
+
+[[IgnoredVulns]]
+id = "PYSEC-2026-2255"
+ignoreUntil = 2026-10-12
+reason = "pillow: encode-only use; fixed by the Pillow 12.3.0 bump on the V1 branch."
+
+[[IgnoredVulns]]
+id = "PYSEC-2026-2256"
+ignoreUntil = 2026-10-12
+reason = "pillow: encode-only use; fixed by the Pillow 12.3.0 bump on the V1 branch."
+
+[[IgnoredVulns]]
+id = "PYSEC-2026-2257"
+ignoreUntil = 2026-10-12
+reason = "pillow: encode-only use; fixed by the Pillow 12.3.0 bump on the V1 branch."
+
+[[IgnoredVulns]]
+id = "PYSEC-2026-2874"
+ignoreUntil = 2026-10-12
+reason = "pillow: encode-only use; fixed by the Pillow 12.3.0 bump on the V1 branch."
+
+[[IgnoredVulns]]
+id = "PYSEC-2026-3451"
+ignoreUntil = 2026-10-12
+reason = "pillow: encode-only use; fixed by the Pillow 12.3.0 bump on the V1 branch."
+
+[[IgnoredVulns]]
+id = "PYSEC-2026-3453"
+ignoreUntil = 2026-10-12
+reason = "pillow: encode-only use; fixed by the Pillow 12.3.0 bump on the V1 branch."
+
+[[IgnoredVulns]]
+id = "PYSEC-2026-3454"
+ignoreUntil = 2026-10-12
+reason = "pillow: encode-only use; fixed by the Pillow 12.3.0 bump on the V1 branch."
+
+[[IgnoredVulns]]
+id = "PYSEC-2026-3493"
+ignoreUntil = 2026-10-12
+reason = "pillow: encode-only use; fixed by the Pillow 12.3.0 bump on the V1 branch."
+
+[[IgnoredVulns]]
+id = "PYSEC-2026-3494"
+ignoreUntil = 2026-10-12
+reason = "pillow: encode-only use; fixed by the Pillow 12.3.0 bump on the V1 branch."
+
+[[IgnoredVulns]]
+id = "PYSEC-2026-3495"
+ignoreUntil = 2026-10-12
+reason = "pillow: encode-only use; fixed by the Pillow 12.3.0 bump on the V1 branch."
+
+[[IgnoredVulns]]
+id = "PYSEC-2026-3496"
+ignoreUntil = 2026-10-12
+reason = "pillow: encode-only use; fixed by the Pillow 12.3.0 bump on the V1 branch."
+
+# ---------------------------------------------------------------------------
+# pytest 8.4.2 — 2 advisories
+#
+# pytest is installed in the renderer image so the image can test itself
+# (deploy.yml runs `pytest /app/tests` inside it before the image is
+# pushed). It is never invoked by the running service, whose CMD is the
+# renderer itself.
+# ---------------------------------------------------------------------------
+
+[[IgnoredVulns]]
+id = "GHSA-6w46-j5rx-g56g"
+ignoreUntil = 2026-10-12
+reason = "pytest: not invoked by the running service; fixed by the pytest 9.1.1 bump on the V1 branch."
+
+[[IgnoredVulns]]
+id = "PYSEC-2026-1845"
+ignoreUntil = 2026-10-12
+reason = "pytest: not invoked by the running service; fixed by the pytest 9.1.1 bump on the V1 branch."

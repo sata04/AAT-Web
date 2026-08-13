@@ -1,22 +1,55 @@
 name: CI
 
+# What runs, and when
+#
+# `pull_request` is the authoritative check. There is deliberately no push
+# trigger for topic branches: a branch with an open pull request would otherwise
+# be validated twice for every commit — once as `push`, once as `pull_request` —
+# on the same tree, for the same result, at twice the cost. A branch with no
+# pull request open is not being proposed for merge, so nothing is waiting on
+# its result.
+#
+# `push: main` stays, and does something the pull request run cannot: it runs
+# the FULL matrix with the change detector disabled. Everything below is gated
+# on `scripts/detect-changes.mjs`, and a wrong rule there fails silently — a
+# green tick for a job that never ran. Running everything on main turns that
+# from "never noticed" into "noticed at the merge". Merges are rare; pushes to a
+# branch under review are not.
 on:
   push:
-    branches: ["main", "claude/**"]
+    branches: ["main"]
   pull_request:
 
 # Do not inherit the repository default (Settings -> Actions -> Workflow
 # permissions). Declaring it here means a later change to that setting cannot
 # quietly widen what this workflow can do.
+#
+# Every job below is secretless and read-only, which is also what makes this
+# workflow safe on a pull request from a fork: a fork's GITHUB_TOKEN is
+# read-only and no job here asks for more, so untrusted code runs with nothing
+# worth stealing in scope. See .github/workflows/deploy.yml for the credentials.
 permissions: {}
 
+# One run per pull request. Pushing again to a branch under review supersedes
+# the previous run, which is the single largest source of wasted CI minutes on
+# an actively edited branch.
+#
+# Not on main: those runs are the record of what the branch's history actually
+# does, and cancelling one to start the next would leave commits with no result.
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
-  web:
-    name: Lint, typecheck, test, build
+  # ---------------------------------------------------------------------------
+  # Always runs. Cheap, and the two checks every change needs regardless of what
+  # it touched.
+  # ---------------------------------------------------------------------------
+  identity:
+    name: Commit identity
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 10
     permissions:
-      # checkout needs to read the repository. This job pushes nothing.
       contents: read
     steps:
       # Actions are pinned to full commit SHAs: a moved tag then changes
@@ -36,9 +69,16 @@ jobs:
       # project name and an unapproved address, and had to be rewritten wholesale.
       # The check reads the effective identity, so `-c user.email=...` and
       # GIT_AUTHOR_* overrides are caught, not just committed config.
+      #
+      # Its own job rather than a step inside `web`, because `web` is now
+      # conditional: a documentation-only pull request skips it, and the
+      # identity check must not be skipped with it.
       - name: Check commit identity (pull request)
         if: github.event_name == 'pull_request'
-        run: node scripts/check-commit-identity.mjs --range "${{ github.event.pull_request.base.sha }}..${{ github.event.pull_request.head.sha }}"
+        env:
+          BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD: ${{ github.event.pull_request.head.sha }}
+        run: node scripts/check-commit-identity.mjs --range "$BASE..$HEAD"
 
       # On a push, inspect exactly what was pushed. The before-SHA is all zeroes
       # for a newly created branch and points at a discarded commit after a
@@ -64,11 +104,79 @@ jobs:
             node scripts/check-commit-identity.mjs --range "$AFTER"
           fi
 
+  changes:
+    name: Change detection
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    outputs:
+      web: ${{ steps.detect.outputs.web }}
+      numerical: ${{ steps.detect.outputs.numerical }}
+      poster: ${{ steps.detect.outputs.poster }}
+      e2e: ${{ steps.detect.outputs.e2e }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # The pull request's merge base has to be reachable to diff against.
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+
+      # The detector's rules are unit-tested (`scripts/detect-changes.test.mjs`,
+      # run by `pnpm test`). This job only applies them.
+      #
+      # `--all` on a push to main: see the trigger comment at the top. The
+      # outputs are then uniformly true and every job below runs.
+      - name: Detect which jobs this change needs
+        id: detect
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD: ${{ github.event.pull_request.head.sha }}
+        run: |
+          if [ "$EVENT_NAME" = "pull_request" ]; then
+            node scripts/detect-changes.mjs --base "$BASE" --head "$HEAD"
+          else
+            node scripts/detect-changes.mjs --all
+          fi
+
+  # ---------------------------------------------------------------------------
+  # Conditional from here down.
+  #
+  # A skipped job reports as successful to branch protection, so every one of
+  # these can be a required check without a documentation-only pull request
+  # hanging at "Expected — waiting for status to be reported". That is the whole
+  # reason the gating is `if:` on a job rather than `paths:` on the workflow.
+  # ---------------------------------------------------------------------------
+  web:
+    name: Lint, typecheck, test, build
+    needs: changes
+    if: needs.changes.outputs.web == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
       # pnpm comes from the packageManager field rather than a third-party
       # action, so there is one source of truth and Renovate updates it there.
       - name: Install pnpm
         run: npm install -g "$(node -p "require('./package.json').packageManager")"
 
+      # `cache: pnpm` caches the pnpm *store*, keyed on pnpm-lock.yaml — not
+      # node_modules. That distinction matters: restoring a node_modules tree
+      # would reinstate a dependency graph without re-running the resolution
+      # that pnpm-workspace.yaml's supply-chain gates hook into, and a poisoned
+      # cache would then be indistinguishable from a clean install. A store
+      # cache is content-addressed by integrity hash, so a corrupted entry is
+      # rejected rather than trusted.
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 24
@@ -86,12 +194,13 @@ jobs:
       - name: Typecheck
         run: pnpm typecheck
 
-      # `pnpm test` in apps/web runs both projects: the Node suite and the
-      # Workers-runtime suite, which executes inside workerd against a real
-      # local D1 with the committed migrations applied. The invitation race,
-      # the quota reservation and the auto-poster uniqueness constraint are
-      # properties of SQLite statements, so a mocked database would test the
-      # mock instead of the guarantee.
+      # `pnpm test` runs the change detector's own tests at the root, then every
+      # workspace package. In apps/web that is the Node suite, the jsdom suite
+      # and the Workers-runtime suite, the last of which executes inside workerd
+      # against a real local D1 with the committed migrations applied. The
+      # invitation race, the quota reservation and the auto-poster uniqueness
+      # constraint are properties of SQLite statements, so a mocked database
+      # would test the mock instead of the guarantee.
       - name: Test
         run: pnpm test
 
@@ -102,12 +211,12 @@ jobs:
       # --dry-run needs no Cloudflare credentials, which is why it belongs in
       # this secretless job (see deploy.yml for the verify/deploy split).
       - name: Worker bundle size
-        run: |
-          pnpm --filter @aat/web exec wrangler deploy --dry-run --outdir dist/worker-bundle
-          node scripts/check-worker-bundle-size.mjs apps/web/dist/worker-bundle
+        run: pnpm check:bundle
 
   numerical:
     name: Python reference and golden fixtures
+    needs: changes
+    if: needs.changes.outputs.numerical == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     permissions:
@@ -137,6 +246,8 @@ jobs:
 
   poster-renderer:
     name: Poster renderer
+    needs: changes
+    if: needs.changes.outputs.poster == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 25
     permissions:
@@ -158,10 +269,107 @@ jobs:
       # Building the image here, in a job with no credentials, is half of the
       # deployment trust boundary: deploy.yml consumes an image that was already
       # built and tested, and never builds from repository source itself.
+      #
+      # Deliberately no build cache. A registry or Actions cache would be a
+      # mutable input to the one artefact in this repository whose entire value
+      # is that it is reproducible from pinned inputs — and the build is pinned
+      # so thoroughly (base image by digest, every wheel by hash,
+      # --only-binary=:all:) that there is little for a cache to save beyond the
+      # wheel download. The Dockerfile cannot be given a BuildKit cache mount
+      # either: its runtime stage has to stay byte-for-byte what deploy.yml
+      # ships. See docs/supply-chain.md.
       - name: Build container image
         run: docker build -t aat-poster-renderer:ci poster-renderer
 
+      # Note for whoever merges the V1 completion branch: it adds
+      # `--env POSTER_STRICT_REFERENCE_BYTES=1` to this step, which upgrades the
+      # reference-image assertion from "perceptually indistinguishable" to
+      # "byte-identical". Keep that. It belongs with the branch because the
+      # branch also moves Pillow from 11.3.0 to 12.3.0, and Pillow is the PNG
+      # encoder — the byte-exactness claim is about *that* pinned stack, and was
+      # verified there. Turning it on here, against 11.3.0, would be asserting
+      # something nobody has run.
       - name: Renderer tests inside the image
         run: |
           docker run --rm --network none aat-poster-renderer:ci \
             python -m pytest /app/tests -q
+
+  e2e:
+    name: End-to-end (Playwright)
+    needs: changes
+    # False on any tree that does not carry the suite, so this job turns itself
+    # on when the branch adding it lands — no workflow edit at merge time, and
+    # no window in which the suite exists but nothing runs it.
+    if: needs.changes.outputs.e2e == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install pnpm
+        run: npm install -g "$(node -p "require('./package.json').packageManager")"
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      # The browser is not in the lockfile and is not cached with node_modules, so it is fetched
+      # here. Chromium only: this suite tests the application's own behaviour, not rendering
+      # differences between engines, and the WebAuthn virtual authenticator it depends on is driven
+      # through CDP.
+      - name: Install Chromium
+        run: pnpm --filter @aat/web exec playwright install --with-deps chromium
+
+      # The renderer image the harness starts with `docker run`.
+      #
+      # Without this the suite still passes — and that is the problem.
+      # `e2e/harness/stack.ts` reports the container as missing and
+      # `renderer-integration.spec.ts` and `custom-poster.spec.ts` skip
+      # themselves, so the one test that proves a browser-built plot spec
+      # reaches the real Python renderer would report green having never run.
+      # A skip is only honest when a human is watching the output; in CI it is
+      # indistinguishable from a pass.
+      #
+      # This duplicates the build in the `poster-renderer` job above rather than
+      # taking its image as an artefact, because `needs:` would serialise the
+      # two into one long chain for the sake of a build that costs a couple of
+      # minutes and runs alongside it anyway.
+      - name: Build the poster renderer image
+        run: docker build -t aat-poster-renderer:ci poster-renderer
+
+      # The suite is a separate TypeScript programme (e2e/tsconfig.json) that
+      # `tsc -b` in apps/web does not include, and Playwright transpiles without
+      # checking. Nothing else typechecks these files.
+      - name: Typecheck the E2E programme
+        run: pnpm --filter @aat/web exec tsc -p e2e/tsconfig.json
+
+      # Builds the client, starts wrangler against a local D1 with the committed migrations applied
+      # and local R2, mints its own development secrets, and drives a real browser. No Cloudflare
+      # account and no production secret is involved at any point.
+      #
+      # This is the only job that exercises the passkey ceremony end to end — registration through a
+      # virtual authenticator, the invitation token being scrubbed from the URL, sign-out and
+      # sign-in — and the only one that sends a browser-built plot spec through the Worker to the
+      # real Python renderer.
+      - name: Run E2E suite
+        run: pnpm --filter @aat/web exec playwright test
+
+      # Only on failure, and only for a day. `playwright.config.ts` already sets
+      # `trace: retain-on-failure`, so this is the difference between reading a
+      # stack trace in a log and stepping through the run that produced it.
+      - name: Upload traces
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: e2e-traces
+          path: apps/web/test-results
+          retention-days: 1
+          if-no-files-found: ignore
