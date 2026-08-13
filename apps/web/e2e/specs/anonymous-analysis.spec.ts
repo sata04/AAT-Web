@@ -90,31 +90,23 @@ test.describe('anonymous research flow', () => {
   })
 
   /**
-   * KNOWN APPLICATION DEFECT — `test.fail()` says "this is expected to fail today".
+   * Regression: dragging on the graph produced no selection at all in the built application.
    *
-   * Dragging on the graph never produces a selection in the built application. Two independent
-   * causes, both confirmed in this browser against the real bundle:
+   * Two independent causes, both confirmed in this browser against the real bundle, and either one
+   * alone was enough to make the feature inert:
    *
-   *  1. `src/graph/SelectionOverlay.tsx` binds its pointer listeners in an effect whose deps are
-   *     `[enabled, valueAt]`. On the first render `geometry` is null, so the component returns null
-   *     and `layerRef.current` is null when that effect runs — it returns early. When the geometry
-   *     arrives the layer element exists, but `enabled` has not changed and `valueAt` is a
-   *     `useCallback(…, [])`, so the effect never runs again and the handlers are never attached.
-   *     CDP's `DOMDebugger.getEventListeners` reports zero listeners on `.selection-overlay` after
-   *     an analysis completes.
-   *  2. Force the effect to re-run (toggle to G-quality and back) and the listeners do appear — but
-   *     rebuilding the chart appends uPlot's root *after* `.selection-overlay` in the DOM, and
-   *     neither element carries a `z-index`, so `.u-over` is what `elementFromPoint` returns and
-   *     the pointer never reaches the overlay.
+   *  1. `SelectionOverlay` binds its pointer listeners in an effect that returns early while
+   *     `layerRef.current` is null — which it is on the first render, because the component renders
+   *     nothing until the chart geometry arrives. Nothing in the dependency list changed when the
+   *     layer appeared, so the effect never ran again and no handler was ever attached.
+   *  2. uPlot appends its own root after the overlay in DOM order, and neither carried a
+   *     `z-index`, so `elementFromPoint` returned `.u-over` and the pointer never reached the
+   *     overlay even once the handlers were bound.
    *
-   * The numeric inputs above are unaffected, so range statistics, Excel export and the poster range
-   * are all still reachable — which is why this is a defect rather than an outage. Fixing it is a
-   * change to `src/graph/`, which this suite deliberately does not make. Remove the `test.fail()`
-   * when it is fixed; Playwright then fails the run if this test *passes*, which is the reminder.
+   * The numeric inputs above the chart were unaffected throughout, which is why this survived: the
+   * feature looked present, and the workaround was one field away.
    */
   test('drags a range on the graph', async ({ page }) => {
-    test.fail()
-
     await page.goto('/')
     await openCsv(page, repoCsv('normal_two_sensor_utf8.csv'))
     await waitForAnalysis(page)

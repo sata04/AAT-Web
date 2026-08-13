@@ -598,10 +598,24 @@ textarea {
   color: var(--text-secondary);
 }
 
+/*
+ * The range-selection layer, above uPlot rather than beside it.
+ *
+ * `z-index` is load-bearing, not decoration. The overlay is rendered before the chart, and uPlot
+ * appends its own root when it builds — so in DOM order `.u-over` comes last. With neither element
+ * carrying a z-index, painting order decides, `elementFromPoint` returns `.u-over`, and the pointer
+ * never reaches this layer no matter how correctly its handlers are bound. Dragging a range on the
+ * graph did nothing at all until this line existed; the numeric inputs above the chart kept
+ * working, which is exactly why it was easy to miss.
+ *
+ * `pointer-events` is set inline by the component (auto only while selection is enabled), so it is
+ * deliberately not declared here — two sources for one property is how the next person spends an
+ * afternoon.
+ */
 .selection-overlay {
   position: absolute;
   inset: 0;
-  pointer-events: none;
+  z-index: 1;
 }
 
 .selection-overlay__band {

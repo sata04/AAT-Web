@@ -169,8 +169,11 @@ export interface CloudSyncResult {
   revisionId: string
   /** False when this exact analysis had already been stored — a retry, or a second device. */
   revisionCreated: boolean
-  /** Compressed snapshot size, for the status line. */
-  snapshotBytes: number
+  /**
+   * Compressed snapshot size, for the status line, or null when nothing was uploaded because the
+   * revision already carried its snapshot. Null is "already stored", never "stored zero bytes".
+   */
+  snapshotBytes: number | null
 }
 
 /**
@@ -254,6 +257,37 @@ export async function syncDataset(
     metrics: metricsFor(dataset, config),
   })
   if (!revision.ok) return revision
+
+  /*
+   * A revision that already carries its snapshot is finished, and re-uploading is not just
+   * redundant — it cannot succeed.
+   *
+   * A revision is identified by (source bytes, config), so re-opening the same CSV tomorrow
+   * resolves to the same revision. The Worker accepts a byte-identical re-upload idempotently, but
+   * the browser cannot produce those bytes twice: `analysisTimestamp` records when the analysis
+   * ran, and a second analysis genuinely ran at a different time. So the only reachable branch was
+   * the refusal — `SNAPSHOT_INVALID / revision_already_has_a_different_snapshot` — and a researcher
+   * doing the ordinary thing of opening a file again was shown 失敗 with a retry that could never
+   * work, for an analysis that had in fact been stored correctly the first time.
+   *
+   * The immutability of a revision is what makes skipping correct rather than merely convenient:
+   * the stored snapshot and this one describe the same analysis of the same bytes under the same
+   * configuration, so there is nothing to update. `hasSnapshot` is checked rather than
+   * `created`, because a revision whose first upload failed exists without one and must still be
+   * able to receive it.
+   */
+  if (!revision.value.created && revision.value.revision.hasSnapshot) {
+    return {
+      ok: true,
+      value: {
+        runId,
+        runCode,
+        revisionId: revision.value.revision.id,
+        revisionCreated: false,
+        snapshotBytes: null,
+      },
+    }
+  }
 
   const compressed = await gzipCompress(encodeSnapshot(snapshot))
   const upload = await uploadSnapshot(revision.value.revision.id, compressed, {
