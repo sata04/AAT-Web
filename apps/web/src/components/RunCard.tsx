@@ -49,6 +49,15 @@ export interface RunCardProps {
   facts: RunFactsState
   /** The run's project name, when it has one and the listing is loaded. */
   projectName: string | null
+  /**
+   * Whose run this is, or null in the owner-scoped listing where every row is the reader's own.
+   *
+   * Rendered as a word, never as an avatar or an initial: the display name is the only human
+   * identity AAT holds — the address on the user record is synthetic and non-routable — so there is
+   * nothing to derive a picture from and nothing here that could be mistaken for a way to contact
+   * somebody.
+   */
+  ownerDisplayName?: string | null
   /** Called once, when the card first enters the viewport. */
   onVisible: (runId: string) => void
   onRetryFacts: (runId: string) => void
@@ -148,6 +157,9 @@ export function RunCard(props: RunCardProps): React.JSX.Element {
             <span className="panel__hint">枝番 {suffixLabel(run.suffix)}</span>
             {props.projectName === null ? null : (
               <span className="panel__hint">プロジェクト {props.projectName}</span>
+            )}
+            {props.ownerDisplayName == null ? null : (
+              <span className="run-card__owner">記録者 {props.ownerDisplayName}</span>
             )}
           </div>
 

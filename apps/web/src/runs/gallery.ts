@@ -35,7 +35,7 @@
  */
 
 import { compareRunGalleryEntries, parseRunFilename, type RunGallerySortKey } from '@aat/shared'
-import type { RunSummary } from '../cloud/gateway.ts'
+import { type CloudOutcome, listRuns, type RunListQuery, type RunSummary } from '../cloud/gateway.ts'
 
 /**
  * Rows requested per page.
@@ -111,7 +111,7 @@ export function compareRuns(a: RunSummary, b: RunSummary): number {
 }
 
 /** Newest experiment date first, suffix ascending within a date, undated last. Does not mutate. */
-export function sortRuns(runs: readonly RunSummary[]): RunSummary[] {
+export function sortRuns<T extends RunSummary>(runs: readonly T[]): T[] {
   return [...runs].sort(compareRuns)
 }
 
@@ -218,7 +218,7 @@ export function matchesMemoFilter(run: RunSummary, memoFilter: string): boolean 
 }
 
 /** Apply the client-side filter and the gallery order in one pass, for a screen that wants both. */
-export function presentRuns(runs: readonly RunSummary[], filter: RunFilter): RunSummary[] {
+export function presentRuns<T extends RunSummary>(runs: readonly T[], filter: RunFilter): T[] {
   return sortRuns(runs.filter((run) => matchesMemoFilter(run, filter.memo)))
 }
 
@@ -229,11 +229,8 @@ export function presentRuns(runs: readonly RunSummary[], filter: RunFilter): Run
  * the screen refetches, and the same ids come back. Keying by id makes the merge idempotent, and
  * later rows win so a reload shows the edit rather than the copy that was already in memory.
  */
-export function mergeRunPages(
-  existing: readonly RunSummary[],
-  incoming: readonly RunSummary[],
-): RunSummary[] {
-  const byId = new Map<string, RunSummary>()
+export function mergeRunPages<T extends RunSummary>(existing: readonly T[], incoming: readonly T[]): T[] {
+  const byId = new Map<string, T>()
   for (const run of existing) byId.set(run.id, run)
   for (const run of incoming) byId.set(run.id, run)
   return [...byId.values()]
@@ -284,4 +281,52 @@ export function knownTags(runs: readonly RunSummary[]): string[] {
   const tags = new Set<string>()
   for (const run of runs) for (const tag of run.tags) tags.add(tag)
   return [...tags].sort((left, right) => left.localeCompare(right, 'ja'))
+}
+
+/* ------------------------------------------------------------------------------------------- */
+/* Scope: whose runs the gallery is showing                                                      */
+/* ------------------------------------------------------------------------------------------- */
+
+/**
+ * The two listings the gallery can read.
+ *
+ * These are two Worker routes with two different authorizations, not one route with a parameter —
+ * see the note on `listWorkspaceRuns` in cloud/gateway.ts. Keeping them distinct here as well means
+ * the screen cannot accidentally ask for the team's runs on behalf of somebody who may not see
+ * them and then quietly render a narrowed list.
+ */
+export type RunScope = 'mine' | 'team'
+
+/**
+ * A gallery row, from either listing.
+ *
+ * The owner fields are nullable rather than optional so that "this row came from the owner-scoped
+ * listing" is a value the renderer can branch on, instead of an absence it has to guess about. In
+ * `mine` scope every row belongs to the caller, so naming them would be repeating the scope
+ * selector on every card.
+ */
+export interface GalleryRun extends RunSummary {
+  ownerUserId: string | null
+  ownerDisplayName: string | null
+}
+
+/**
+ * The caller's own runs, shaped like a gallery page.
+ *
+ * `GET /runs` predates the team listing and returns rows without an owner. Rather than teach the
+ * card two row shapes, the two are made one here — at the only point where the difference is known
+ * for certain.
+ */
+export async function listOwnRunsAsGallery(
+  query: RunListQuery,
+): Promise<CloudOutcome<{ runs: readonly GalleryRun[]; nextCursor: string | null }>> {
+  const outcome = await listRuns(query)
+  if (!outcome.ok) return outcome
+  return {
+    ok: true,
+    value: {
+      runs: outcome.value.runs.map((run) => ({ ...run, ownerUserId: null, ownerDisplayName: null })),
+      nextCursor: outcome.value.nextCursor,
+    },
+  }
 }
