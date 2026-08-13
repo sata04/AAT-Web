@@ -203,7 +203,6 @@ describe('renderer — finding a failed figure', () => {
               suffix: '',
               originalFilename: '260812_data.csv',
               memo: null,
-              projectId: null,
               tags: [],
               createdAt: '2026-08-12T00:00:00.000Z',
               updatedAt: '2026-08-12T00:00:00.000Z',

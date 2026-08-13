@@ -23,7 +23,7 @@
  * | Read runs, revisions, metrics, posters        | yes   | yes        | yes   | no     |
  * | Read/download snapshots and original CSVs     | yes   | yes        | yes   | no     |
  * | Generate a poster from a revision             | yes   | yes        | yes   | no     |
- * | Edit memo, tags, project                      | yes   | yes        | yes   | no     |
+ * | Edit memo and tags                            | yes   | yes        | yes   | no     |
  * | Delete a run, upload/delete an original CSV   | yes   | no         | yes   | no     |
  * | Create a revision, upload a snapshot          | yes   | no         | no    | no     |
  *
@@ -59,8 +59,6 @@ const PROTECTED_ENDPOINTS: ProtectedEndpoint[] = [
   { method: 'GET', path: '/api/v1/runs/01ANYTHING' },
   { method: 'PATCH', path: '/api/v1/runs/01ANYTHING', body: { memo: 'x' } },
   { method: 'DELETE', path: '/api/v1/runs/01ANYTHING' },
-  { method: 'GET', path: '/api/v1/projects' },
-  { method: 'POST', path: '/api/v1/projects', body: { name: 'p' } },
   { method: 'GET', path: '/api/v1/runs/01ANYTHING/revisions' },
   { method: 'POST', path: '/api/v1/runs/01ANYTHING/revisions', body: {} },
   { method: 'GET', path: '/api/v1/revisions/01ANYTHING' },
@@ -342,7 +340,7 @@ describe('a Researcher reads and reuses a colleague’s work', () => {
     expect(((await again.json()) as { created: boolean }).created).toBe(false)
   })
 
-  it('edits the memo, the tags and the project', async () => {
+  it('edits the memo and the tags', async () => {
     const owner = await createUser()
     const colleague = await createUser()
     const runId = await createRun(owner)
@@ -360,26 +358,27 @@ describe('a Researcher reads and reuses a colleague’s work', () => {
     expect(body.run.tags).toEqual(['再測定'])
   })
 
-  it('cannot file a colleague’s run into a project of its own', async () => {
+  it('finds a colleague’s run by the tag a colleague put on it', async () => {
+    // Tags are the whole of the grouping story since the projects entity was removed, so the pair
+    // that matters is asserted together: a member may tag somebody else's run, and that tag is then
+    // a filter over the *team* listing rather than only over their own. A tag that could be written
+    // across the workspace but only searched within one member's runs would be the same
+    // half-shared shape the project field had.
     const owner = await createUser()
     const colleague = await createUser()
     const runId = await createRun(owner)
 
-    const created = await apiFetch('/api/v1/projects', {
-      method: 'POST',
-      cookie: colleague.cookie,
-      body: JSON.stringify({ name: '私のプロジェクト' }),
-    })
-    const project = (await created.json()) as { project: { id: string } }
-
-    // Annotating a colleague's run means editing the labels on it, not moving it into a grouping
-    // its owner cannot see.
-    const patched = await apiFetch(`/api/v1/runs/${runId}`, {
+    const tagged = await apiFetch(`/api/v1/runs/${runId}`, {
       method: 'PATCH',
       cookie: colleague.cookie,
-      body: JSON.stringify({ projectId: project.project.id }),
+      body: JSON.stringify({ tags: ['微小重力2026'] }),
     })
-    expect(patched.status).toBe(404)
+    expect(tagged.status).toBe(200)
+
+    const found = await apiFetch('/api/v1/workspace/runs?tag=微小重力2026', { cookie: colleague.cookie })
+    expect(found.status).toBe(200)
+    const body = (await found.json()) as { runs: { id: string; tags: string[] }[] }
+    expect(body.runs.map((entry) => entry.id)).toContain(runId)
   })
 })
 

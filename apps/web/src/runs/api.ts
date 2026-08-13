@@ -3,7 +3,7 @@
  *
  * The gateway is owned elsewhere and covers almost everything these screens need — `listRuns`,
  * `fetchRun`, `updateRun`, `deleteRun`, `listRevisions`, `fetchRevision`, `listPosters`,
- * `posterImageUrl`, `listProjects`, and the three poster render calls. What it has no entry point
+ * `posterImageUrl`, and the three poster render calls. What it has no entry point
  * for is the two responses that are **bulk bytes rather than JSON**: the snapshot that makes a
  * stored run reopenable, and the original-CSV backup. Only those live here, and they live here
  * rather than as edits to gateway.ts so two concurrent changes to the cloud layer cannot collide

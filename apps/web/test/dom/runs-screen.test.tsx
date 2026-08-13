@@ -8,10 +8,10 @@
  *     first and suffix ascending inside a day. Those two disagree for any run analysed later than
  *     it was performed, which is most re-analyses, so a card grid that quietly rendered the API's
  *     order would look completely plausible and be wrong.
- *  2. **Which filters reach the server, and which cannot.** `search`, `tag`, date bounds and
- *     project become query parameters; `memo` cannot, because the route has no memo filter, and the
- *     screen says so. A memo filter that silently became server-side would change what an empty
- *     result *means*.
+ *  2. **Which filters reach the server, and which cannot.** `search`, `tag` and the date bounds
+ *     become query parameters; `memo` cannot, because the route has no memo filter, and the screen
+ *     says so. A memo filter that silently became server-side would change what an empty result
+ *     *means*.
  *  3. **Nothing on this screen starts a render or blocks on the cloud.** Signed out, unavailable,
  *     erroring — each is a state with a way forward, and each one keeps the analyzer one click
  *     away, because the analyzer is the product.
@@ -48,7 +48,6 @@ function run(overrides: Partial<RunSummary> & Pick<RunSummary, 'id' | 'runCode'>
     suffix: '',
     originalFilename: `${overrides.runCode}_data.csv`,
     memo: null,
-    projectId: null,
     tags: [],
     createdAt: '2026-08-11T02:00:00.000Z',
     updatedAt: '2026-08-11T02:00:00.000Z',
@@ -62,8 +61,6 @@ const NO_FACTS = {
   'GET /api/v1/revisions/:revisionId': () => json({ revision: null, config: null, metrics: null }),
   'GET /api/v1/revisions/:revisionId/posters': () => json({ posters: [] }),
 }
-
-const PROJECTS = { 'GET /api/v1/projects': () => json({ projects: [] }) }
 
 describe('run gallery — session states', () => {
   it('invites a signed-out reader to sign in, and points at the analyzer either way', async () => {
@@ -90,7 +87,6 @@ describe('run gallery — ordering', () => {
   it('shows experiment-date order, newest day first, suffix ascending within a day', async () => {
     installNetwork({
       'GET /api/v1/me': meRoute(),
-      ...PROJECTS,
       ...NO_FACTS,
       'GET /api/v1/workspace/runs': () =>
         json({
@@ -115,7 +111,6 @@ describe('run gallery — ordering', () => {
   it('lists an undated run last rather than hiding it', async () => {
     installNetwork({
       'GET /api/v1/me': meRoute(),
-      ...PROJECTS,
       ...NO_FACTS,
       'GET /api/v1/workspace/runs': () =>
         json({
@@ -142,7 +137,6 @@ describe('run gallery — filtering', () => {
   it('sends the server-side filters as query parameters, only on submit', async () => {
     const network = installNetwork({
       'GET /api/v1/me': meRoute(),
-      ...PROJECTS,
       ...NO_FACTS,
       'GET /api/v1/workspace/runs': () => json({ runs: [], nextCursor: null }),
     })
@@ -171,7 +165,6 @@ describe('run gallery — filtering', () => {
   it('filters by memo in the browser, over loaded runs only, and says so', async () => {
     const network = installNetwork({
       'GET /api/v1/me': meRoute(),
-      ...PROJECTS,
       ...NO_FACTS,
       'GET /api/v1/workspace/runs': () =>
         json({
@@ -205,7 +198,6 @@ describe('run gallery — filtering', () => {
   it('distinguishes "nothing saved yet" from "nothing matches"', async () => {
     installNetwork({
       'GET /api/v1/me': meRoute(),
-      ...PROJECTS,
       ...NO_FACTS,
       'GET /api/v1/workspace/runs': () => json({ runs: [], nextCursor: null }),
     })
@@ -229,7 +221,6 @@ describe('run gallery — filtering', () => {
   it('enables "clear" only when something is actually filtered', async () => {
     installNetwork({
       'GET /api/v1/me': meRoute(),
-      ...PROJECTS,
       ...NO_FACTS,
       'GET /api/v1/workspace/runs': () => json({ runs: [], nextCursor: null }),
     })
@@ -254,7 +245,6 @@ describe('run gallery — loading, failure and paging', () => {
     let release: (value: Response) => void = () => {}
     installNetwork({
       'GET /api/v1/me': meRoute(),
-      ...PROJECTS,
       ...NO_FACTS,
       'GET /api/v1/workspace/runs': () =>
         new Promise<Response>((resolve) => {
@@ -287,7 +277,6 @@ describe('run gallery — loading, failure and paging', () => {
     let attempts = 0
     installNetwork({
       'GET /api/v1/me': meRoute(),
-      ...PROJECTS,
       ...NO_FACTS,
       'GET /api/v1/workspace/runs': () => {
         attempts += 1
@@ -313,7 +302,6 @@ describe('run gallery — loading, failure and paging', () => {
   it('offers the next page only while the cursor says there is one', async () => {
     const network = installNetwork({
       'GET /api/v1/me': meRoute(),
-      ...PROJECTS,
       ...NO_FACTS,
       'GET /api/v1/workspace/runs': (request) => {
         const cursor = new URL(request.url, 'https://aat.test').searchParams.get('cursor')
@@ -345,7 +333,6 @@ describe('run gallery — a card', () => {
   it('identifies the experiment before any of the expensive half arrives', async () => {
     installNetwork({
       'GET /api/v1/me': meRoute(),
-      ...PROJECTS,
       'GET /api/v1/workspace/runs': () =>
         json({
           runs: [
@@ -381,7 +368,6 @@ describe('run gallery — a card', () => {
     let attempts = 0
     const network = installNetwork({
       'GET /api/v1/me': meRoute(),
-      ...PROJECTS,
       'GET /api/v1/workspace/runs': () =>
         json({
           runs: [run({ id: '01J1', runCode: '260812', experimentDate: '2026-08-12' })],
@@ -413,7 +399,6 @@ describe('run gallery — a card', () => {
   it('names every control on the screen', async () => {
     installNetwork({
       'GET /api/v1/me': meRoute(),
-      ...PROJECTS,
       ...NO_FACTS,
       'GET /api/v1/workspace/runs': () =>
         json({
@@ -452,7 +437,6 @@ describe('run gallery — scope', () => {
 
   const BOTH_LISTINGS = {
     'GET /api/v1/me': meRoute(),
-    ...PROJECTS,
     ...NO_FACTS,
     'GET /api/v1/workspace/runs': () => json({ runs: [TEAM_RUN], nextCursor: null }),
     'GET /api/v1/runs': () => json({ runs: [], nextCursor: null }),

@@ -1,5 +1,5 @@
 /**
- * Runs and projects.
+ * Runs.
  *
  * A run is one physical experiment — one drop of the capsule — identified by its run code
  * ("260811a": the date plus a within-day suffix). Creating a run records that the experiment
@@ -13,6 +13,15 @@
  * Who may reach whose run is decided in one place — `requireRun(context, id, level)` — and the
  * level is named at every call site below. Reading and annotating are open to the team; deleting is
  * not. See worker/middleware/authorize.ts for the policy and the reasoning behind it.
+ *
+ * **A run is grouped by its tags and by nothing else.** This file used to serve `/projects` as well,
+ * and a run carried a `project_id`; migration 0003 removed both. The short version is that projects
+ * never became usable — no client could create one and no screen could file a run into one — and
+ * that when the deployment became a shared workspace, tags followed the policy and projects did not:
+ * `GET /projects` answered with the caller's own while `PATCH /runs/:runId` demanded a project
+ * belonging to the run's owner, which made the field unusable on exactly the colleague's run the
+ * policy exists to let a researcher annotate. Tags express the same grouping, already shared,
+ * already filterable in both listings, already editable. See worker/db/schema.ts.
  */
 
 import { ApiError, parseRunFilename } from '@aat/shared'
@@ -20,15 +29,7 @@ import { and, asc, desc, eq, gte, inArray, isNull, like, lt, lte, or, type SQL, 
 import { Hono } from 'hono'
 import { z } from 'zod'
 import { rowsAffected } from '../db/client.ts'
-import {
-  analysisRevisions,
-  cloudObjects,
-  posterFigures,
-  projects,
-  runs,
-  runTags,
-  user,
-} from '../db/schema.ts'
+import { analysisRevisions, cloudObjects, posterFigures, runs, runTags, user } from '../db/schema.ts'
 import { newId } from '../lib/ids.ts'
 import type { AppEnv } from '../middleware/authorize.ts'
 import { requireCapability, requireRun, requireSession, withDatabase } from '../middleware/authorize.ts'
@@ -73,13 +74,11 @@ const createRunSchema = z.object({
     .regex(/^\d{4}-\d{2}-\d{2}$/)
     .optional(),
   memo: z.string().max(4000).optional(),
-  projectId: z.string().min(1).max(64).optional(),
   tags: z.array(tagSchema).max(32).optional(),
 })
 
 const updateRunSchema = z.object({
   memo: z.string().max(4000).nullable().optional(),
-  projectId: z.string().min(1).max(64).nullable().optional(),
   tags: z.array(tagSchema).max(32).optional(),
 })
 
@@ -87,7 +86,6 @@ const listQuerySchema = z.object({
   /** Substring match against the run code and the original filename. */
   search: z.string().max(128).optional(),
   tag: tagSchema.optional(),
-  projectId: z.string().min(1).max(64).optional(),
   from: z
     .string()
     .regex(/^\d{4}-\d{2}-\d{2}$/)
@@ -112,7 +110,6 @@ const listQuerySchema = z.object({
  */
 function runListFilters(query: z.infer<typeof listQuerySchema>): SQL[] {
   const conditions: SQL[] = [isNull(runs.deletedAt)]
-  if (query.projectId) conditions.push(eq(runs.projectId, query.projectId))
   if (query.from) conditions.push(gte(runs.experimentDate, query.from))
   if (query.to) conditions.push(lte(runs.experimentDate, query.to))
   if (query.search) {
@@ -198,7 +195,6 @@ runRoutes.get(
         suffix: row.suffix,
         originalFilename: row.originalFilename,
         memo: row.memo,
-        projectId: row.projectId,
         tags: tags.get(row.id) ?? [],
         createdAt: row.createdAt.toISOString(),
         updatedAt: row.updatedAt.toISOString(),
@@ -230,21 +226,11 @@ runRoutes.post(
     const experimentDate = body.experimentDate ?? parsed.experimentDate
     const suffix = parsed.runCode === runCode ? parsed.suffix : (runCode.match(/[a-z]$/)?.[0] ?? '')
 
-    if (body.projectId) {
-      const [project] = await db
-        .select({ id: projects.id })
-        .from(projects)
-        .where(and(eq(projects.id, body.projectId), eq(projects.ownerUserId, actor.userId)))
-        .limit(1)
-      if (!project) throw new ApiError('RESOURCE_NOT_FOUND', { details: { resource: 'project' } })
-    }
-
     const id = newId()
     try {
       await db.insert(runs).values({
         id,
         ownerUserId: actor.userId,
-        projectId: body.projectId ?? null,
         runCode,
         experimentDate: experimentDate ?? null,
         suffix: suffix ?? '',
@@ -322,7 +308,6 @@ runRoutes.get('/:runId', requireCapability('analysis:read'), async (context) => 
       suffix: run.suffix,
       originalFilename: run.originalFilename,
       memo: run.memo,
-      projectId: run.projectId,
       tags: tags.get(run.id) ?? [],
       createdAt: run.createdAt.toISOString(),
       updatedAt: run.updatedAt.toISOString(),
@@ -348,23 +333,13 @@ runRoutes.patch(
     const body = context.req.valid('json')
     const now = new Date()
 
-    if (body.projectId) {
-      // The project must belong to the run's OWNER, not to whoever is editing. A project is one
-      // researcher's way of grouping their own experiments, so filing somebody else's run into it
-      // would move that run into a grouping its owner cannot see — the run would appear to have
-      // left their workspace. Annotating a colleague's run means editing the labels on it, not
-      // relocating it into yours.
-      const [project] = await db
-        .select({ id: projects.id })
-        .from(projects)
-        .where(and(eq(projects.id, body.projectId), eq(projects.ownerUserId, run.ownerUserId)))
-        .limit(1)
-      if (!project) throw new ApiError('RESOURCE_NOT_FOUND', { details: { resource: 'project' } })
-    }
-
+    // Everything annotatable here is a label on the run: the memo and the tags. Both mean the same
+    // thing whoever wrote them, which is what makes `annotate` the right level for a colleague — a
+    // field that instead *moved* the run into a grouping only the editor could see would not be an
+    // annotation at all, and that is precisely why the project field could not be made to work
+    // under the shared-workspace policy. See the module doc.
     const patch: Record<string, unknown> = { updatedAt: now }
     if (body.memo !== undefined) patch.memo = body.memo
-    if (body.projectId !== undefined) patch.projectId = body.projectId
     await db.update(runs).set(patch).where(eq(runs.id, run.id))
 
     if (body.tags) {
@@ -539,69 +514,11 @@ workspaceRoutes.get(
         suffix: run.suffix,
         originalFilename: run.originalFilename,
         memo: run.memo,
-        projectId: run.projectId,
         tags: tags.get(run.id) ?? [],
         createdAt: run.createdAt.toISOString(),
         updatedAt: run.updatedAt.toISOString(),
       })),
       nextCursor: rows.length > limit ? (page[page.length - 1]?.run.id ?? null) : null,
     })
-  },
-)
-
-/* ------------------------------------------------------------------------------------------- */
-/* Projects                                                                                     */
-/* ------------------------------------------------------------------------------------------- */
-
-export const projectRoutes = new Hono<AppEnv>()
-
-projectRoutes.use('*', withDatabase, requireSession)
-
-const createProjectSchema = z.object({
-  name: z.string().min(1).max(120),
-  description: z.string().max(2000).optional(),
-})
-
-projectRoutes.get('/', requireCapability('analysis:read'), async (context) => {
-  const db = context.get('db')
-  const actor = context.get('actor')
-  const rows = await db
-    .select()
-    .from(projects)
-    .where(and(eq(projects.ownerUserId, actor.userId), isNull(projects.archivedAt)))
-    .orderBy(desc(projects.id))
-    .limit(MAX_PAGE_SIZE)
-
-  return context.json({
-    projects: rows.map((row) => ({
-      id: row.id,
-      name: row.name,
-      description: row.description,
-      createdAt: row.createdAt.toISOString(),
-    })),
-  })
-})
-
-projectRoutes.post(
-  '/',
-  requireCapability('project:create'),
-  validate('json', createProjectSchema),
-  async (context) => {
-    const db = context.get('db')
-    const actor = context.get('actor')
-    const body = context.req.valid('json')
-    const now = new Date()
-    const id = newId()
-
-    await db.insert(projects).values({
-      id,
-      ownerUserId: actor.userId,
-      name: body.name,
-      description: body.description ?? null,
-      createdAt: now,
-      updatedAt: now,
-    })
-
-    return context.json({ project: { id, name: body.name } }, 201)
   },
 )

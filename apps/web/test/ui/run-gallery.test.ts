@@ -31,7 +31,6 @@ function run(overrides: Partial<RunSummary> & { id: string; runCode: string }): 
     suffix: '',
     originalFilename: `${overrides.runCode}_data.csv`,
     memo: null,
-    projectId: null,
     tags: [],
     createdAt: '2026-08-12T00:00:00.000Z',
     updatedAt: '2026-08-12T00:00:00.000Z',
@@ -120,7 +119,6 @@ describe('gallery filtering', () => {
         tag: 'GQ',
         from: '2026-08-01',
         to: '',
-        projectId: '',
         memo: '再測定',
       },
       null,
@@ -133,10 +131,7 @@ describe('gallery filtering', () => {
   })
 
   it('passes the cursor through for the next page', () => {
-    const query = serverQueryFor(
-      { search: '', tag: '', from: '', to: '', projectId: '', memo: '' },
-      '01JCURSOR',
-    )
+    const query = serverQueryFor({ search: '', tag: '', from: '', to: '', memo: '' }, '01JCURSOR')
     expect(query).toEqual({ limit: RUNS_PAGE_SIZE, cursor: '01JCURSOR' })
   })
 
@@ -161,18 +156,15 @@ describe('gallery filtering', () => {
       tag: '',
       from: '',
       to: '',
-      projectId: '',
       memo: '良好',
     })
     expect(shown.map((entry) => entry.runCode)).toEqual(['260812', '260601'])
   })
 
   it('knows when nothing is being filtered', () => {
-    expect(isEmptyFilter({ search: '', tag: '', from: '', to: '', projectId: '', memo: '' })).toBe(true)
-    expect(isEmptyFilter({ search: '  ', tag: '', from: '', to: '', projectId: '', memo: '' })).toBe(true)
-    expect(isEmptyFilter({ search: '', tag: '', from: '2026-01-01', to: '', projectId: '', memo: '' })).toBe(
-      false,
-    )
+    expect(isEmptyFilter({ search: '', tag: '', from: '', to: '', memo: '' })).toBe(true)
+    expect(isEmptyFilter({ search: '  ', tag: '', from: '', to: '', memo: '' })).toBe(true)
+    expect(isEmptyFilter({ search: '', tag: '', from: '2026-01-01', to: '', memo: '' })).toBe(false)
   })
 })
 

@@ -258,22 +258,25 @@ export const registrationInvites = sqliteTable(
 /* Research data                                                                                */
 /* ------------------------------------------------------------------------------------------- */
 
-/** A research grouping. A project owns runs; it is not itself an experiment. */
-export const projects = sqliteTable(
-  'projects',
-  {
-    id: text('id').primaryKey(),
-    ownerUserId: text('owner_user_id')
-      .notNull()
-      .references(() => user.id, { onDelete: 'cascade' }),
-    name: text('name').notNull(),
-    description: text('description'),
-    createdAt: integer('created_at', { mode: 'timestamp' }).notNull(),
-    updatedAt: integer('updated_at', { mode: 'timestamp' }).notNull(),
-    archivedAt: integer('archived_at', { mode: 'timestamp' }),
-  },
-  (table) => [index('projects_owner_idx').on(table.ownerUserId, table.createdAt)],
-)
+/*
+ * There is no `projects` table, and that is a decision rather than an omission.
+ *
+ * One existed until migration 0003. It was a second grouping mechanism beside `run_tags`, and it
+ * never finished being one: nothing could create a project except a hand-written HTTP request (no
+ * client ever built one), nothing could file a run into one from any screen, `archived_at` was read
+ * by the listing and written by nothing, and when this deployment became one research group's
+ * shared workspace the grouping did not follow — `GET /projects` listed the caller's own while the
+ * run PATCH demanded one belonging to the run's *owner*, so the field was unusable on precisely the
+ * colleague's run the shared-workspace policy exists to let you annotate.
+ *
+ * Tags are the grouping. They are free-form text on a run (`run_tags` below), any member may edit
+ * any member's, both listings filter by them in D1's WHERE clause, and there is an editor for them.
+ * "A campaign, a paper, a student's thesis" — the three things the projects entity was described
+ * as being for — are three tags. What a project could have expressed and a tag cannot is
+ * exclusivity (a run belongs to at most one), a description, and renaming the grouping in one
+ * place; none of those was asked for, and the first is a liability in a lab where one drop is
+ * analysed for both a paper and a thesis. See docs/cloud-data-model.md.
+ */
 
 /**
  * One physical experiment — one drop of the capsule.
@@ -293,7 +296,6 @@ export const runs = sqliteTable(
     ownerUserId: text('owner_user_id')
       .notNull()
       .references(() => user.id, { onDelete: 'cascade' }),
-    projectId: text('project_id').references(() => projects.id, { onDelete: 'set null' }),
     runCode: text('run_code').notNull(),
     /** ISO `yyyy-mm-dd`, or null when the filename did not follow the run-code convention. */
     experimentDate: text('experiment_date'),
@@ -310,7 +312,6 @@ export const runs = sqliteTable(
     // The gallery's default ordering: a user's runs, newest experiment first.
     index('runs_owner_experiment_date_idx').on(table.ownerUserId, table.experimentDate),
     index('runs_owner_created_at_idx').on(table.ownerUserId, table.createdAt),
-    index('runs_project_idx').on(table.projectId),
   ],
 )
 

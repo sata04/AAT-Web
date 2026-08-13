@@ -34,7 +34,6 @@ describe('migrations', () => {
       'verification',
       'passkey',
       'registration_invites',
-      'projects',
       'runs',
       'run_tags',
       'analysis_revisions',
@@ -50,6 +49,16 @@ describe('migrations', () => {
     ]) {
       expect(names).toContain(expected)
     }
+  })
+
+  it('leave no trace of the projects entity', async () => {
+    // Removed by 0003. Asserted rather than merely absent from the list above, because the failure
+    // mode being guarded is the table surviving the migration while nothing queries it — a grouping
+    // that exists in the database and in no code is exactly the half-finished state 0003 resolved.
+    expect(await tableNames()).not.toContain('projects')
+
+    const runColumns = await env.DB.prepare('PRAGMA table_info(runs)').all<{ name: string }>()
+    expect(runColumns.results.map((row) => row.name)).not.toContain('project_id')
   })
 
   it('record themselves as applied, so a second run is a no-op', async () => {

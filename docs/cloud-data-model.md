@@ -8,24 +8,27 @@ with which settings, and what came out — years after the laptop that did it ha
 This document is the reference for that record: the entities, which store holds what, how a
 read is authorised, and how storage is accounted for.
 
-## Four entities, and why there are four
+## Three entities, and why there are three
 
 ```
   user
-   └── project            optional grouping. Owns runs; is not itself an experiment.
-        └── run           ONE physical experiment — one drop of the capsule.
-             └── analysisRevision    ONE immutable analysis of that run's bytes.
-                  ├── analysisMetrics   headline numbers, denormalised for the gallery
-                  ├── snapshot object   the full-resolution analytical record (R2)
-                  └── posterFigure(s)   rendered PNGs (R2), one automatic + N custom
+   └── run                ONE physical experiment — one drop of the capsule.
+        ├── run_tags      the grouping: free-form labels, shared across the workspace
+        └── analysisRevision    ONE immutable analysis of that run's bytes.
+             ├── analysisMetrics   headline numbers, denormalised for the gallery
+             ├── snapshot object   the full-resolution analytical record (R2)
+             └── posterFigure(s)   rendered PNGs (R2), one automatic + N custom
 ```
 
 | Entity | Table | What it means | What it is not |
 | --- | --- | --- | --- |
-| Project | `projects` | A research grouping — a campaign, a paper, a student's thesis. | An experiment. It holds no measurements. |
 | Run | `runs` | One physical drop of the capsule, identified by its run code. | A file. Re-uploading the same CSV does not make a second run. |
 | Analysis revision | `analysis_revisions` | One analysis of one run's bytes with one configuration. | A version of the experiment. Dropping the capsule twice makes two *runs*. |
 | Poster figure | `poster_figures` | One rendered formal figure of one revision. | The graph on screen — that is drawn locally and never stored. |
+
+There were four. A `projects` entity sat above `runs` as an optional grouping until 2026-08-13; it
+was removed rather than finished, and [Grouping is tags](#grouping-is-tags-and-the-projects-entity-is-gone)
+says why.
 
 The distinction that carries the most weight is the last one in the Run row. `runs` and
 `analysis_revisions` are separated precisely so that "revision 3" has exactly one meaning. If a
@@ -71,9 +74,8 @@ A `Float64Array` written to an object has no ordering question.
 | --- | --- |
 | `user`, `session`, `account`, `verification`, `passkey` | Better Auth's own tables. See `docs/auth-security.md`. |
 | `registration_invites` | Invitation state machine; only the token's SHA-256 is stored. |
-| `projects` | Optional grouping of runs. |
 | `runs` | One physical experiment, plus its filename-derived identity. |
-| `run_tags` | Free-form tags. A join table, not a JSON column, because the gallery filters by tag and filtering a JSON blob means a full scan. |
+| `run_tags` | Free-form tags, and the only grouping a run has. A join table, not a JSON column, because the gallery filters by tag and filtering a JSON blob means a full scan. |
 | `analysis_revisions` | The immutable analysis records. |
 | `analysis_metrics` | Headline numbers denormalised out of the snapshot, one row per revision. |
 | `poster_presets` | The frozen preset registry: key, version, spec hash, renderer version. |
@@ -128,6 +130,82 @@ the gallery.
 Uniqueness is **per owner** (`runs_owner_run_code_unique` on `(owner_user_id, run_code)`). Two
 researchers each having a run `260811a` is normal; a global constraint would make one of them
 unable to record their own experiment.
+
+## Grouping is tags, and the `projects` entity is gone
+
+A run is grouped by its tags. There is no second grouping mechanism, no `projects` table and no
+`runs.project_id`; migration `0003_drop_projects` removed both on 2026-08-13.
+
+This document previously described `projects` as a first-class entity — "a campaign, a paper, a
+student's thesis" — and listed under Outstanding that projects were not shared. That entry
+understated it. The concept was never reachable:
+
+| Part of the feature | State before removal |
+| --- | --- |
+| `POST /api/v1/projects` | Served, and called by nothing. `src/cloud/gateway.ts` had no function for it, so no client could create a project without a hand-written HTTP request. |
+| Filing a run under one | `POST /runs` and `PATCH /runs/:runId` both accepted `projectId`; no screen ever sent one. |
+| `GET /api/v1/projects` | Served, and fed one `<select>` in the Run Gallery — a filter over a list nothing could add to. |
+| `projects.archived_at` | Read by the listing's `WHERE archived_at IS NULL`. Written by nothing: there was no archive route. |
+| `project:share` | A capability in `@aat/shared`'s vocabulary that no route ever checked. |
+| The gallery card | Rendered `プロジェクト {name}` for a name that could not be set. |
+
+On top of that, the field contradicted the shared-workspace policy rather than merely lagging it.
+`PATCH /runs/:runId` validated `projectId` against `eq(projects.ownerUserId, run.ownerUserId)` — the
+**run's** owner — while `GET /projects` returned `eq(projects.ownerUserId, actor.userId)` — the
+**caller's** own. So on a colleague's run the only acceptable values were ids belonging to that
+colleague, and no endpoint would tell you what they were. The one field on the run that
+`workspace:annotate` could not actually annotate was the grouping.
+
+### Why removed rather than completed
+
+Because tags already are the feature, and they are the shared version of it. A tag is free-form text
+on a run; any member may edit any member's (`workspace:annotate`); both `GET /runs` and
+`GET /workspace/runs` filter by tag in D1's `WHERE` clause through the same shared builder; and
+`RunTagEditor` has existed on the run detail screen the whole time. "A campaign, a paper, a
+student's thesis" are three tags, and a run analysed for two of them can carry both.
+
+What a project could have expressed that a tag cannot is worth naming, because it is the honest case
+for the other decision: exclusivity (a run belongs to at most one), a description field, and renaming
+a grouping in one place instead of on every run. None of the three had been asked for, none had a
+route (there was no rename and no archive), and the first is a liability rather than a feature in a
+lab where one drop is analysed for both a paper and a thesis. Finishing the entity would have meant
+deciding what a project's *owner* means under a policy where runs have no privacy from the team —
+who may rename one, who may archive one, and what happens to your run when a colleague archives the
+project it sits in — in order to arrive at a second grouping alongside one that already works.
+
+### The migration is hand-corrected, and it had to be
+
+`0003_drop_projects.sql` is **not** what `drizzle-kit generate` emitted. The generated form would
+have destroyed the deployment's research record, silently, and the shape of that trap is worth
+recording:
+
+- `runs.project_id` cannot be removed with `ALTER TABLE ... DROP COLUMN`, because SQLite refuses to
+  drop a column named in a foreign key definition. The table has to be rebuilt.
+- Dropping `projects` on its own is not an alternative: it leaves the child key pointing at nothing,
+  and the next `INSERT INTO runs` fails with `no such table: main.projects`. Run creation would break
+  for every user.
+- Step one of SQLite's table-rebuild procedure is `PRAGMA foreign_keys=OFF`, which is what drizzle-kit
+  emitted — and [D1 does not support it](https://developers.cloudflare.com/d1/sql-api/foreign-keys/).
+  D1's enforcement is permanently equivalent to `foreign_keys = on`. The only pragma it offers is
+  `defer_foreign_keys`, which defers constraint **violations** and does not suppress referential
+  **actions**.
+- So on D1, `DROP TABLE runs` performs its implicit `DELETE` with cascades live, and fires
+  `ON DELETE CASCADE` into `analysis_revisions` → (`analysis_metrics`, `cloud_objects`,
+  `poster_figures`), plus `cloud_objects` and `run_tags` directly. That is every analysis ever
+  recorded, and `cloud_objects` is the only index of what this deployment holds in R2 — losing it
+  strands every snapshot and poster PNG in the bucket, still billed, with nothing pointing at them.
+
+The committed migration therefore copies the five affected tables into `CREATE TABLE ... AS SELECT`
+scratch tables, which have no foreign keys of their own and so survive the cascade that empties the
+originals, rebuilds `runs` without the column, restores the rows parent-first, recreates the three
+`runs` indexes and drops the scratch tables. This follows the precedent of `0002`, which was also
+hand-corrected after generation.
+
+An empty database cannot detect any of this: the workerd suite applies migrations to a fresh D1, so
+a wrong version of this file passes it exactly as the right one does. `apps/web/test/ui/migrations.test.ts`
+is what actually holds it — it seeds a row in every table the cascade reaches, applies the migration
+under `PRAGMA foreign_keys=ON` (D1's mode), and asserts that no row was lost, that the indexes came
+back, that no scratch table was left behind, and that the file never contains `PRAGMA foreign_keys`.
 
 ## An analysis revision is immutable, and the database defines what "the same analysis" means
 
@@ -330,7 +408,7 @@ that shares a drop tower could not share the analyses of the drops.
 | Read/download the snapshot (replay, statistics, Excel, custom poster) | yes | **yes** | **yes** | no |
 | Read/download the original CSV backup | yes | **yes** | **yes** | no |
 | Generate a poster figure, automatic or custom | yes | **yes** | **yes** | no |
-| Edit memo, tags, project | yes | **yes** | **yes** | no |
+| Edit memo and tags | yes | **yes** | **yes** | no |
 | Delete a run; upload or delete an original CSV | yes | no | **yes** | no |
 | Create a revision; upload a snapshot | yes | no | no | no |
 
@@ -340,7 +418,7 @@ role comparisons in handlers:
 | Capability | Meaning | Held by |
 | --- | --- | --- |
 | `workspace:read` | May read any member's work in this deployment. | Researcher, Admin |
-| `workspace:annotate` | May annotate any member's work — memo, tags, project. | Researcher, Admin |
+| `workspace:annotate` | May annotate any member's work — the memo and the tags. | Researcher, Admin |
 | `workspace:destroy` | May perform destructive actions on any member's work. | Admin |
 
 Four consequences worth stating, because each is a decision rather than a fallout:
@@ -371,7 +449,7 @@ widened read needs an enumeration endpoint to be reachable at all. This is it.
 | --- | --- |
 | Capabilities | `analysis:read` **and** `workspace:read`, both as middleware |
 | Scope | Every member's runs, the caller's own included |
-| Query | `search`, `tag`, `projectId`, `from`, `to`, `limit` (≤ 100, default 25), `cursor`, `ownerUserId` |
+| Query | `search`, `tag`, `from`, `to`, `limit` (≤ 100, default 25), `cursor`, `ownerUserId` |
 | Row | the `/runs` row plus `ownerUserId` and `ownerDisplayName` |
 | Deleted runs | excluded — the same `IS NULL deleted_at` filter, from the same builder |
 
@@ -575,10 +653,11 @@ them and no way to find them.
   lifecycle policy to lean on if it stops being one.
 - **No UI consumes the team gallery yet.** `GET /api/v1/workspace/runs` exists and is covered by
   the workerd suite; the screen that would show a colleague's run alongside your own does not.
-- **Projects are not shared.** A run can be annotated by any member, but the project it is filed
-  under must belong to the run's *owner*, and `GET /projects` lists only the caller's. So a
-  colleague editing a run cannot see the projects they are allowed to move it between. Sharing
-  projects across the team is a separate decision from sharing runs, and it has not been made.
+- ~~**Projects are not shared.**~~ Resolved by removing the entity rather than by sharing it. See
+  [Grouping is tags](#grouping-is-tags-and-the-projects-entity-is-gone): projects were never
+  reachable — nothing could create one from any client and no screen could file a run under one —
+  and tags already provide the grouping, already shared across the workspace and already filterable
+  in both listings. `runs` now has no `project_id` and the deployment has no `projects` table.
 
 ## Related documents
 

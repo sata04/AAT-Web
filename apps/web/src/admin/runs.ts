@@ -13,8 +13,8 @@
  *
  * ## What the API can filter, and what it cannot
  *
- * The route filters by run code and filename (`search`), tag, project, experiment-date bounds and
- * owner. It has no filter for *whether a run has a snapshot*, *whether it has an original-CSV
+ * The route filters by run code and filename (`search`), tag, experiment-date bounds and owner.
+ * It has no filter for *whether a run has a snapshot*, *whether it has an original-CSV
  * backup*, or *what state its poster is in*, because none of those is a column on `runs` — they are
  * facts about rows in other tables, and one join per listing row is the shape D1 charges for.
  *

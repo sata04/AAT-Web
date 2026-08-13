@@ -5,7 +5,7 @@
  * different things to obtain.
  *
  * **What the listing already knows** — run code, experiment date, suffix, original filename, memo,
- * tags, project — is drawn immediately, from the row `GET /api/v1/runs` returned. A card is never
+ * tags — is drawn immediately, from the row `GET /api/v1/runs` returned. A card is never
  * blank and never a skeleton: even before anything else loads it identifies the experiment, which
  * is what a reader scanning for one of them actually needs.
  *
@@ -47,8 +47,6 @@ import { RunPosterImage } from './RunPosterImage.tsx'
 export interface RunCardProps {
   run: RunSummary
   facts: RunFactsState
-  /** The run's project name, when it has one and the listing is loaded. */
-  projectName: string | null
   /**
    * Whose run this is, or null in the owner-scoped listing where every row is the reader's own.
    *
@@ -155,9 +153,6 @@ export function RunCard(props: RunCardProps): React.JSX.Element {
             </h2>
             <span className="run-card__date">{formatExperimentDate(run.experimentDate)}</span>
             <span className="panel__hint">枝番 {suffixLabel(run.suffix)}</span>
-            {props.projectName === null ? null : (
-              <span className="panel__hint">プロジェクト {props.projectName}</span>
-            )}
             {props.ownerDisplayName == null ? null : (
               <span className="run-card__owner">記録者 {props.ownerDisplayName}</span>
             )}
