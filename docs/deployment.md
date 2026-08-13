@@ -68,17 +68,22 @@ Two account-scoped identifiers are committed as invalid placeholders. They are n
 appear in `wrangler.jsonc`, which is in version control — but a wrong value must fail loudly rather
 than write to some other account:
 
-| Location | Placeholder | Replace with |
+| Location | Placeholder | Filled in from |
 | --- | --- | --- |
-| `d1_databases[0].database_id` | `00000000-0000-0000-0000-000000000000` | the id printed by `wrangler d1 create aat-db` |
-| `containers[0].image` | `registry.cloudflare.com/000…0/aat-poster-renderer:latest` | the same path with the real account id |
+| `d1_databases[0].database_id` | `00000000-0000-0000-0000-000000000000` | Doppler `AAT_D1_DATABASE_ID` (the id printed by `wrangler d1 create aat-db`) |
+| `containers[0].image` | `registry.cloudflare.com/000…0/aat-poster-renderer:latest` | the digest the deploy step captures after pushing the image |
 
-Wrangler refuses an image whose account id is not the account being deployed to, so the placeholder
-fails closed.
+**The committed file is never the file that is deployed, and it stays invalid on purpose.** Wrangler
+performs no variable substitution inside its own configuration, so
+`apps/web/scripts/resolve-wrangler-config.mjs` produces a deploy-time copy with these two values
+filled in, and every step that reads configuration — the D1 migration and the deploy itself — is
+passed that copy with `--config`. The script asserts each placeholder matched exactly once, so an
+edit that moves or renames one fails the deploy instead of shipping a placeholder.
 
-Note that Wrangler performs no environment-variable substitution inside `wrangler.jsonc`. The
-digest that the deploy step captures in `POSTER_RENDERER_IMAGE` cannot be injected into that file,
-so the committed tag and the tag CI pushes have to be kept in step deliberately.
+A deploy attempted from a developer machine without that step therefore fails, which is the intent.
+
+Wrangler also refuses an image whose account id is not the account being deployed to, so even a
+resolution that produced the wrong account fails closed rather than pulling a stranger's image.
 
 ## Secrets
 
@@ -124,6 +129,7 @@ BETTER_AUTH_URL
 AAT_RP_ID
 AAT_RP_NAME
 AAT_TRUSTED_ORIGINS
+AAT_D1_DATABASE_ID        id of the D1 database; substituted into wrangler.jsonc at deploy time
 ```
 
 The Cloudflare API token needs: Workers Scripts edit, D1 edit, R2 edit, Containers/Cloudchamber

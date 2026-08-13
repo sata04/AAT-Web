@@ -211,10 +211,12 @@ jobs:
           BETTER_AUTH_URL: ${{ steps.doppler.outputs.BETTER_AUTH_URL }}
           AAT_RP_ID: ${{ steps.doppler.outputs.AAT_RP_ID }}
           AAT_TRUSTED_ORIGINS: ${{ steps.doppler.outputs.AAT_TRUSTED_ORIGINS }}
+          AAT_D1_DATABASE_ID: ${{ steps.doppler.outputs.AAT_D1_DATABASE_ID }}
         run: |
           missing=""
           for key in CF_DEPLOY_TOKEN_VALUE CLOUDFLARE_ACCOUNT_ID CLOUDFLARE_ZONE_ID DEPLOY_HOSTNAME \
-                     BETTER_AUTH_SECRET BETTER_AUTH_URL AAT_RP_ID AAT_TRUSTED_ORIGINS; do
+                     BETTER_AUTH_SECRET BETTER_AUTH_URL AAT_RP_ID AAT_TRUSTED_ORIGINS \
+                     AAT_D1_DATABASE_ID; do
             if [ -z "${!key}" ]; then missing="$missing $key"; fi
           done
           if [ -n "$missing" ]; then
@@ -243,6 +245,23 @@ jobs:
           fi
           echo "ref=$ref" >> "$GITHUB_OUTPUT"
 
+      # The committed wrangler.jsonc carries deliberately invalid placeholders for the two
+      # account-scoped values it cannot hold — the D1 database id and the container image, whose
+      # registry path embeds the account id and whose digest is only known once the push above
+      # finishes. Wrangler does no variable substitution inside its own configuration file, so the
+      # deploy-time copy is generated here from Doppler. Everything after this step uses --config;
+      # the committed file stays invalid on purpose, so a mistaken deploy from a developer machine
+      # fails rather than writing into somebody else's account.
+      - name: Resolve deploy configuration
+        id: wrangler_config
+        working-directory: apps/web
+        env:
+          AAT_D1_DATABASE_ID: ${{ steps.doppler.outputs.AAT_D1_DATABASE_ID }}
+          POSTER_RENDERER_IMAGE: ${{ steps.image.outputs.ref }}
+        run: |
+          node scripts/resolve-wrangler-config.mjs "$RUNNER_TEMP/wrangler.deploy.jsonc"
+          echo "path=$RUNNER_TEMP/wrangler.deploy.jsonc" >> "$GITHUB_OUTPUT"
+
       # Migrations are reviewed SQL from the repository, applied before the code
       # that depends on them. Schema changes follow expand/migrate/contract so
       # this ordering is safe.
@@ -251,7 +270,9 @@ jobs:
         env:
           CLOUDFLARE_API_TOKEN: ${{ steps.doppler.outputs.CF_DEPLOY_TOKEN_VALUE }}
           CLOUDFLARE_ACCOUNT_ID: ${{ steps.doppler.outputs.CLOUDFLARE_ACCOUNT_ID }}
-        run: pnpm exec wrangler d1 migrations apply aat-db --remote
+        run: |
+          pnpm exec wrangler d1 migrations apply aat-db --remote \
+            --config "${{ steps.wrangler_config.outputs.path }}"
 
       # Allowlist, not passthrough: only these keys reach the Worker, so the
       # deployment credentials themselves can never end up as Worker secrets.
@@ -277,7 +298,8 @@ jobs:
             AAT_TRUSTED_ORIGINS
           } | with_entries(select(.value != null and .value != ""))' \
             > "$RUNNER_TEMP/worker-secrets.json"
-          pnpm exec wrangler deploy --secrets-file "$RUNNER_TEMP/worker-secrets.json"
+          pnpm exec wrangler deploy --secrets-file "$RUNNER_TEMP/worker-secrets.json" \
+            --config "${{ steps.wrangler_config.outputs.path }}"
           rm -f "$RUNNER_TEMP/worker-secrets.json"
 
       # The production hostname is deliberately not committed to the repository;
