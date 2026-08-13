@@ -1,0 +1,30 @@
+{
+  // The end-to-end suite is not part of the application's build.
+  //
+  // `apps/web/tsconfig.json` covers `src/`, `worker/` and `test/`; adding `e2e/` to it would put
+  // Playwright's types and Node's on the same programme as the browser code and the Worker, which
+  // is exactly the kind of type bleed the split exists to avoid. So this is a separate programme
+  // with the same strictness, typechecked on its own (`tsc -p e2e/tsconfig.json`).
+  //
+  // Playwright itself never typechecks: it transpiles and runs. Without this file a type error in
+  // a spec would only ever show up as a confusing runtime failure.
+  "extends": "../tsconfig.json",
+  "compilerOptions": {
+    "outDir": "../dist/e2e",
+    // `playwright.config.ts` sits beside `e2e/`, so the programme's root is the app directory.
+    "rootDir": "..",
+
+    // The harness starts processes, reads fixtures and hashes tokens, so it needs Node's types —
+    // and `@types/node` is nobody's direct dependency here: it arrives transitively (Vitest,
+    // Wrangler) and therefore lives in pnpm's hidden store rather than in a `node_modules/@types`
+    // that TypeScript's upward search would find. Naming the store directly keeps it out of
+    // `apps/web/package.json`, where a devDependency would have to be justified for a suite that
+    // is not part of the build.
+    //
+    // If this ever stops resolving, TypeScript says so plainly ("Cannot find type definition file
+    // for 'node'"), and the fix is either the path below or a real devDependency — not silence.
+    "typeRoots": ["../node_modules/@types", "../../../node_modules/.pnpm/node_modules/@types"],
+    "types": ["node"]
+  },
+  "include": ["**/*.ts", "../playwright.config.ts"]
+}
