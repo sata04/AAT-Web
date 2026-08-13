@@ -89,6 +89,21 @@ test('shared CSV fixtures reach the browser too', () => {
   expectJobs(['apps/web/test/fixtures/e2e/260811a_data.csv'], ['web', 'e2e'])
 })
 
+test('the Pages front door reaches the web job and the browser suite', () => {
+  // The Function every authenticated request passes through. `pnpm typecheck`
+  // in apps/web now covers it, and the E2E suite is the only thing that
+  // exercises the Pages -> service-binding hop at all.
+  const result = expectJobs(['apps/web/pages/functions/api/[[path]].ts'], ['web', 'e2e'])
+  assert.deepEqual(result.categories, ['pages-front-door'])
+  expectJobs(['apps/web/pages/tsconfig.json'], ['web', 'e2e'])
+})
+
+test('the Pages routing table is part of the deployed output', () => {
+  // _routes.json is what replaces run_worker_first. Getting it wrong returns
+  // index.html at 200 for every API call.
+  expectJobs(['apps/web/public/_routes.json'], ['web', 'e2e'])
+})
+
 test('the E2E suite and its config run only the E2E job', () => {
   expectJobs(['apps/web/playwright.config.ts'], ['e2e'])
   expectJobs(['apps/web/e2e/specs/passkey.spec.ts'], ['e2e'])

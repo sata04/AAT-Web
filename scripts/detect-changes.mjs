@@ -116,6 +116,11 @@ export const RULES = [
   // -------------------------------------------------------------------------
   // The application.
   // -------------------------------------------------------------------------
+  // The Pages front door: the Function that forwards /api/* to the private
+  // Worker, and its own TypeScript programme. Every authenticated request goes
+  // through it, so it reaches the web job (which typechecks it) and the
+  // end-to-end suite (which is the only thing that exercises the hop).
+  { category: 'pages-front-door', jobs: ['web', 'e2e'], match: /^apps\/web\/pages\// },
   // The suite and its harness. Typechecked and run by the e2e job alone.
   { category: 'e2e-suite', jobs: ['e2e'], match: /^apps\/web\/e2e\// },
   { category: 'e2e-suite', jobs: ['e2e'], match: /^apps\/web\/playwright\.config\.ts$/ },

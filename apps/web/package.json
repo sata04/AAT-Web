@@ -6,7 +6,7 @@
     "dev": "vite",
     "build": "tsc -b && vite build && node scripts/generate-headers.mjs",
     "preview": "pnpm build && vite preview",
-    "typecheck": "tsc -b",
+    "typecheck": "tsc -b && tsc -p pages/tsconfig.json",
     "test": "vitest run && vitest run --config vitest.dom.config.ts && vitest run --config test/worker/vitest.config.ts",
     "test:watch": "vitest",
     "cf-typegen": "wrangler types",

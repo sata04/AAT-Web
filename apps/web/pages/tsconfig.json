@@ -1,0 +1,26 @@
+{
+  // The Pages Function is its own TypeScript programme.
+  //
+  // Without this file nothing typechecks the single file every authenticated
+  // request passes through: `apps/web/tsconfig.json` includes src, worker and
+  // test, and not this directory. Biome lints it, which makes it *look* covered
+  // — but a mistyped binding name (`env.API` where the deployment binds
+  // `AAT_API`) would then reach production as a uniform 502 across the whole
+  // API, caught by nothing. `pnpm typecheck` in apps/web runs this too.
+  //
+  // `DOM` rather than the generated worker-configuration.d.ts, for two reasons.
+  // It is what the rest of apps/web is already checked against, so `Request` and
+  // `Response` mean the same thing here as they do in worker/ — and pulling the
+  // generated runtime types in instead drags the whole @aat/shared source into
+  // this programme, where it fails against workerd's stricter TextDecoder
+  // options. The Function's body is a request pass-through and one `new
+  // Response(string, init)`; nothing in it can tell the two definitions apart.
+  "extends": "../../../tsconfig.base.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "composite": false,
+    "lib": ["ES2023", "DOM"],
+    "types": []
+  },
+  "include": ["functions/**/*.ts"]
+}
