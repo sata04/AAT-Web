@@ -132,8 +132,8 @@ export function followsFilenameConvention(run: RunSummary): boolean {
  * The split is not an implementation detail to hide — it decides what the results *mean*, so the
  * screen labels each control with where it filters:
  *
- *  - `search`, `tag`, `projectId`, `from`, `to` go to D1 in the WHERE clause of a paged query. They
- *    narrow the whole collection.
+ *  - `search`, `tag`, `from`, `to` go to D1 in the WHERE clause of a paged query. They narrow the
+ *    whole collection.
  *  - `memo` cannot. `GET /api/v1/runs` matches `search` against the run code and the original
  *    filename only, and there is no memo filter; adding one is a Worker change, not a client one.
  *    So memo filtering is applied to the runs already loaded, and the screen says so rather than
@@ -142,13 +142,11 @@ export function followsFilenameConvention(run: RunSummary): boolean {
 export interface RunFilter {
   /** Server-side: substring of the run code or the original filename. */
   search: string
-  /** Server-side: exact tag match. */
+  /** Server-side: exact tag match. Tags are how runs are grouped — there is no other grouping. */
   tag: string
   /** Server-side: inclusive experiment-date bounds, `YYYY-MM-DD`. */
   from: string
   to: string
-  /** Server-side: `''` means every project, including runs with none. */
-  projectId: string
   /** Client-side, over loaded runs only. */
   memo: string
 }
@@ -158,7 +156,6 @@ export const EMPTY_RUN_FILTER: RunFilter = {
   tag: '',
   from: '',
   to: '',
-  projectId: '',
   memo: '',
 }
 
@@ -169,7 +166,6 @@ export function isEmptyFilter(filter: RunFilter): boolean {
     filter.tag.trim() === '' &&
     filter.from === '' &&
     filter.to === '' &&
-    filter.projectId === '' &&
     filter.memo.trim() === ''
   )
 }
@@ -178,7 +174,6 @@ export function isEmptyFilter(filter: RunFilter): boolean {
 export interface RunListServerQuery {
   search?: string
   tag?: string
-  projectId?: string
   from?: string
   to?: string
   limit: number
@@ -197,7 +192,6 @@ export function serverQueryFor(filter: RunFilter, cursor: string | null): RunLis
   const tag = filter.tag.trim()
   if (search !== '') query.search = search
   if (tag !== '') query.tag = tag
-  if (filter.projectId !== '') query.projectId = filter.projectId
   if (filter.from !== '') query.from = filter.from
   if (filter.to !== '') query.to = filter.to
   if (cursor !== null) query.cursor = cursor

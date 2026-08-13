@@ -265,7 +265,7 @@ export interface RunSummary {
   suffix: string
   originalFilename: string
   memo: string | null
-  projectId: string | null
+  /** A run's only grouping. Free-form, shared across the workspace, replaced wholesale on PATCH. */
   tags: string[]
   createdAt: string
   updatedAt: string
@@ -283,7 +283,6 @@ export interface RunListQuery {
   /** Substring match against the run code and the original filename. */
   search?: string | undefined
   tag?: string | undefined
-  projectId?: string | undefined
   /** Inclusive experiment-date bounds, `YYYY-MM-DD`. */
   from?: string | undefined
   to?: string | undefined
@@ -357,7 +356,6 @@ export interface RunCreateRequest {
   /** `YYYY-MM-DD`. Derived from the filename when it parses. */
   experimentDate?: string | undefined
   memo?: string | undefined
-  projectId?: string | undefined
   tags?: readonly string[] | undefined
 }
 
@@ -401,7 +399,8 @@ export function fetchRun(runId: string): Promise<CloudOutcome<RunDetail>> {
 }
 
 /**
- * PATCH /api/v1/runs/:runId — memo, project and tags.
+ * PATCH /api/v1/runs/:runId — the memo and the tags, which is everything a run
+ * carries that a reader may change.
  *
  * `tags` is replaced wholesale rather than diffed, which is what the route
  * does: the client sends the set it wants, so there is no ordering question
@@ -409,7 +408,6 @@ export function fetchRun(runId: string): Promise<CloudOutcome<RunDetail>> {
  */
 export interface RunPatch {
   memo?: string | null | undefined
-  projectId?: string | null | undefined
   tags?: readonly string[] | undefined
 }
 
@@ -420,18 +418,6 @@ export function updateRun(runId: string, patch: RunPatch): Promise<CloudOutcome<
 /** DELETE /api/v1/runs/:runId — soft-deletes the metadata, hard-deletes the bytes. */
 export function deleteRun(runId: string): Promise<CloudOutcome<{ ok: true; objectsDeleted: number }>> {
   return request<{ ok: true; objectsDeleted: number }>(`/runs/${id(runId)}`, { method: 'DELETE' })
-}
-
-export interface ProjectSummary {
-  id: string
-  name: string
-  description: string | null
-  createdAt: string
-}
-
-/** GET /api/v1/projects — the caller's unarchived projects, for the gallery's project filter. */
-export function listProjects(): Promise<CloudOutcome<{ projects: ProjectSummary[] }>> {
-  return request<{ projects: ProjectSummary[] }>('/projects', { method: 'GET' })
 }
 
 /* ------------------------------------------------------------------------- */

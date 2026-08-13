@@ -49,7 +49,7 @@ import { adminRoutes } from '../../worker/routes/admin.ts'
 import { meRoutes } from '../../worker/routes/me.ts'
 import { posterRoutes } from '../../worker/routes/posters.ts'
 import { revisionRoutes } from '../../worker/routes/revisions.ts'
-import { projectRoutes, runRoutes, workspaceRoutes } from '../../worker/routes/runs.ts'
+import { runRoutes, workspaceRoutes } from '../../worker/routes/runs.ts'
 
 /* ------------------------------------------------------------------------------------------- */
 /* The router, assembled from the entry point's own mount table                                  */
@@ -60,7 +60,6 @@ import { projectRoutes, runRoutes, workspaceRoutes } from '../../worker/routes/r
 const ROUTERS: Readonly<Record<string, Hono<any>>> = {
   meRoutes,
   runRoutes,
-  projectRoutes,
   revisionRoutes,
   posterRoutes,
   adminRoutes,
@@ -190,7 +189,6 @@ async function callEveryEndpoint(): Promise<void> {
   await gateway.fetchRun(runId)
   await gateway.updateRun(runId, { memo: 'memo' })
   await gateway.deleteRun(runId)
-  await gateway.listProjects()
 
   await gateway.listRevisions(runId)
   await gateway.createRevision(runId, {
@@ -274,6 +272,14 @@ describe('gateway paths against the Worker router', () => {
     // check and not just the path.
     expect(isServed(routes, 'POST', '/api/v1/revisions/rev_1/snapshot')).toBe(false)
     expect(isServed(routes, 'PUT', '/api/v1/revisions/rev_1/snapshot')).toBe(true)
+
+    // `/projects` is the third path in this class and the only one that was ever really served. It
+    // was removed with the projects entity (migration 0003), and the pair of assertions here is
+    // what keeps the removal whole: if the router regains the mount without the gateway regaining
+    // a caller, this fails — and if the gateway regains a caller without the router, the checklist
+    // above fails. Half of a feature cannot come back quietly.
+    expect(isServed(routes, 'GET', '/api/v1/projects')).toBe(false)
+    expect(isServed(routes, 'POST', '/api/v1/projects')).toBe(false)
   })
 
   it('leaves no exported request builder unguarded', () => {
@@ -311,7 +317,6 @@ describe('gateway paths against the Worker router', () => {
       'listAuditLog',
       'listInvitations',
       'listPosters',
-      'listProjects',
       'listRevisions',
       'listRuns',
       'listWorkspaceRuns',

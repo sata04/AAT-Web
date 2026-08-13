@@ -38,8 +38,14 @@ export const CAPABILITIES = [
   'raw:download',
   'raw:delete',
   'poster:generate',
-  'project:create',
-  'project:share',
+  /*
+   * There is no `project:*` capability. Two used to be here — `project:create` and `project:share`
+   * — and the second was never checked anywhere, which was the visible end of a grouping entity
+   * that no client could create, no screen could assign, and that did not follow the deployment
+   * into the shared workspace. Migration 0003 removed the entity; runs are grouped by tags, which
+   * `workspace:annotate` below already covers for every member's work. See
+   * docs/cloud-data-model.md.
+   */
   /**
    * May read any member's work in this deployment: run metadata, revisions, metrics, poster
    * figures, snapshot bytes and original-CSV backups. Read *only* — it never implies a write, and
@@ -48,7 +54,7 @@ export const CAPABILITIES = [
    */
   'workspace:read',
   /**
-   * May annotate any member's work: the memo, the tags and the project a run is filed under.
+   * May annotate any member's work: the memo and the tags on a run — every label a run carries.
    * Annotation is separated from reading because the two answers genuinely differ for a role that
    * should be able to look at a colleague's measurement without relabelling it.
    */

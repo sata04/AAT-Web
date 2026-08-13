@@ -31,7 +31,8 @@ import { readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 
 const PLACEHOLDER_DATABASE_ID = '00000000-0000-0000-0000-000000000000'
-const PLACEHOLDER_ACCOUNT_IMAGE = 'registry.cloudflare.com/00000000000000000000000000000000/aat-poster-renderer:latest'
+const PLACEHOLDER_ACCOUNT_IMAGE =
+  'registry.cloudflare.com/00000000000000000000000000000000/aat-poster-renderer:latest'
 
 const outputPath = process.argv[2]
 if (!outputPath) {

@@ -188,7 +188,6 @@ export interface WorkspaceRunPage {
 export interface WorkspaceRunQuery {
   search?: string | undefined
   tag?: string | undefined
-  projectId?: string | undefined
   from?: string | undefined
   to?: string | undefined
   ownerUserId?: string | undefined

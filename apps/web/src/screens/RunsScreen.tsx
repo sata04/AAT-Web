@@ -19,8 +19,14 @@
  *
  * The alternative would be to fetch every run before drawing anything, which is the one thing a
  * gallery must not do — so instead there is a bounded page size, a hard ceiling on how many runs
- * the browser holds, and date/tag/project filters that push the narrowing back into D1's WHERE
- * clause where it costs one query instead of a thousand rows of transfer.
+ * the browser holds, and date and tag filters that push the narrowing back into D1's WHERE clause
+ * where it costs one query instead of a thousand rows of transfer.
+ *
+ * The tag filter is the whole of the grouping story, and deliberately so. There was a project
+ * filter beside it until the projects entity was removed — a `<select>` whose list no screen could
+ * ever add to, over a field no screen could ever set. Tags do the job it was drawn for: they are
+ * shared across the workspace, any member may edit any run's, and this filter narrows the whole
+ * collection in D1 rather than only what has been loaded.
  *
  * ## Opening this screen never renders a poster
  *
@@ -31,7 +37,7 @@
 
 import { hasCapability } from '@aat/shared'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { type CloudOutcome, listProjects, listWorkspaceRuns, type ProjectSummary } from '../cloud/gateway.ts'
+import { type CloudOutcome, listWorkspaceRuns } from '../cloud/gateway.ts'
 import { RunCard } from '../components/RunCard.tsx'
 import { ScreenFrame } from '../components/ScreenFrame.tsx'
 import { Link } from '../router/Router.tsx'
@@ -90,7 +96,6 @@ export function RunsScreen(): React.JSX.Element {
   const [exhausted, setExhausted] = useState(false)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
-  const [projects, setProjects] = useState<readonly ProjectSummary[]>([])
   const [facts, setFacts] = useState<ReadonlyMap<string, RunFactsState>>(new Map())
 
   const mounted = useRef(true)
@@ -171,20 +176,6 @@ export function RunsScreen(): React.JSX.Element {
     setExhausted(false)
     void loadPage(scope, filter, null, true)
   }, [session.status, scope, filter, loadPage])
-
-  useEffect(() => {
-    if (session.status !== 'signed-in') return
-    void listProjects().then((outcome) => {
-      // The project filter is a convenience. Losing it costs one control, not the screen.
-      if (mounted.current && outcome.ok) setProjects(outcome.value.projects)
-    })
-  }, [session.status])
-
-  const projectNames = useMemo(() => {
-    const names = new Map<string, string>()
-    for (const project of projects) names.set(project.id, project.name)
-    return names
-  }, [projects])
 
   const visible = useMemo(() => presentRuns(runs, filter), [runs, filter])
   const tagSuggestions = useMemo(() => knownTags(runs), [runs])
@@ -316,22 +307,6 @@ export function RunsScreen(): React.JSX.Element {
             </label>
 
             <label className="field">
-              <span className="field__label">プロジェクト</span>
-              <select
-                className="select"
-                value={draftFilter.projectId}
-                onChange={(event) => setDraftFilter({ ...draftFilter, projectId: event.target.value })}
-              >
-                <option value="">すべて</option>
-                {projects.map((project) => (
-                  <option value={project.id} key={project.id}>
-                    {project.name}
-                  </option>
-                ))}
-              </select>
-            </label>
-
-            <label className="field">
               <span className="field__label">メモ</span>
               <input
                 className="input"
@@ -404,7 +379,6 @@ export function RunsScreen(): React.JSX.Element {
               key={run.id}
               run={run}
               facts={facts.get(run.id) ?? IDLE_FACTS}
-              projectName={run.projectId === null ? null : (projectNames.get(run.projectId) ?? null)}
               ownerDisplayName={run.ownerDisplayName}
               onVisible={requestFacts}
               onRetryFacts={retryFacts}
