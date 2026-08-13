@@ -29,21 +29,25 @@
  * on this screen imports them.
  */
 
+import { hasCapability } from '@aat/shared'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { listProjects, listRuns, type ProjectSummary, type RunSummary } from '../cloud/gateway.ts'
+import { type CloudOutcome, listProjects, listWorkspaceRuns, type ProjectSummary } from '../cloud/gateway.ts'
 import { RunCard } from '../components/RunCard.tsx'
 import { ScreenFrame } from '../components/ScreenFrame.tsx'
 import { Link } from '../router/Router.tsx'
 import { BoundedFactLoader, FACT_LOAD_CONCURRENCY, type RunFactsState } from '../runs/facts.ts'
 import {
   EMPTY_RUN_FILTER,
+  type GalleryRun,
   isEmptyFilter,
   knownTags,
+  listOwnRunsAsGallery,
   MAX_LOADED_RUNS,
   mergeRunPages,
   presentRuns,
   RUNS_PAGE_SIZE,
   type RunFilter,
+  type RunScope,
   serverQueryFor,
 } from '../runs/gallery.ts'
 import { useSession } from '../session/SessionProvider.tsx'
@@ -57,7 +61,31 @@ export function RunsScreen(): React.JSX.Element {
   const [draftFilter, setDraftFilter] = useState<RunFilter>(EMPTY_RUN_FILTER)
   const [filter, setFilter] = useState<RunFilter>(EMPTY_RUN_FILTER)
 
-  const [runs, setRuns] = useState<readonly RunSummary[]>([])
+  /**
+   * Whose runs the gallery is showing.
+   *
+   * `team` is the default for anyone who holds `workspace:read`, and that is a deliberate product
+   * choice rather than a convenience. This deployment is one research group's shared workspace;
+   * reaching a colleague's run by id is no use to somebody who does not already know the ULID, so
+   * a gallery that opened on "mine" would leave the sharing decision invisible and every colleague's
+   * work undiscoverable in practice.
+   *
+   * A Viewer holds no `workspace:read`, so for them there is one scope and no toggle — the control
+   * is absent rather than present and refusing, because an option that always fails is worse than
+   * no option.
+   *
+   * Held as "what the reader chose, or nothing yet" rather than as a plain scope with a default
+   * computed at mount. The session arrives asynchronously: on the first render `status` is still
+   * `loading` and the capability list is empty, so a `useState(canRead ? 'team' : 'mine')` would
+   * capture `mine` forever and the team default would never once apply. Deriving the effective
+   * scope on every render instead means the default follows the capabilities whenever they land,
+   * and an explicit choice still wins from the moment it is made.
+   */
+  const canReadWorkspace = hasCapability(session.capabilities, 'workspace:read')
+  const [chosenScope, setScope] = useState<RunScope | null>(null)
+  const scope: RunScope = chosenScope ?? (canReadWorkspace ? 'team' : 'mine')
+
+  const [runs, setRuns] = useState<readonly GalleryRun[]>([])
   const [cursor, setCursor] = useState<string | null>(null)
   const [exhausted, setExhausted] = useState(false)
   const [loading, setLoading] = useState(false)
@@ -108,33 +136,41 @@ export function RunsScreen(): React.JSX.Element {
   )
 
   /** Load one page. `reset` starts a new query; otherwise it continues the current one. */
-  const loadPage = useCallback(async (activeFilter: RunFilter, from: string | null, reset: boolean) => {
-    setLoading(true)
-    setError(null)
-    const outcome = await listRuns(serverQueryFor(activeFilter, from))
-    if (!mounted.current) return
-    setLoading(false)
-    if (!outcome.ok) {
-      setError(outcome.message)
-      if (reset) {
-        setRuns([])
-        setCursor(null)
-        setExhausted(true)
+  const loadPage = useCallback(
+    async (activeScope: RunScope, activeFilter: RunFilter, from: string | null, reset: boolean) => {
+      setLoading(true)
+      setError(null)
+      const query = serverQueryFor(activeFilter, from)
+      // Two calls rather than one with a flag, because they are two routes with two authorizations.
+      // `listWorkspaceRuns` rows carry the owner; `listRuns` rows are all the caller's own, so the
+      // owner is left null rather than asking the server to repeat what the scope already says.
+      const outcome: CloudOutcome<{ runs: readonly GalleryRun[]; nextCursor: string | null }> =
+        activeScope === 'team' ? await listWorkspaceRuns(query) : await listOwnRunsAsGallery(query)
+      if (!mounted.current) return
+      setLoading(false)
+      if (!outcome.ok) {
+        setError(outcome.message)
+        if (reset) {
+          setRuns([])
+          setCursor(null)
+          setExhausted(true)
+        }
+        return
       }
-      return
-    }
-    setRuns((current) => (reset ? outcome.value.runs : mergeRunPages(current, outcome.value.runs)))
-    setCursor(outcome.value.nextCursor)
-    setExhausted(outcome.value.nextCursor === null)
-  }, [])
+      setRuns((current) => (reset ? outcome.value.runs : mergeRunPages(current, outcome.value.runs)))
+      setCursor(outcome.value.nextCursor)
+      setExhausted(outcome.value.nextCursor === null)
+    },
+    [],
+  )
 
   useEffect(() => {
     if (session.status !== 'signed-in') return
     setRuns([])
     setCursor(null)
     setExhausted(false)
-    void loadPage(filter, null, true)
-  }, [session.status, filter, loadPage])
+    void loadPage(scope, filter, null, true)
+  }, [session.status, scope, filter, loadPage])
 
   useEffect(() => {
     if (session.status !== 'signed-in') return
@@ -185,6 +221,39 @@ export function RunsScreen(): React.JSX.Element {
       title="実験一覧"
       description="保存した実験と、その解析リビジョン・ポスター図・メモ・タグを実験日の新しい順に表示します。"
     >
+      {/* Whose runs, before how they are filtered — the scope decides which route is asked, and the
+          filters only narrow whatever that route returns. A radio group rather than a checkbox or a
+          toggle switch, because the two are exclusive and a radio announces both options and which
+          one is current; a switch labelled "team" would leave a screen reader to infer the other
+          state. Absent entirely for a Viewer, who holds no `workspace:read`. */}
+      {canReadWorkspace ? (
+        <fieldset className="panel panel--framed run-scope">
+          <legend>表示する範囲</legend>
+          {(
+            [
+              {
+                value: 'team',
+                label: 'チーム全体',
+                hint: '全メンバーの実験。所有者を各カードに表示します。',
+              },
+              { value: 'mine', label: '自分のみ', hint: '自分が記録した実験だけを表示します。' },
+            ] as const
+          ).map((option) => (
+            <label key={option.value} className="run-scope__option">
+              <input
+                type="radio"
+                name="run-scope"
+                value={option.value}
+                checked={scope === option.value}
+                onChange={() => setScope(option.value)}
+              />
+              <span className="run-scope__label">{option.label}</span>
+              <span className="panel__hint">{option.hint}</span>
+            </label>
+          ))}
+        </fieldset>
+      ) : null}
+
       {/* A real `<search>` landmark rather than `role="search"` on the form: the element carries the
           role natively, and putting the role on the form would replace the form's own semantics. */}
       <search className="panel panel--framed run-filter" aria-label="実験の絞り込み">
@@ -302,7 +371,7 @@ export function RunsScreen(): React.JSX.Element {
           <button
             type="button"
             className="button button--flat"
-            onClick={() => void loadPage(filter, null, true)}
+            onClick={() => void loadPage(scope, filter, null, true)}
           >
             再読み込み
           </button>
@@ -336,6 +405,7 @@ export function RunsScreen(): React.JSX.Element {
               run={run}
               facts={facts.get(run.id) ?? IDLE_FACTS}
               projectName={run.projectId === null ? null : (projectNames.get(run.projectId) ?? null)}
+              ownerDisplayName={run.ownerDisplayName}
               onVisible={requestFacts}
               onRetryFacts={retryFacts}
             />
@@ -349,7 +419,7 @@ export function RunsScreen(): React.JSX.Element {
             type="button"
             className="button"
             disabled={loading}
-            onClick={() => void loadPage(filter, cursor, false)}
+            onClick={() => void loadPage(scope, filter, cursor, false)}
           >
             {loading ? '読み込んでいます…' : `さらに ${RUNS_PAGE_SIZE} 件を読み込む`}
           </button>

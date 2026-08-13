@@ -92,7 +92,7 @@ describe('run gallery — ordering', () => {
       'GET /api/v1/me': meRoute(),
       ...PROJECTS,
       ...NO_FACTS,
-      'GET /api/v1/runs': () =>
+      'GET /api/v1/workspace/runs': () =>
         json({
           // Deliberately the API's own order: newest *upload* first, which is the wrong answer.
           runs: [
@@ -117,7 +117,7 @@ describe('run gallery — ordering', () => {
       'GET /api/v1/me': meRoute(),
       ...PROJECTS,
       ...NO_FACTS,
-      'GET /api/v1/runs': () =>
+      'GET /api/v1/workspace/runs': () =>
         json({
           runs: [
             run({ id: '01J9', runCode: 'saisokutei', originalFilename: '2026-08-11 再測定.csv' }),
@@ -144,12 +144,12 @@ describe('run gallery — filtering', () => {
       'GET /api/v1/me': meRoute(),
       ...PROJECTS,
       ...NO_FACTS,
-      'GET /api/v1/runs': () => json({ runs: [], nextCursor: null }),
+      'GET /api/v1/workspace/runs': () => json({ runs: [], nextCursor: null }),
     })
 
     renderScreen(<RunsScreen />, { path: '/runs' })
     await screen.findByRole('searchbox', { name: /^実験コード・ファイル名/ })
-    const before = network.requestsTo('/api/v1/runs').length
+    const before = network.requestsTo('/api/v1/workspace/runs').length
 
     const user = userEvent.setup()
     await user.type(screen.getByRole('searchbox', { name: /^実験コード・ファイル名/ }), '260811')
@@ -157,12 +157,12 @@ describe('run gallery — filtering', () => {
     await user.type(screen.getByRole('combobox', { name: /^タグ（完全一致）/ }), '再測定')
 
     // Typing must not fire a query per keystroke.
-    expect(network.requestsTo('/api/v1/runs')).toHaveLength(before)
+    expect(network.requestsTo('/api/v1/workspace/runs')).toHaveLength(before)
 
     await user.click(screen.getByRole('button', { name: '絞り込む' }))
 
-    await waitFor(() => expect(network.requestsTo('/api/v1/runs').length).toBe(before + 1))
-    const sent = new URL(network.requestsTo('/api/v1/runs').at(-1)?.url ?? '', 'https://aat.test')
+    await waitFor(() => expect(network.requestsTo('/api/v1/workspace/runs').length).toBe(before + 1))
+    const sent = new URL(network.requestsTo('/api/v1/workspace/runs').at(-1)?.url ?? '', 'https://aat.test')
     expect(sent.searchParams.get('search')).toBe('260811')
     expect(sent.searchParams.get('tag')).toBe('再測定')
     expect(sent.searchParams.get('limit')).toBe('50')
@@ -173,7 +173,7 @@ describe('run gallery — filtering', () => {
       'GET /api/v1/me': meRoute(),
       ...PROJECTS,
       ...NO_FACTS,
-      'GET /api/v1/runs': () =>
+      'GET /api/v1/workspace/runs': () =>
         json({
           runs: [
             run({ id: '01J1', runCode: '260812', experimentDate: '2026-08-12', memo: '再測定 GQ良好' }),
@@ -197,7 +197,7 @@ describe('run gallery — filtering', () => {
     await waitFor(() => expect(screen.queryByRole('heading', { name: '260811a', level: 2 })).toBeNull())
     expect(screen.getByRole('heading', { name: '260812', level: 2 })).toBeDefined()
     // No memo parameter was invented for the server.
-    for (const request of network.requestsTo('/api/v1/runs')) {
+    for (const request of network.requestsTo('/api/v1/workspace/runs')) {
       expect(request.url).not.toContain('memo=')
     }
   })
@@ -207,7 +207,7 @@ describe('run gallery — filtering', () => {
       'GET /api/v1/me': meRoute(),
       ...PROJECTS,
       ...NO_FACTS,
-      'GET /api/v1/runs': () => json({ runs: [], nextCursor: null }),
+      'GET /api/v1/workspace/runs': () => json({ runs: [], nextCursor: null }),
     })
 
     renderScreen(<RunsScreen />, { path: '/runs' })
@@ -231,7 +231,7 @@ describe('run gallery — filtering', () => {
       'GET /api/v1/me': meRoute(),
       ...PROJECTS,
       ...NO_FACTS,
-      'GET /api/v1/runs': () => json({ runs: [], nextCursor: null }),
+      'GET /api/v1/workspace/runs': () => json({ runs: [], nextCursor: null }),
     })
 
     renderScreen(<RunsScreen />, { path: '/runs' })
@@ -256,7 +256,7 @@ describe('run gallery — loading, failure and paging', () => {
       'GET /api/v1/me': meRoute(),
       ...PROJECTS,
       ...NO_FACTS,
-      'GET /api/v1/runs': () =>
+      'GET /api/v1/workspace/runs': () =>
         new Promise<Response>((resolve) => {
           release = resolve
         }),
@@ -289,7 +289,7 @@ describe('run gallery — loading, failure and paging', () => {
       'GET /api/v1/me': meRoute(),
       ...PROJECTS,
       ...NO_FACTS,
-      'GET /api/v1/runs': () => {
+      'GET /api/v1/workspace/runs': () => {
         attempts += 1
         return attempts === 1
           ? apiError(429, 'RATE_LIMITED', '要求が多すぎます。しばらく待ってから再試行してください。')
@@ -315,7 +315,7 @@ describe('run gallery — loading, failure and paging', () => {
       'GET /api/v1/me': meRoute(),
       ...PROJECTS,
       ...NO_FACTS,
-      'GET /api/v1/runs': (request) => {
+      'GET /api/v1/workspace/runs': (request) => {
         const cursor = new URL(request.url, 'https://aat.test').searchParams.get('cursor')
         return cursor === null
           ? json({
@@ -337,7 +337,7 @@ describe('run gallery — loading, failure and paging', () => {
 
     expect(await screen.findByRole('heading', { name: '260810', level: 2 })).toBeDefined()
     await waitFor(() => expect(screen.queryByRole('button', { name: /さらに/ })).toBeNull())
-    expect(network.requestsTo('/api/v1/runs').at(-1)?.url).toContain('cursor=01J2')
+    expect(network.requestsTo('/api/v1/workspace/runs').at(-1)?.url).toContain('cursor=01J2')
   })
 })
 
@@ -346,7 +346,7 @@ describe('run gallery — a card', () => {
     installNetwork({
       'GET /api/v1/me': meRoute(),
       ...PROJECTS,
-      'GET /api/v1/runs': () =>
+      'GET /api/v1/workspace/runs': () =>
         json({
           runs: [
             run({
@@ -382,7 +382,7 @@ describe('run gallery — a card', () => {
     const network = installNetwork({
       'GET /api/v1/me': meRoute(),
       ...PROJECTS,
-      'GET /api/v1/runs': () =>
+      'GET /api/v1/workspace/runs': () =>
         json({
           runs: [run({ id: '01J1', runCode: '260812', experimentDate: '2026-08-12' })],
           nextCursor: null,
@@ -415,7 +415,7 @@ describe('run gallery — a card', () => {
       'GET /api/v1/me': meRoute(),
       ...PROJECTS,
       ...NO_FACTS,
-      'GET /api/v1/runs': () =>
+      'GET /api/v1/workspace/runs': () =>
         json({
           runs: [run({ id: '01J1', runCode: '260812', experimentDate: '2026-08-12' })],
           nextCursor: null,
@@ -427,5 +427,75 @@ describe('run gallery — a card', () => {
     expectEveryControlIsNamed(container)
     // A real `<search>` landmark rather than a role bolted onto the form.
     expect(container.querySelector('search')?.getAttribute('aria-label')).toBe('実験の絞り込み')
+  })
+})
+
+/**
+ * Scope, which decides which of two Worker routes the gallery reads.
+ *
+ * The first test here exists because of a real bug rather than a hypothetical one. The default was
+ * first written as `useState(canReadWorkspace ? 'team' : 'mine')`, which reads the capability list
+ * during the first render — before `GET /me` has answered, when it is still empty. The initialiser
+ * captured `mine` and nothing ever revised it, so the team default silently never applied and the
+ * whole shared-workspace change was invisible in the UI. Nothing failed; the gallery just quietly
+ * showed one person's runs. A test that only checks "the toggle switches the route" would not have
+ * caught it, so this one asserts what is requested *before anyone touches anything*.
+ */
+describe('run gallery — scope', () => {
+  const TEAM_RUN = run({
+    id: '01J9',
+    runCode: '260812',
+    experimentDate: '2026-08-12',
+    ownerUserId: 'usr_other',
+    ownerDisplayName: '同僚 花子',
+  } as Partial<RunSummary> & Pick<RunSummary, 'id' | 'runCode'>)
+
+  const BOTH_LISTINGS = {
+    'GET /api/v1/me': meRoute(),
+    ...PROJECTS,
+    ...NO_FACTS,
+    'GET /api/v1/workspace/runs': () => json({ runs: [TEAM_RUN], nextCursor: null }),
+    'GET /api/v1/runs': () => json({ runs: [], nextCursor: null }),
+  }
+
+  it('reads the team listing by default once the session has loaded', async () => {
+    const network = installNetwork(BOTH_LISTINGS)
+    renderScreen(<RunsScreen />, { path: '/runs' })
+
+    await screen.findByRole('heading', { name: '260812', level: 2 })
+    expect(network.requestsTo('/api/v1/workspace/runs')).toHaveLength(1)
+    expect(network.requestsTo('/api/v1/runs')).toHaveLength(0)
+  })
+
+  it('names whose run it is, because the team listing mixes owners', async () => {
+    installNetwork(BOTH_LISTINGS)
+    renderScreen(<RunsScreen />, { path: '/runs' })
+
+    await screen.findByRole('heading', { name: '260812', level: 2 })
+    expect(screen.getByText('記録者 同僚 花子')).toBeDefined()
+  })
+
+  it('switches to the owner-scoped route when the reader asks for their own runs', async () => {
+    const network = installNetwork(BOTH_LISTINGS)
+    renderScreen(<RunsScreen />, { path: '/runs' })
+    await screen.findByRole('heading', { name: '260812', level: 2 })
+
+    await userEvent.click(screen.getByRole('radio', { name: /自分のみ/ }))
+
+    await waitFor(() => expect(network.requestsTo('/api/v1/runs').length).toBe(1))
+    // The owner-scoped listing is all the reader's own work, so naming an owner on every card would
+    // just repeat the control that is already selected.
+    expect(screen.queryByText(/^記録者 /)).toBeNull()
+  })
+
+  it('offers a Viewer no scope control at all, and reads only their own runs', async () => {
+    const network = installNetwork({ ...BOTH_LISTINGS, 'GET /api/v1/me': meRoute({ role: 'Viewer' }) })
+    renderScreen(<RunsScreen />, { path: '/runs' })
+
+    await waitFor(() => expect(network.requestsTo('/api/v1/runs').length).toBe(1))
+    expect(network.requestsTo('/api/v1/workspace/runs')).toHaveLength(0)
+    // Absent, not present-and-refusing: a Viewer holds no workspace:read, so the team listing would
+    // answer 403 and an always-failing control is worse than no control.
+    expect(screen.queryByRole('radio', { name: /チーム全体/ })).toBeNull()
   })
 })

@@ -1139,3 +1139,49 @@ textarea {
   height: 22rem;
   min-height: 0;
 }
+
+/* --- Run Gallery: scope selection and owner attribution ------------------------------------ */
+
+/*
+ * The scope control sits above the filters because it decides which route is asked; the filters
+ * only narrow whatever that route returned. Laid out as a row of options rather than a dropdown so
+ * both choices, and which one is current, are visible without opening anything.
+ */
+.run-scope {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-4);
+  align-items: flex-start;
+}
+
+.run-scope > legend {
+  padding-inline: var(--space-2);
+  color: var(--text-muted);
+  font-size: var(--font-size-sm);
+}
+
+.run-scope__option {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 0 var(--space-2);
+  align-items: baseline;
+  cursor: pointer;
+}
+
+.run-scope__option > .panel__hint {
+  grid-column: 2;
+}
+
+.run-scope__label {
+  color: var(--text-primary);
+}
+
+/*
+ * Whose run this is, in the team listing only. Given the same weight as the other metadata rather
+ * than a badge treatment: the owner is a fact about the run, not a status, and colouring it would
+ * imply a state the reader has to act on.
+ */
+.run-card__owner {
+  color: var(--text-muted);
+  font-size: var(--font-size-sm);
+}
