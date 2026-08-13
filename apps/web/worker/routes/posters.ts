@@ -15,6 +15,19 @@
  * All three go through the same admission control: the circuit breaker, the concurrency cap, and a
  * per-user rate limit. When the renderer cannot take work the answer is POSTER_BUSY — backpressure
  * the browser retries later — never a queued job that costs container time nobody is waiting for.
+ *
+ * ## Rendering a colleague's revision reads it; the figure belongs to them
+ *
+ * Every route here resolves its revision at `read`, which under the shared-workspace policy any
+ * Researcher or Admin holds for any member's work. A poster is derived from a revision and leaves
+ * it untouched, so drawing one needs no more reach than looking at one — the thing that separates a
+ * Viewer from a Researcher here is the `poster:generate` capability, not the resolver.
+ *
+ * The figure and its PNG are then recorded against the **revision's owner**: their quota is
+ * charged, the R2 key sits under their id, and deleting their run reclaims the bytes. Mixed
+ * ownership inside a single run would make deletion incoherent — the run's owner would delete
+ * their experiment and still be storing, and paying for, half of it. Who actually asked for the
+ * render is recorded in the audit log, which is where an actor belongs.
  */
 
 import { type PosterPlotSpec, parsePosterPlotSpec, specHash } from '@aat/plot-spec'
@@ -29,7 +42,9 @@ import { newId } from '../lib/ids.ts'
 import type { AppContext, AppEnv } from '../middleware/authorize.ts'
 import {
   requireCapability,
-  requireOwnedRevision,
+  requireObjectAccess,
+  requirePosterFigure,
+  requireRevision,
   requireSession,
   withDatabase,
 } from '../middleware/authorize.ts'
@@ -94,16 +109,23 @@ function validateSpec(raw: unknown, revisionId: string, expectedKind: 'auto' | '
   return spec
 }
 
-/** Render, store the PNG, and record the outcome. Never throws past the figure's status. */
+/**
+ * Render, store the PNG, and record the outcome. Never throws past the figure's status.
+ *
+ * `revision.ownerUserId` — not the actor — is what the storage is charged to and keyed under. See
+ * the module header: the artifact lives with the run, so the account that will get the bytes back
+ * when the run is deleted has to be the account they were taken from.
+ */
 async function performRender(
   context: AppContext,
   figureId: string,
   spec: PosterPlotSpec,
-  revision: { id: string; runId: string },
+  revision: { id: string; runId: string; ownerUserId: string },
 ): Promise<Response> {
   const db = context.get('db')
   const actor = context.get('actor')
   const config = resolveConfig(context.env)
+  const ownerUserId = revision.ownerUserId
   const now = new Date()
 
   try {
@@ -113,13 +135,13 @@ async function performRender(
       throw new ApiError('POSTER_RENDER_FAILED', { details: { reason: 'png_size_out_of_range' } })
     }
 
-    await ensureQuotaRow(db, actor.userId, config.defaultQuotaBytes, now)
-    const key = posterKey(actor.userId, revision.runId, revision.id, figureId)
+    await ensureQuotaRow(db, ownerUserId, config.defaultQuotaBytes, now)
+    const key = posterKey(ownerUserId, revision.runId, revision.id, figureId)
     // The PNG's size is only known now, so the reservation is taken against the configured
     // maximum and finalised against what was actually produced.
     const reservation = await reserveQuota(
       db,
-      actor.userId,
+      ownerUserId,
       config.maxPosterBytes,
       'poster',
       key,
@@ -132,14 +154,14 @@ async function performRender(
       const put = await context.env.AAT_OBJECTS.put(key, outcome.png as ArrayBufferView, {
         httpMetadata: { contentType: 'image/png' },
         sha256: digest,
-        customMetadata: { revisionId: revision.id, posterId: figureId, ownerUserId: actor.userId },
+        customMetadata: { revisionId: revision.id, posterId: figureId, ownerUserId },
       })
       const actualBytes = put?.size ?? outcome.png.length
 
       const objectId = newId()
       await db.insert(cloudObjects).values({
         id: objectId,
-        ownerUserId: actor.userId,
+        ownerUserId,
         kind: 'poster',
         r2Key: key,
         byteSize: actualBytes,
@@ -150,7 +172,7 @@ async function performRender(
         analysisRevisionId: revision.id,
         createdAt: now,
       })
-      await finaliseReservation(db, reservation, actualBytes, actor.userId, now)
+      await finaliseReservation(db, reservation, actualBytes, ownerUserId, now)
       await markRendered(db, figureId, objectId, outcome.rendererVersion, now)
 
       await writeAuditLog(db, {
@@ -158,11 +180,12 @@ async function performRender(
         action: 'poster.render',
         targetType: 'poster_figure',
         targetId: figureId,
+        targetOwnerUserId: ownerUserId,
         details: { byteSize: actualBytes, rendererVersion: outcome.rendererVersion },
         headers: context.req.raw.headers,
       })
     } catch (error) {
-      await releaseReservation(db, reservation, actor.userId, now)
+      await releaseReservation(db, reservation, ownerUserId, now)
       throw error
     }
   } catch (error) {
@@ -197,7 +220,7 @@ posterRoutes.post(
     const db = context.get('db')
     const actor = context.get('actor')
     const config = resolveConfig(context.env)
-    const revision = await requireOwnedRevision(context, context.req.param('revisionId'))
+    const revision = await requireRevision(context, context.req.param('revisionId'), 'read')
     const spec = validateSpec(context.req.valid('json').spec, revision.id, 'auto')
     const now = new Date()
 
@@ -214,7 +237,10 @@ posterRoutes.post(
       .values({
         id: figureId,
         analysisRevisionId: revision.id,
-        ownerUserId: actor.userId,
+        // The figure belongs to the measurement, not to whoever pressed the button — otherwise the
+        // one automatic poster per revision would have a different owner depending on which
+        // colleague happened to open the run first.
+        ownerUserId: revision.ownerUserId,
         kind: 'auto',
         presetKey: 'aat-poster',
         presetVersion: spec.posterPresetVersion,
@@ -293,7 +319,7 @@ posterRoutes.post(
     const db = context.get('db')
     const actor = context.get('actor')
     const config = resolveConfig(context.env)
-    const revision = await requireOwnedRevision(context, context.req.param('revisionId'))
+    const revision = await requireRevision(context, context.req.param('revisionId'), 'read')
     const spec = validateSpec(context.req.valid('json').spec, revision.id, 'custom')
     const now = new Date()
 
@@ -304,7 +330,7 @@ posterRoutes.post(
     await db.insert(posterFigures).values({
       id: figureId,
       analysisRevisionId: revision.id,
-      ownerUserId: actor.userId,
+      ownerUserId: revision.ownerUserId,
       kind: 'custom',
       presetKey: 'aat-poster',
       presetVersion: spec.posterPresetVersion,
@@ -324,7 +350,7 @@ posterRoutes.post(
 
 posterRoutes.get('/revisions/:revisionId/posters', requireCapability('analysis:read'), async (context) => {
   const db = context.get('db')
-  const revision = await requireOwnedRevision(context, context.req.param('revisionId'))
+  const revision = await requireRevision(context, context.req.param('revisionId'), 'read')
   const figures = await db
     .select()
     .from(posterFigures)
@@ -344,14 +370,9 @@ posterRoutes.post(
     const config = resolveConfig(context.env)
     const now = new Date()
 
-    const [figure] = await db
-      .select()
-      .from(posterFigures)
-      .where(eq(posterFigures.id, context.req.param('posterId')))
-      .limit(1)
-    if (!figure || figure.ownerUserId !== actor.userId) throw new ApiError('RESOURCE_NOT_FOUND')
-
-    const revision = await requireOwnedRevision(context, figure.analysisRevisionId)
+    // One statement resolves the figure, the revision it draws and the liveness of their run, so
+    // the deleted-run filter cannot be applied to one and forgotten on the other.
+    const { figure, revision } = await requirePosterFigure(context, context.req.param('posterId'), 'read')
     const spec = validateSpec(
       context.req.valid('json').spec,
       revision.id,
@@ -372,6 +393,7 @@ posterRoutes.post(
       action: 'poster.retry',
       targetType: 'poster_figure',
       targetId: figure.id,
+      targetOwnerUserId: figure.ownerUserId,
       headers: context.req.raw.headers,
     })
 
@@ -383,12 +405,7 @@ posterRoutes.get('/posters/:posterId/image', requireCapability('cloud:read'), as
   const db = context.get('db')
   const actor = context.get('actor')
 
-  const [figure] = await db
-    .select()
-    .from(posterFigures)
-    .where(eq(posterFigures.id, context.req.param('posterId')))
-    .limit(1)
-  if (!figure || figure.ownerUserId !== actor.userId) throw new ApiError('RESOURCE_NOT_FOUND')
+  const { figure } = await requirePosterFigure(context, context.req.param('posterId'), 'read')
   if (figure.status !== 'ready' || !figure.objectId) throw new ApiError('RESOURCE_NOT_FOUND')
 
   const [record] = await db
@@ -396,7 +413,8 @@ posterRoutes.get('/posters/:posterId/image', requireCapability('cloud:read'), as
     .from(cloudObjects)
     .where(and(eq(cloudObjects.id, figure.objectId), isNull(cloudObjects.deletedAt)))
     .limit(1)
-  if (!record || record.ownerUserId !== actor.userId) throw new ApiError('RESOURCE_NOT_FOUND')
+  if (!record) throw new ApiError('RESOURCE_NOT_FOUND')
+  requireObjectAccess(context, record.ownerUserId, 'read')
 
   const object = await context.env.AAT_OBJECTS.get(record.r2Key)
   if (!object) throw new ApiError('RESOURCE_NOT_FOUND')
@@ -406,6 +424,7 @@ posterRoutes.get('/posters/:posterId/image', requireCapability('cloud:read'), as
     action: 'poster.download',
     targetType: 'poster_figure',
     targetId: figure.id,
+    targetOwnerUserId: figure.ownerUserId,
     headers: context.req.raw.headers,
   })
 

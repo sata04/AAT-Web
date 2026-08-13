@@ -15,6 +15,13 @@
       "when": 1786576097220,
       "tag": "0001_drop_passkey_algorithm",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "6",
+      "when": 1786579518745,
+      "tag": "0002_add_audit_target_owner",
+      "breakpoints": true
     }
   ]
 }

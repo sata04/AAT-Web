@@ -9,16 +9,28 @@
  * Deletion is soft (`deleted_at`) for the metadata but hard for the bytes: the R2 objects are
  * removed and the owner's quota is corrected in the same request. A "deleted" run that still costs
  * storage is a bill nobody can explain.
+ *
+ * Who may reach whose run is decided in one place — `requireRun(context, id, level)` — and the
+ * level is named at every call site below. Reading and annotating are open to the team; deleting is
+ * not. See worker/middleware/authorize.ts for the policy and the reasoning behind it.
  */
 
 import { ApiError, parseRunFilename } from '@aat/shared'
-import { and, asc, desc, eq, gte, inArray, isNull, like, lt, lte, or, sql } from 'drizzle-orm'
+import { and, asc, desc, eq, gte, inArray, isNull, like, lt, lte, or, type SQL, sql } from 'drizzle-orm'
 import { Hono } from 'hono'
 import { z } from 'zod'
-import { analysisRevisions, cloudObjects, posterFigures, projects, runs, runTags } from '../db/schema.ts'
+import {
+  analysisRevisions,
+  cloudObjects,
+  posterFigures,
+  projects,
+  runs,
+  runTags,
+  user,
+} from '../db/schema.ts'
 import { newId } from '../lib/ids.ts'
 import type { AppEnv } from '../middleware/authorize.ts'
-import { requireCapability, requireOwnedRun, requireSession, withDatabase } from '../middleware/authorize.ts'
+import { requireCapability, requireRun, requireSession, withDatabase } from '../middleware/authorize.ts'
 import { validate } from '../middleware/validate.ts'
 import { writeAuditLog } from '../services/audit.ts'
 import { releaseUsage } from '../services/quota.ts'
@@ -88,6 +100,41 @@ const listQuerySchema = z.object({
   cursor: z.string().min(1).max(64).optional(),
 })
 
+/**
+ * The filters both listings share, minus the scope.
+ *
+ * Extracted so that `GET /runs` and `GET /workspace/runs` cannot drift: a search that escapes
+ * `%` in one listing and not the other, or a `deleted_at` filter present in one and forgotten in
+ * the other, is exactly the divergence two hand-maintained copies of this block would produce.
+ * The *scope* is the one thing each caller supplies for itself, because that is the only part the
+ * two endpoints genuinely disagree about.
+ */
+function runListFilters(query: z.infer<typeof listQuerySchema>): SQL[] {
+  const conditions: SQL[] = [isNull(runs.deletedAt)]
+  if (query.projectId) conditions.push(eq(runs.projectId, query.projectId))
+  if (query.from) conditions.push(gte(runs.experimentDate, query.from))
+  if (query.to) conditions.push(lte(runs.experimentDate, query.to))
+  if (query.search) {
+    const pattern = `%${query.search.replace(/[%_\\]/g, (character) => `\\${character}`)}%`
+    const searchCondition = or(
+      like(runs.runCode, sql`${pattern} ESCAPE '\\'`),
+      like(runs.originalFilename, sql`${pattern} ESCAPE '\\'`),
+    )
+    if (searchCondition) conditions.push(searchCondition)
+  }
+  if (query.tag) {
+    conditions.push(
+      sql`EXISTS (SELECT 1 FROM ${runTags} WHERE ${runTags.runId} = ${runs.id} AND ${runTags.tag} = ${query.tag})`,
+    )
+  }
+  // Keyset pagination on the ULID primary key: ULIDs sort by creation time, so "everything after
+  // this id" is a stable page boundary even while new runs are being created. An OFFSET would
+  // silently skip or repeat rows when that happens. It holds across owners too — a ULID is unique
+  // deployment-wide — which is what lets the team listing page the same way.
+  if (query.cursor) conditions.push(lt(runs.id, query.cursor))
+  return conditions
+}
+
 async function loadTags(
   db: AppEnv['Variables']['db'],
   runIds: readonly string[],
@@ -106,7 +153,16 @@ async function loadTags(
   return grouped
 }
 
-/** List the caller's runs. Never anyone else's: `owner_user_id` is in the WHERE clause, not a filter the client can drop. */
+/**
+ * List the caller's own runs.
+ *
+ * This stays owner-scoped even under the shared-workspace policy, and the scoping is in the WHERE
+ * clause rather than in a filter the client can drop. A team-wide gallery is a different endpoint
+ * with different needs — it has to show whose run each row is, page across owners, and let a
+ * researcher choose whose work they are looking at — and quietly folding every colleague's runs
+ * into "my runs" would make the one listing a researcher relies on stop meaning anything. Reaching
+ * a colleague's run by id is what the policy widened; enumerating theirs here is not.
+ */
 runRoutes.get(
   '/',
   requireCapability('analysis:read'),
@@ -117,27 +173,8 @@ runRoutes.get(
     const query = context.req.valid('query')
     const limit = query.limit ?? DEFAULT_PAGE_SIZE
 
-    const conditions = [eq(runs.ownerUserId, actor.userId), isNull(runs.deletedAt)]
-    if (query.projectId) conditions.push(eq(runs.projectId, query.projectId))
-    if (query.from) conditions.push(gte(runs.experimentDate, query.from))
-    if (query.to) conditions.push(lte(runs.experimentDate, query.to))
-    if (query.search) {
-      const pattern = `%${query.search.replace(/[%_\\]/g, (character) => `\\${character}`)}%`
-      const searchCondition = or(
-        like(runs.runCode, sql`${pattern} ESCAPE '\\'`),
-        like(runs.originalFilename, sql`${pattern} ESCAPE '\\'`),
-      )
-      if (searchCondition) conditions.push(searchCondition)
-    }
-    if (query.tag) {
-      conditions.push(
-        sql`EXISTS (SELECT 1 FROM ${runTags} WHERE ${runTags.runId} = ${runs.id} AND ${runTags.tag} = ${query.tag})`,
-      )
-    }
-    // Keyset pagination on the ULID primary key: ULIDs sort by creation time, so "everything after
-    // this id" is a stable page boundary even while new runs are being created. An OFFSET would
-    // silently skip or repeat rows when that happens.
-    if (query.cursor) conditions.push(lt(runs.id, query.cursor))
+    // The scope is in the WHERE clause, not a filter the client can drop.
+    const conditions = [eq(runs.ownerUserId, actor.userId), ...runListFilters(query)]
 
     const rows = await db
       .select()
@@ -244,6 +281,9 @@ runRoutes.post(
       action: 'run.create',
       targetType: 'run',
       targetId: id,
+      // A run is always created by its owner; recorded anyway so that every run entry in the log
+      // carries an owner and the cross-user ones are found by filtering rather than by absence.
+      targetOwnerUserId: actor.userId,
       details: { runCode },
       headers: context.req.raw.headers,
     })
@@ -254,7 +294,7 @@ runRoutes.post(
 
 runRoutes.get('/:runId', requireCapability('analysis:read'), async (context) => {
   const db = context.get('db')
-  const run = await requireOwnedRun(context, context.req.param('runId'))
+  const run = await requireRun(context, context.req.param('runId'), 'read')
   const tags = await loadTags(db, [run.id])
   const revisions = await db
     .select({
@@ -271,6 +311,11 @@ runRoutes.get('/:runId', requireCapability('analysis:read'), async (context) => 
   return context.json({
     run: {
       id: run.id,
+      // Who the run belongs to, so a client can tell a colleague's measurement from its own and
+      // not offer a delete button that is going to answer 404. Under the shared-workspace policy
+      // this endpoint answers for runs the caller does not own, and a response that did not say so
+      // would make every one of them look like the reader's own work.
+      ownerUserId: run.ownerUserId,
       runCode: run.runCode,
       experimentDate: run.experimentDate,
       suffix: run.suffix,
@@ -298,15 +343,20 @@ runRoutes.patch(
   async (context) => {
     const db = context.get('db')
     const actor = context.get('actor')
-    const run = await requireOwnedRun(context, context.req.param('runId'))
+    const run = await requireRun(context, context.req.param('runId'), 'annotate')
     const body = context.req.valid('json')
     const now = new Date()
 
     if (body.projectId) {
+      // The project must belong to the run's OWNER, not to whoever is editing. A project is one
+      // researcher's way of grouping their own experiments, so filing somebody else's run into it
+      // would move that run into a grouping its owner cannot see — the run would appear to have
+      // left their workspace. Annotating a colleague's run means editing the labels on it, not
+      // relocating it into yours.
       const [project] = await db
         .select({ id: projects.id })
         .from(projects)
-        .where(and(eq(projects.id, body.projectId), eq(projects.ownerUserId, actor.userId)))
+        .where(and(eq(projects.id, body.projectId), eq(projects.ownerUserId, run.ownerUserId)))
         .limit(1)
       if (!project) throw new ApiError('RESOURCE_NOT_FOUND', { details: { resource: 'project' } })
     }
@@ -333,6 +383,7 @@ runRoutes.patch(
       action: 'run.update',
       targetType: 'run',
       targetId: run.id,
+      targetOwnerUserId: run.ownerUserId,
       headers: context.req.raw.headers,
     })
 
@@ -343,7 +394,10 @@ runRoutes.patch(
 runRoutes.delete('/:runId', requireCapability('analysis:delete'), async (context) => {
   const db = context.get('db')
   const actor = context.get('actor')
-  const run = await requireOwnedRun(context, context.req.param('runId'))
+  // `destroy`, which no Researcher holds for another member's run: deleting a colleague's
+  // experiment removes bytes nobody can recompute, and it is the one action in this file that is
+  // not reversible by re-running the request differently.
+  const run = await requireRun(context, context.req.param('runId'), 'destroy')
   const now = new Date()
 
   // Delete the bytes first and correct the quota as each object goes, so a failure partway through
@@ -379,12 +433,99 @@ runRoutes.delete('/:runId', requireCapability('analysis:delete'), async (context
     action: 'run.delete',
     targetType: 'run',
     targetId: run.id,
+    targetOwnerUserId: run.ownerUserId,
     details: { objectsDeleted: objects.length },
     headers: context.req.raw.headers,
   })
 
   return context.json({ ok: true, objectsDeleted: objects.length })
 })
+
+/* ------------------------------------------------------------------------------------------- */
+/* The team gallery                                                                             */
+/* ------------------------------------------------------------------------------------------- */
+
+/**
+ * The shared workspace: every member's runs, in one listing.
+ *
+ * The policy of 2026-08-13 let any member *reach* a colleague's run. This is what makes that
+ * reachable in practice — a read you can only exercise if you already know a ULID is a permission
+ * nobody can use, and "see the analysed files regardless of author" means being able to find them.
+ *
+ * ## Why a separate route rather than `GET /runs?scope=team`
+ *
+ * Because the authorization differs, and this codebase puts authorization in middleware where the
+ * route table can be read. A `scope` parameter would make the capability a request-time branch
+ * inside the handler: a reader of `index.ts` could no longer tell what `GET /runs` requires, and
+ * the Viewer case would have to be answered by silently narrowing the result — which is worse than
+ * refusing, because a Viewer handed a short list has no way to know they were not shown the team's.
+ * Here the refusal is the ordinary one, `FORBIDDEN` naming `workspace:read`, and it is identical
+ * whether or not any colleague's run exists. `GET /runs` keeps meaning exactly "mine".
+ *
+ * Both capabilities are named on purpose: `analysis:read` is "may look at analyses at all" and
+ * `workspace:read` is "may look at *other members'*". A Viewer holds the first and not the second.
+ */
+export const workspaceRoutes = new Hono<AppEnv>()
+
+workspaceRoutes.use('*', withDatabase, requireSession)
+
+const workspaceListQuerySchema = listQuerySchema.extend({
+  /** Narrow to one member's runs — "show me what 田中 has been dropping". */
+  ownerUserId: z.string().min(1).max(64).optional(),
+})
+
+workspaceRoutes.get(
+  '/runs',
+  requireCapability('analysis:read'),
+  requireCapability('workspace:read'),
+  validate('query', workspaceListQuerySchema),
+  async (context) => {
+    const db = context.get('db')
+    const query = context.req.valid('query')
+    const limit = query.limit ?? DEFAULT_PAGE_SIZE
+
+    // No owner condition: the scope IS the deployment. Everything else — including the
+    // `deleted_at` filter, which a soft-deleted run must not escape through the gallery any more
+    // than through its own id — comes from the same builder the caller's own listing uses.
+    const conditions = runListFilters(query)
+    if (query.ownerUserId) conditions.push(eq(runs.ownerUserId, query.ownerUserId))
+
+    const rows = await db
+      .select({ run: runs, ownerDisplayName: user.name })
+      .from(runs)
+      .innerJoin(user, eq(user.id, runs.ownerUserId))
+      .where(and(...conditions))
+      .orderBy(desc(runs.id))
+      .limit(limit + 1)
+
+    const page = rows.slice(0, limit)
+    const tags = await loadTags(
+      db,
+      page.map((row) => row.run.id),
+    )
+
+    return context.json({
+      runs: page.map(({ run, ownerDisplayName }) => ({
+        id: run.id,
+        // Whose run this is, by id and by the name a person recognises. A gallery that cannot say
+        // "田中's 260811a" is a list of somebody's runs with the somebody left out — and the
+        // display name is the only identity AAT has, since there is no email (see auth/identity.ts).
+        ownerUserId: run.ownerUserId,
+        ownerDisplayName,
+        runCode: run.runCode,
+        experimentDate: run.experimentDate,
+        suffix: run.suffix,
+        originalFilename: run.originalFilename,
+        memo: run.memo,
+        projectId: run.projectId,
+        tags: tags.get(run.id) ?? [],
+        createdAt: run.createdAt.toISOString(),
+        updatedAt: run.updatedAt.toISOString(),
+      })),
+      nextCursor: rows.length > limit ? (page[page.length - 1]?.run.id ?? null) : null,
+    })
+  },
+)
 
 /* ------------------------------------------------------------------------------------------- */
 /* Projects                                                                                     */
