@@ -1,0 +1,10 @@
+# This deployment holds one research group's unpublished experimental data. Nothing here is meant
+# to be found by search, including the pages a crawler can reach without an account: the sign-in
+# screen and the analyzer both name the group and the instrument.
+#
+# robots.txt is a request, not a control — a crawler that ignores it is not doing anything a server
+# can prevent. The enforcement that matters is elsewhere: every cloud route requires a session, and
+# `X-Robots-Tag: noindex, nofollow, noarchive` is sent on every asset response (see
+# scripts/generate-headers.mjs) so a page that gets fetched anyway is still not indexed.
+User-agent: *
+Disallow: /
