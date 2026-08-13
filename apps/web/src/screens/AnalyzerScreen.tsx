@@ -28,8 +28,8 @@ import { type Dataset, datasetFromPayload, sensorModeFrom } from '../app/dataset
 import { rangeStatisticsFor } from '../app/range-statistics.ts'
 import { loadConfig, saveConfig } from '../app/settings.ts'
 import { clearCache } from '../cache/analysis-cache.ts'
-import { fetchPoster, requestPoster } from '../cloud/gateway.ts'
-import { type CloudStatuses, INITIAL_STATUSES } from '../cloud/status.ts'
+import type { PosterFigure } from '../cloud/gateway.ts'
+import { type CloudStatuses, INITIAL_STATUSES, type PosterStatus } from '../cloud/status.ts'
 import { syncDataset } from '../cloud/sync.ts'
 import { CloudStatusBar } from '../components/CloudStatusBar.tsx'
 import { ColumnSelectorDialog } from '../components/ColumnSelectorDialog.tsx'
@@ -55,6 +55,8 @@ import {
   transition,
   type ViewMode,
 } from '../graph/view-mode.ts'
+import { PosterPanel } from '../poster/PosterPanel.tsx'
+import { generateAutoPoster, type PosterContext, retryAutoPoster } from '../poster/requests.ts'
 import { useSession } from '../session/SessionProvider.tsx'
 
 /** How many notices stay on screen at once; older ones drop off. */
@@ -85,15 +87,23 @@ export function AnalyzerScreen(): React.JSX.Element {
   const [pendingColumns, setPendingColumns] = useState<PendingColumnChoice | null>(null)
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [notices, setNotices] = useState<Notice[]>([])
-  const [lastRevisionId, setLastRevisionId] = useState<string | null>(null)
+  // The revision the poster figures of the last synced dataset hang from. Null
+  // until an analysis has been stored, which is most of the time: local-first.
+  const [syncedPoster, setSyncedPoster] = useState<PosterContext | null>(null)
+  const [customPosters, setCustomPosters] = useState<PosterFigure[]>([])
 
   // One probe for the whole application, in the provider. A negative answer is
   // the normal, fully functional local-only mode.
-  const signedIn = useSession().status === 'signed-in'
+  const sessionStatus = useSession().status
+  const signedIn = sessionStatus === 'signed-in'
 
   const analysisClient = useRef<AnalysisClient | null>(null)
   const exportClient = useRef<ExportClient | null>(null)
   const noticeId = useRef(0)
+  // Aborts the poster poll when the screen goes away or a newer request starts.
+  // Polling is a read loop against the poster listing; abandoning one costs the
+  // renderer nothing, which is the point of not queueing work server-side.
+  const posterPoll = useRef<AbortController | null>(null)
 
   // Lazily constructed so that merely loading the page does not start a worker,
   // and stable so the callbacks that use them do not change identity per render.
@@ -110,6 +120,7 @@ export function AnalyzerScreen(): React.JSX.Element {
     () => () => {
       analysisClient.current?.dispose()
       exportClient.current?.dispose()
+      posterPoll.current?.abort()
     },
     [],
   )
@@ -193,28 +204,42 @@ export function AnalyzerScreen(): React.JSX.Element {
 
   /* ---------------------------------------------------------------- cloud */
 
-  const applyPosterState = useCallback((state: { status: string; url?: string; message?: string }) => {
-    const { status, url } = state
-    if (status === 'ready' && url !== undefined) {
-      setStatuses((current) => ({ ...current, poster: { kind: 'ready', url } }))
-      return
-    }
-    if (status === 'failed') {
-      setStatuses((current) => ({
-        ...current,
-        poster: {
-          kind: 'failed',
-          message: state.message ?? 'ポスターの生成に失敗しました。',
-          retryable: true,
-        },
-      }))
-      return
-    }
-    setStatuses((current) => ({
-      ...current,
-      poster: { kind: status === 'rendering' ? 'rendering' : 'queued' },
-    }))
+  const setPosterStatus = useCallback((poster: PosterStatus) => {
+    setStatuses((current) => ({ ...current, poster }))
   }, [])
+
+  /**
+   * Ask for the automatic poster.
+   *
+   * There is no client-side "have I already asked for this?" flag here on
+   * purpose. The guarantee that a revision has at most one automatic poster is
+   * the partial unique index `poster_figures_auto_unique` in D1, claimed by an
+   * `INSERT ... ON CONFLICT DO NOTHING`; a repeat call reads the existing row
+   * back and renders nothing. A second mechanism in the browser could only be
+   * weaker — it loses to a reload, a second tab and another device — and having
+   * two would make it unclear which one was actually holding the line.
+   *
+   * What the browser *is* responsible for is not calling this from anywhere a
+   * rerender can reach: it is invoked from a completed cloud sync and from the
+   * explicit retry control, and from nowhere else.
+   */
+  const startAutoPoster = useCallback(
+    async (context: PosterContext, posterId: string | null) => {
+      posterPoll.current?.abort()
+      const controller = new AbortController()
+      posterPoll.current = controller
+      const outcome =
+        posterId === null
+          ? await generateAutoPoster(context, setPosterStatus, controller.signal)
+          : await retryAutoPoster(context, posterId, setPosterStatus, controller.signal)
+      if (!outcome.ok && outcome.kind === 'spec') {
+        // The spec could not be built, so nothing was sent. Retrying identical
+        // inputs would fail identically, which is why this one is not retryable.
+        setPosterStatus({ kind: 'failed', message: outcome.advice.message, retryable: false })
+      }
+    },
+    [setPosterStatus],
+  )
 
   const syncToCloud = useCallback(
     async (dataset: Dataset) => {
@@ -233,8 +258,9 @@ export function AnalyzerScreen(): React.JSX.Element {
         }))
         return
       }
-      const revisionId = outcome.value.revisionId
-      setLastRevisionId(revisionId)
+      const { revisionId, runCode } = outcome.value
+      const context: PosterContext = { revisionId, runCode, dataset }
+      setSyncedPoster(context)
       setStatuses((current) => ({
         ...current,
         sync: { kind: 'saved', revisionId, at: Date.now() },
@@ -243,21 +269,38 @@ export function AnalyzerScreen(): React.JSX.Element {
 
       // Poster generation is a separate lane on purpose: it can be slow, it can
       // fail, and neither outcome touches the analysis the user already has.
-      const posterOutcome = await requestPoster(revisionId)
-      if (!posterOutcome.ok) {
-        setStatuses((current) => ({
-          ...current,
-          poster: {
-            kind: 'failed',
-            message: posterOutcome.message,
-            retryable: posterOutcome.kind === 'unavailable' || posterOutcome.retryable,
-          },
-        }))
-        return
-      }
-      applyPosterState(posterOutcome.value)
+      await startAutoPoster(context, null)
     },
-    [config, applyPosterState],
+    [config, startAutoPoster],
+  )
+
+  // A poster belongs to one revision of one file, so the panel shows one only
+  // while that file is the one on screen. Switching datasets does not clear the
+  // stored context — coming back to the file brings its poster back with it.
+  const posterContext = useMemo(() => {
+    if (syncedPoster === null || active === null) return null
+    return syncedPoster.dataset.name === active.name ? syncedPoster : null
+  }, [syncedPoster, active])
+
+  const posterUnavailableReason = useMemo(() => {
+    if (posterContext !== null) return null
+    if (sessionStatus === 'unavailable') {
+      return 'この環境ではクラウド機能を利用できません。解析・グラフ・統計・書き出しはこのまま利用できます。'
+    }
+    if (sessionStatus === 'signed-out') {
+      return 'サインインすると、解析結果を保存してデスクトップ版と同じ体裁のポスター図を作成できます。解析・グラフ・統計・書き出しはサインインなしで利用できます。'
+    }
+    // Signed in, but this dataset has not been stored yet. The panel's own
+    // default sentence says so; there is nothing more specific to add.
+    return null
+  }, [posterContext, sessionStatus])
+
+  const activeCustomPosters = useMemo(
+    () =>
+      posterContext === null
+        ? []
+        : customPosters.filter((poster) => poster.analysisRevisionId === posterContext.revisionId),
+    [customPosters, posterContext],
   )
 
   /* ------------------------------------------------------------- opening */
@@ -382,23 +425,19 @@ export function AnalyzerScreen(): React.JSX.Element {
     void syncToCloud(active)
   }
 
+  /**
+   * Retry the automatic poster.
+   *
+   * A figure that has an id and reached `failed` goes through the retry
+   * endpoint, which is conditional on it still being failed — so five presses
+   * start one render. A figure with no id (the request itself was refused, or
+   * the renderer shed load before a row existed) goes back through the
+   * idempotent endpoint, which picks up the queued row.
+   */
   const retryPoster = () => {
-    if (lastRevisionId === null) return
-    setStatuses((current) => ({ ...current, poster: { kind: 'queued' } }))
-    void fetchPoster(lastRevisionId).then((outcome) => {
-      if (!outcome.ok) {
-        setStatuses((current) => ({
-          ...current,
-          poster: {
-            kind: 'failed',
-            message: outcome.message,
-            retryable: outcome.kind === 'unavailable' || outcome.retryable,
-          },
-        }))
-        return
-      }
-      applyPosterState(outcome.value)
-    })
+    if (syncedPoster === null) return
+    const posterId = statuses.poster.kind === 'failed' ? (statuses.poster.posterId ?? null) : null
+    void startAutoPoster(syncedPoster, posterId)
   }
 
   /* --------------------------------------------------------------- modes */
@@ -713,6 +752,22 @@ export function AnalyzerScreen(): React.JSX.Element {
               result={rangeResult}
               enabled={selectionEnabled}
               onChange={setSelection}
+            />
+
+            <PosterPanel
+              context={posterContext}
+              unavailableReason={posterUnavailableReason}
+              status={posterContext === null ? { kind: 'unavailable' } : statuses.poster}
+              selection={selectionEnabled ? selection : null}
+              selectionEnabled={selectionEnabled}
+              onRetryAuto={retryPoster}
+              customPosters={activeCustomPosters}
+              onCustomCreated={(poster) => {
+                // Newest first, and never overwritten: a custom figure is a new
+                // variant, not a replacement for the one it was derived from.
+                setCustomPosters((current) => [poster, ...current])
+                notify('info', 'ポスター図を作成しました。')
+              }}
             />
 
             <section className="panel" aria-label="ファイル情報">
