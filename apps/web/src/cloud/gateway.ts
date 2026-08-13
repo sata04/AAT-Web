@@ -303,6 +303,45 @@ export function listRuns(query: RunListQuery = {}): Promise<CloudOutcome<RunList
 }
 
 /**
+ * A row from the team-wide listing: everything `/runs` returns, plus whose run it is.
+ *
+ * The display name is the only human identity AAT holds — the address on the user record is
+ * synthetic and non-routable (see worker/auth/identity.ts), so there is nothing else to show and
+ * nothing here that could be mistaken for a way to contact somebody.
+ */
+export interface WorkspaceRunSummary extends RunSummary {
+  ownerUserId: string
+  ownerDisplayName: string
+}
+
+export interface WorkspaceRunListQuery extends RunListQuery {
+  /** Narrow to one member's runs. */
+  ownerUserId?: string | undefined
+}
+
+export interface WorkspaceRunListPage {
+  runs: WorkspaceRunSummary[]
+  nextCursor: string | null
+}
+
+/**
+ * Every member's runs, the caller's own included — `GET /api/v1/workspace/runs`.
+ *
+ * A separate call rather than a flag on {@link listRuns} because it is a separate route, and it is
+ * a separate route because the authorization differs: it requires `workspace:read`, which a Viewer
+ * does not hold. A Viewer calling this gets a refusal, which is the honest answer — folding the
+ * two together would have meant answering them with a silently narrowed list they could not tell
+ * apart from the team having no runs.
+ */
+export function listWorkspaceRuns(
+  query: WorkspaceRunListQuery = {},
+): Promise<CloudOutcome<WorkspaceRunListPage>> {
+  return request<WorkspaceRunListPage>(`/workspace/runs${queryString({ ...query })}`, {
+    method: 'GET',
+  })
+}
+
+/**
  * What `POST /api/v1/runs` accepts.
  *
  * `runCode` is optional because the Worker derives it from `originalFilename`
