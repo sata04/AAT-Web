@@ -241,13 +241,30 @@ jobs:
           gunzip -c "$RUNNER_TEMP/poster-renderer.tar.gz" | docker load
           pnpm --filter @aat/web exec wrangler containers push \
             "aat-poster-renderer:${{ github.sha }}" | tee "$RUNNER_TEMP/push.log"
-          # wrangler prints the registry reference it pushed; capture it so the
-          # deploy step references an immutable digest rather than a tag.
-          ref=$(grep -oE '[a-z0-9./-]+@sha256:[0-9a-f]{64}' "$RUNNER_TEMP/push.log" | tail -1)
-          if [ -z "$ref" ]; then
-            echo "::error::Could not determine the pushed image digest from wrangler output."
+          # Compose the immutable reference from the two lines wrangler actually
+          # prints. It does NOT print a `path@sha256:...` form anywhere — the
+          # digest arrives in docker's push line and the registry path in
+          # wrangler's own, so the reference has to be assembled:
+          #
+          #   <tag>: digest: sha256:<64 hex> size: <n>
+          #   Pushed image: registry.cloudflare.com/<account>/<name>:<tag>
+          #
+          # Deploying by tag instead would defeat the point: a tag can be moved,
+          # and the whole reason the image is built in the credential-free job is
+          # so that what deploys is what was tested.
+          digest=$(grep -oE 'digest: sha256:[0-9a-f]{64}' "$RUNNER_TEMP/push.log" | tail -1 | sed 's/^digest: //')
+          image=$(grep -oE 'Pushed image: [^[:space:]]+' "$RUNNER_TEMP/push.log" | tail -1 | sed 's/^Pushed image: //')
+          # Drop the :tag from the end, keeping any : that belongs to a port.
+          repository=${image%:*}
+          if [ -z "$digest" ] || [ -z "$image" ] || [ "$repository" = "$image" ]; then
+            echo "::error::Could not determine the pushed image digest. Expected a 'digest: sha256:...' line and a 'Pushed image: ...' line."
+            echo "::error::digest='$digest' image='$image'"
             exit 1
           fi
+          ref="${repository}@${digest}"
+          # The account id is a Doppler secret and therefore masked in the log;
+          # print only the shape so a malformed reference is still diagnosable.
+          echo "Deploying by digest (${digest})"
           echo "ref=$ref" >> "$GITHUB_OUTPUT"
 
       # The committed wrangler.jsonc carries deliberately invalid placeholders for the two
