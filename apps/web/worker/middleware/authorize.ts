@@ -111,14 +111,40 @@ export const withDatabase: MiddlewareHandler<AppEnv> = async (context, next) => 
 /**
  * Verify the session and attach the actor.
  *
- * Session verification is Better Auth's `getSession`, which validates the signed cookie, checks
- * expiry, and — because the Admin plugin is installed — rejects a banned user's session.
+ * Session verification is Better Auth's `getSession`, which validates the signed cookie and checks
+ * expiry.
+ *
+ * ## The ban check is here, and it has to be
+ *
+ * This comment used to say the Admin plugin rejected a banned user's session. It does not, and the
+ * difference was fourteen days of unrestricted access.
+ *
+ * The plugin's only ban enforcement is a `databaseHooks.session.create.before` hook: it refuses to
+ * *mint* a session for a banned user. Reading an existing one never consults the column, and
+ * `getSession`'s sliding refresh calls `updateSession`, not create — so a cookie issued before the
+ * ban kept working until it expired. Nothing else closed the gap: no route in this Worker deletes
+ * session rows, and Better Auth's own `/admin/revoke-user-sessions` refuses an AAT administrator
+ * (AAT's role vocabulary is not the plugin's).
+ *
+ * The practical shape of that was a researcher being removed from the group who could carry on
+ * reading and downloading every colleague's unpublished measurements for the remaining life of
+ * their cookie, by doing nothing at all except leaving a tab open.
+ *
+ * Checked on every request rather than at sign-in because that is the only point that runs on every
+ * request. It costs nothing extra — the user row is already loaded and in `session.user`.
+ * `banned` is read defensively because it is the Admin plugin's column on Better Auth's user model,
+ * not one this file's types own.
  */
 export const requireSession: MiddlewareHandler<AppEnv> = async (context, next) => {
   const auth = getAuth(context.env)
   const session = await auth.api.getSession({ headers: context.req.raw.headers })
   if (!session) {
     throw new ApiError('AUTH_REQUIRED')
+  }
+  if ((session.user as { banned?: boolean | null }).banned === true) {
+    // FORBIDDEN, not AUTH_REQUIRED: the session is genuine and the credential is not in doubt, so
+    // sending the client back to sign in would only produce a passkey ceremony that also refuses.
+    throw new ApiError('FORBIDDEN', { details: { reason: 'banned' } })
   }
   const role = normaliseRole((session.user as { role?: unknown }).role)
   context.set('actor', {

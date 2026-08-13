@@ -526,6 +526,53 @@ describe('passkey authentication', () => {
     expect(forThisUser[0]?.details).toContain('banned')
   })
 
+  /**
+   * REGRESSION TEST FOR A PROVEN DEFECT — currently RED. Added by the V1 security review; the
+   * orchestrator owns the fix.
+   *
+   * The ban only refuses a *new* ceremony (the test above). A session that already exists is
+   * unaffected, because nothing on the request path ever consults `user.banned`:
+   *
+   *  - `worker/middleware/authorize.ts:117` calls `auth.api.getSession`, which reads the session
+   *    row and returns its user without a ban test — `banned` appears nowhere in better-auth
+   *    outside the admin plugin;
+   *  - the admin plugin's only ban enforcement is a `databaseHooks.session.create.before` hook
+   *    (`better-auth/dist/plugins/admin/admin.mjs:34-48`), which fires when a session is
+   *    *created* and never when one is read;
+   *  - `PATCH /api/v1/admin/users/:userId` (`worker/routes/admin.ts:96`) sets the column and
+   *    deletes no session rows, and there is no other route in this Worker that does.
+   *
+   * So a banned researcher keeps full access — including `GET /workspace/runs`, every colleague's
+   * snapshot and `POST /runs` — for the remaining life of their cookie, up to fourteen days.
+   *
+   * Three statements in the repository assert the opposite and are wrong today:
+   * `worker/middleware/authorize.ts:113-116`, `src/screens/AdminUsersScreen.tsx:22-25`, and
+   * `docs/auth-security.md` ("Sessions").
+   */
+  it('ends an existing session when the user is banned', async () => {
+    const admin = await createUser({ role: 'Admin' })
+    const victim = await createUser({ role: 'Researcher' })
+
+    expect((await apiFetch('/api/v1/me', { cookie: victim.cookie })).status).toBe(200)
+
+    const banned = await apiFetch(`/api/v1/admin/users/${victim.userId}`, {
+      method: 'PATCH',
+      cookie: admin.cookie,
+      body: JSON.stringify({ banned: true, banReason: 'security review regression test' }),
+    })
+    expect(banned.status).toBe(200)
+
+    // Disabling an account must end it, not merely stop the next sign-in.
+    expect((await apiFetch('/api/v1/me', { cookie: victim.cookie })).status).toBe(401)
+    expect((await apiFetch('/api/v1/workspace/runs', { cookie: victim.cookie })).status).toBe(401)
+    const created = await apiFetch('/api/v1/runs', {
+      method: 'POST',
+      cookie: victim.cookie,
+      body: JSON.stringify({ originalFilename: '260811a_data.csv' }),
+    })
+    expect(created.status).toBe(401)
+  })
+
   it('ends the session on sign-out', async () => {
     const user = await createUser()
     const cookie = await signIn(user)
@@ -668,5 +715,71 @@ describe('recovery', () => {
 
     const remaining = await apiFetch('/api/v1/me/passkeys', { cookie: user.cookie })
     expect(((await remaining.json()) as { passkeys: unknown[] }).passkeys).toHaveLength(1)
+  })
+})
+
+/**
+ * REGRESSION TESTS FOR A PROVEN DEFECT - currently RED. Added by the V1 security review; the
+ * orchestrator owns the fix.
+ *
+ * Better Auth's core `POST /api/auth/update-user` is mounted by `app.all('/api/auth/*')`
+ * (`worker/index.ts:41`) and is reachable by any signed-in user. Its body schema is
+ * `z.record(z.string(), z.any())` (`better-auth/dist/api/routes/update-user.mjs:11`), so `name`
+ * is accepted with no length bound and no character filter, and it is written straight to
+ * `user.name`.
+ *
+ * `user.name` is the *only* human identity this system has - `docs/auth-security.md` says so
+ * explicitly, because there is no email - and it is rendered, unmodified, in three places a
+ * colleague sees: `GET /api/v1/workspace/runs`'s `ownerDisplayName` (`worker/routes/runs.ts:494`),
+ * `GET /api/v1/me`, and the admin console's user table via `toPublicUser`
+ * (`worker/auth/identity.ts:66`). None of them bounds or sanitises it.
+ *
+ * Two consequences, neither of which is XSS (React escapes text, and this application has no
+ * `dangerouslySetInnerHTML`):
+ *
+ *  1. **Identity spoofing in the audit surface.** `src/admin/audit.ts` strips U+202E, zero-width
+ *     and C0/C1 characters from audit *details* precisely because they let one string render as
+ *     another - and the same characters pass untouched through the display name shown beside
+ *     every run in the gallery and in the admin users table.
+ *  2. **Unbounded storage and response size.** Every schema AAT writes carries a `.max()`; the
+ *     passkey plugin's `name` is bounded for exactly this reason in
+ *     `worker/auth/passkey-plugin.ts:509-518`. This larger, far more visible string has no bound.
+ *
+ * A display name is also meant to be set by an administrator at invitation time - nothing in
+ * `worker/middleware/authorize.ts`'s policy table grants a member self-service rename.
+ */
+describe('the display name is the only identity, and is not self-service', () => {
+  it('refuses an unbounded self-set display name', async () => {
+    const user = await createUser({ role: 'Researcher' })
+
+    const response = await apiFetch('/api/auth/update-user', {
+      method: 'POST',
+      cookie: user.cookie,
+      body: JSON.stringify({ name: 'A'.repeat(5000) }),
+    })
+
+    expect(response.status).not.toBe(200)
+
+    const me = await apiFetch('/api/v1/me', { cookie: user.cookie })
+    const body = (await me.json()) as { user: { displayName: string } }
+    expect(body.user.displayName).toBe(user.displayName)
+  })
+
+  it('refuses a display name carrying bidirectional or control characters', async () => {
+    const user = await createUser({ role: 'Researcher' })
+
+    const response = await apiFetch('/api/auth/update-user', {
+      method: 'POST',
+      cookie: user.cookie,
+      // U+202E reverses the rendering of everything after it, which is how one member's name is
+      // made to read as another's in the gallery and in the admin console.
+      body: JSON.stringify({ name: '\u202E管理者 ' }),
+    })
+
+    expect(response.status).not.toBe(200)
+
+    const me = await apiFetch('/api/v1/me', { cookie: user.cookie })
+    const body = (await me.json()) as { user: { displayName: string } }
+    expect(body.user.displayName).toBe(user.displayName)
   })
 })

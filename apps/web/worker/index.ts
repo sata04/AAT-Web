@@ -38,11 +38,45 @@ app.onError(errorHandler)
 app.notFound(notFoundHandler)
 
 /**
- * Better Auth owns its prefix entirely — session cookies, sign-out, and every endpoint the passkey
- * plugin adds. Mounting it as a catch-all rather than enumerating its routes means an endpoint the
- * framework adds in an update does not silently 404.
+ * Endpoints Better Auth serves that AAT deliberately does not offer.
+ *
+ * The catch-all below is still the right mount — enumerating routes would make an endpoint the
+ * framework adds in an update silently 404, and passkey ceremonies would break on an upgrade. But
+ * the same property cuts both ways: it publishes endpoints nobody here chose, and two of them were
+ * reachable and wrong.
+ *
+ *  - `update-user` takes `z.record(z.string(), z.any())`, so any signed-in user could set their own
+ *    `name` to anything of any length. The display name is not decoration in this system: it is the
+ *    only human identity AAT holds (the address on the user record is synthetic — see
+ *    auth/identity.ts), it is shown beside every run in the team gallery and throughout the admin
+ *    console, and audit details are sanitised for bidi and zero-width characters precisely so that
+ *    one member cannot render as another. A self-service rename with none of those bounds undoes
+ *    that, and no capability in middleware/authorize.ts's table grants it — display names are set
+ *    by an administrator when the invitation is issued.
+ *  - `admin/*` is the Admin plugin's own surface: `impersonate-user`, `create-user`,
+ *    `set-user-password`, `remove-user`, `list-users`. AAT's administration is `/api/v1/admin`,
+ *    which is capability-checked, audited and quota-aware. Today these refuse only by accident —
+ *    the plugin matches its default `admin`/`user` role names against AAT's `Admin`, misses, and
+ *    denies. Renaming a role or configuring the plugin's `roles` would quietly open all of them,
+ *    and `impersonate-user` in particular would name the *victim* as the actor in every subsequent
+ *    audit row, destroying the attribution that makes the shared-workspace grant acceptable at all.
+ *
+ * `change-email` and `delete-user` are refused for the same reason: the address is synthetic and
+ * account deletion has to release R2 objects and quota, which only `/api/v1/admin` does.
+ */
+const AUTH_PATHS_NOT_OFFERED = ['/api/auth/update-user', '/api/auth/change-email', '/api/auth/delete-user']
+
+/**
+ * Better Auth owns its prefix — session cookies, sign-out, and every endpoint the passkey plugin
+ * adds — except for the paths above.
  */
 app.all('/api/auth/*', async (context) => {
+  const path = new URL(context.req.url).pathname
+  if (AUTH_PATHS_NOT_OFFERED.includes(path) || path.startsWith('/api/auth/admin/')) {
+    // NOT_FOUND rather than FORBIDDEN: these endpoints are not part of this API, and answering
+    // "you may not" would describe a surface that is deliberately not on offer to anyone.
+    throw new ApiError('RESOURCE_NOT_FOUND')
+  }
   return getAuth(context.env).handler(context.req.raw)
 })
 
