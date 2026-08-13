@@ -42,6 +42,22 @@ now for one reason: the big job is conditional, and the commit-identity check
 must not be skipped along with it. A documentation-only pull request still gets
 its committer checked.
 
+## The workflows check themselves
+
+`scripts/check-workflows.mjs` (run by `pnpm test`, or directly with
+`pnpm check:workflows`) enforces the policy above without a runner: every job
+declares `permissions` and `timeout-minutes`, every action is pinned to a full
+commit SHA, every `actions/checkout` sets `persist-credentials: false`, no
+`run:` body interpolates event-authored text, `pull_request_target` is
+forbidden — and no two jobs share a name.
+
+That last one is why it is a line scanner rather than a YAML parser. Merging the
+V1 branch produced a `ci.yml` with **two `e2e:` jobs**, one of which built the
+poster-renderer image and one of which did not. YAML keeps the last duplicate
+key and every parser accepts it silently, so the merge could have switched off
+two end-to-end specs with no visible conflict and no failing check. By the time
+a parser has read the file, the evidence is gone.
+
 ## Change detection
 
 `scripts/detect-changes.mjs` maps changed paths to jobs. Its rules are ordinary

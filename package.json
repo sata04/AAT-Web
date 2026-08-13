@@ -14,6 +14,7 @@
     "typecheck": "pnpm -r typecheck",
     "lint": "biome check .",
     "lint:fix": "biome check --write .",
+    "check:workflows": "node scripts/check-workflows.mjs",
     "golden:check": "python3 reference/python/generate_golden.py --check",
     "check:bundle": "pnpm --filter @aat/web exec wrangler deploy --dry-run --outdir dist/worker-bundle && node scripts/check-worker-bundle-size.mjs apps/web/dist/worker-bundle"
   },
