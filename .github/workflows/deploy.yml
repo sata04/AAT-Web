@@ -281,8 +281,19 @@ jobs:
           AAT_D1_DATABASE_ID: ${{ steps.doppler.outputs.AAT_D1_DATABASE_ID }}
           POSTER_RENDERER_IMAGE: ${{ steps.image.outputs.ref }}
         run: |
-          node scripts/resolve-wrangler-config.mjs "$RUNNER_TEMP/wrangler.deploy.jsonc"
-          echo "path=$RUNNER_TEMP/wrangler.deploy.jsonc" >> "$GITHUB_OUTPUT"
+          # Beside the committed file, NOT in RUNNER_TEMP.
+          #
+          # Every relative path inside a wrangler configuration resolves against
+          # the directory the configuration lives in — `main: worker/index.ts`,
+          # `migrations_dir: migrations`, and so on. Writing the resolved copy to
+          # a temporary directory therefore pointed all of them at that directory
+          # instead, and the deploy failed with "No migrations present at
+          # /home/runner/work/_temp/migrations" — which was the truth, stated
+          # confusingly. `main` would have failed next.
+          #
+          # The file is gitignored; the committed one stays invalid on purpose.
+          node scripts/resolve-wrangler-config.mjs wrangler.deploy.jsonc
+          echo "path=wrangler.deploy.jsonc" >> "$GITHUB_OUTPUT"
 
       # Migrations are reviewed SQL from the repository, applied before the code
       # that depends on them. Schema changes follow expand/migrate/contract so

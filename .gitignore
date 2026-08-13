@@ -18,3 +18,7 @@ htmlcov/
 # Generated at deploy time from Doppler: it carries the Pages project name,
 # which is the public hostname. See apps/web/scripts/resolve-pages-config.mjs.
 apps/web/pages/wrangler.jsonc
+
+# Generated at deploy time beside the committed config, so its relative paths
+# (main, migrations_dir) resolve the way the committed file's do.
+apps/web/wrangler.deploy.jsonc
