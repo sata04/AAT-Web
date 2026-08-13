@@ -23,7 +23,8 @@
  * the Worker does not produce would be worse than no client at all.
  */
 
-import type { Capability, Role } from '@aat/shared'
+import type { PosterPlotSpec } from '@aat/plot-spec'
+import type { AnalysisConfig, Capability, EncodedScalar, Role } from '@aat/shared'
 import { type ErrorCode, isErrorCode } from '@aat/shared'
 
 const API_BASE = '/api/v1'
@@ -34,12 +35,32 @@ const AUTH_BASE = '/api/auth'
 /** Requests are abandoned after this; a hung fetch must not hold a status forever. */
 const REQUEST_TIMEOUT_MS = 15_000
 
+/**
+ * The structured half of a taxonomy error.
+ *
+ * `ApiError.toPayload()` carries `details` alongside the code, and some of those
+ * details are the only way a client can recover rather than merely report: a
+ * `run_code_already_exists` refusal names the `runId` that already holds the run
+ * code, which is what turns a second analysis of the same experiment from a dead
+ * end into a revision of the run that exists. The type is deliberately
+ * `unknown`-valued — the payload is server-shaped, and reading a field out of it
+ * is a decision the caller makes explicitly.
+ */
+export type CloudErrorDetails = Readonly<Record<string, unknown>>
+
 export type CloudOutcome<T> =
   | { ok: true; value: T }
   /** The cloud is not reachable or not configured. Not an error the user caused. */
   | { ok: false; kind: 'unavailable'; message: string }
   /** The API answered with a taxonomy error. */
-  | { ok: false; kind: 'error'; code: ErrorCode; message: string; retryable: boolean }
+  | {
+      ok: false
+      kind: 'error'
+      code: ErrorCode
+      message: string
+      retryable: boolean
+      details?: CloudErrorDetails
+    }
 
 /** Codes worth offering a retry for; the rest need a different action, not another try. */
 const RETRYABLE: ReadonlySet<string> = new Set(['POSTER_BUSY', 'RATE_LIMITED', 'INTERNAL'])
@@ -53,12 +74,14 @@ const RETRYABLE: ReadonlySet<string> = new Set(['POSTER_BUSY', 'RATE_LIMITED', '
  * the top level. Accepting both is what stops an `INVITE_EXPIRED` from arriving
  * at the registration screen as a bare "HTTP 410".
  */
-function readErrorBody(body: unknown): { code: ErrorCode; message: string } | null {
+function readErrorBody(
+  body: unknown,
+): { code: ErrorCode; message: string; details: CloudErrorDetails | undefined } | null {
   if (typeof body !== 'object' || body === null) return null
-  const envelope = body as { code?: unknown; message?: unknown; error?: unknown }
+  const envelope = body as { code?: unknown; message?: unknown; details?: unknown; error?: unknown }
   const nested =
     typeof envelope.error === 'object' && envelope.error !== null
-      ? (envelope.error as { code?: unknown; message?: unknown })
+      ? (envelope.error as { code?: unknown; message?: unknown; details?: unknown })
       : null
   const code = isErrorCode(nested?.code) ? nested.code : isErrorCode(envelope.code) ? envelope.code : null
   const message =
@@ -67,8 +90,13 @@ function readErrorBody(body: unknown): { code: ErrorCode; message: string } | nu
       : typeof envelope.message === 'string'
         ? envelope.message
         : null
+  const rawDetails = nested?.details ?? envelope.details
+  const details =
+    typeof rawDetails === 'object' && rawDetails !== null && !Array.isArray(rawDetails)
+      ? (rawDetails as CloudErrorDetails)
+      : undefined
   if (code === null && message === null) return null
-  return { code: code ?? 'INTERNAL', message: message ?? '' }
+  return { code: code ?? 'INTERNAL', message: message ?? '', details }
 }
 
 async function requestAt<T>(base: string, path: string, init: RequestInit): Promise<CloudOutcome<T>> {
@@ -90,11 +118,13 @@ async function requestAt<T>(base: string, path: string, init: RequestInit): Prom
     // A body we cannot read is not a reason to lose the status code.
     let code: ErrorCode = 'INTERNAL'
     let message = `HTTP ${response.status}`
+    let details: CloudErrorDetails | undefined
     try {
       const parsed = readErrorBody(await response.json())
       if (parsed !== null) {
         code = parsed.code
         if (parsed.message.length > 0) message = parsed.message
+        details = parsed.details
       }
     } catch {
       // Fall through with the status-derived message.
@@ -110,7 +140,14 @@ async function requestAt<T>(base: string, path: string, init: RequestInit): Prom
       return { ok: false, kind: 'unavailable', message: 'クラウド機能は利用できません。' }
     }
 
-    return { ok: false, kind: 'error', code, message, retryable: RETRYABLE.has(code) }
+    return {
+      ok: false,
+      kind: 'error',
+      code,
+      message,
+      retryable: RETRYABLE.has(code),
+      ...(details === undefined ? {} : { details }),
+    }
   } catch (error) {
     // Offline, DNS failure, abort: all "the cloud is not there right now".
     const message =
@@ -265,6 +302,47 @@ export function listRuns(query: RunListQuery = {}): Promise<CloudOutcome<RunList
   return request<RunListPage>(`/runs${queryString({ ...query })}`, { method: 'GET' })
 }
 
+/**
+ * What `POST /api/v1/runs` accepts.
+ *
+ * `runCode` is optional because the Worker derives it from `originalFilename`
+ * when the filename follows the `YYMMDD[a-z]?_data.csv` convention, which is
+ * where these researchers actually encode run identity. It is *present* in the
+ * type because a file that does not follow the convention can still be recorded
+ * — the alternative would be a researcher unable to store an experiment because
+ * of how a file was named.
+ */
+export interface RunCreateRequest {
+  originalFilename: string
+  runCode?: string | undefined
+  /** `YYYY-MM-DD`. Derived from the filename when it parses. */
+  experimentDate?: string | undefined
+  memo?: string | undefined
+  projectId?: string | undefined
+  tags?: readonly string[] | undefined
+}
+
+export interface CreatedRun {
+  id: string
+  runCode: string
+  experimentDate: string | null
+}
+
+/**
+ * POST /api/v1/runs — record that an experiment happened.
+ *
+ * A run is one physical drop of the capsule, so this is **not** idempotent the
+ * way revision creation is: a second call with a run code the caller already
+ * owns is refused with `INVALID_ANALYSIS_CONFIG` and
+ * `details.reason === 'run_code_already_exists'`, carrying `details.runId`. That
+ * is the recovery path a client wants — re-analysing yesterday's file is a new
+ * *revision* of the run that exists, never a second run — which is why
+ * `CloudOutcome` carries `details` at all.
+ */
+export function createRun(body: RunCreateRequest): Promise<CloudOutcome<{ run: CreatedRun }>> {
+  return request<{ run: CreatedRun }>('/runs', { method: 'POST', ...jsonBody(body) })
+}
+
 export interface RunRevisionSummary {
   id: string
   revisionNumber: number
@@ -341,6 +419,66 @@ export function listRevisions(runId: string): Promise<CloudOutcome<{ revisions: 
 }
 
 /**
+ * The headline numbers denormalised out of the snapshot, one row per revision.
+ *
+ * Scalars travel as `@aat/shared`'s `EncodedScalar` — a number, or one of the
+ * tags `'NaN'`, `'Infinity'`, `'-Infinity'`, `'-0'` — because those four values
+ * have no JSON spelling and a window statistic that quietly became `null` (or,
+ * worse, `0` instead of `-0`) is a changed measurement, not a formatting
+ * detail.
+ */
+export interface RevisionMetrics {
+  windowSize: EncodedScalar
+  inner: { mean: EncodedScalar | null; std: EncodedScalar | null; startTime: EncodedScalar | null }
+  drag: { mean: EncodedScalar | null; std: EncodedScalar | null; startTime: EncodedScalar | null }
+  innerSampleCount: number
+  dragSampleCount: number
+  warningCount: number
+  gQuality?:
+    | ReadonlyArray<{
+        windowSize: number
+        innerStartTime: EncodedScalar | null
+        innerMean: EncodedScalar | null
+        innerStd: EncodedScalar | null
+        dragStartTime: EncodedScalar | null
+        dragMean: EncodedScalar | null
+        dragStd: EncodedScalar | null
+      }>
+    | undefined
+}
+
+export interface RevisionCreateRequest {
+  sourceSha256: string
+  configHash: string
+  config: AnalysisConfig
+  engineVersion: string
+  appVersion?: string | undefined
+  snapshotFormatVersion: number
+  notes?: string | undefined
+  metrics: RevisionMetrics
+}
+
+/**
+ * POST /api/v1/runs/:runId/revisions — create the immutable analysis record.
+ *
+ * Idempotent by analysis identity: the same source bytes, configuration and
+ * engine version are one analysis, so a retried request answers 200 with
+ * `created: false` and the revision that already exists rather than minting a
+ * second one. A double-clicked button, a flaky network and the same file
+ * analysed on two devices all converge on one revision — which is what makes
+ * calling this on every completed analysis safe.
+ */
+export function createRevision(
+  runId: string,
+  body: RevisionCreateRequest,
+): Promise<CloudOutcome<{ revision: RevisionSummary; created: boolean }>> {
+  return request<{ revision: RevisionSummary; created: boolean }>(`/runs/${id(runId)}/revisions`, {
+    method: 'POST',
+    ...jsonBody(body),
+  })
+}
+
+/**
  * The headline metrics stored alongside a revision.
  *
  * Scalars round-trip through JSON as either a number or one of `@aat/shared`'s
@@ -407,6 +545,80 @@ export function listPosters(revisionId: string): Promise<CloudOutcome<{ posters:
  */
 export function posterImageUrl(posterId: string): string {
   return `${API_BASE}/posters/${id(posterId)}/image`
+}
+
+/**
+ * POST /api/v1/revisions/:revisionId/poster/auto — the automatic formal poster.
+ *
+ * Idempotent, and idempotent *in the database*: the partial unique index
+ * `poster_figures_auto_unique (analysis_revision_id, preset_version) WHERE kind
+ * = 'auto'` means the claiming `INSERT ... ON CONFLICT DO NOTHING` succeeds for
+ * exactly one caller. Everyone else reads back the row that already exists. So
+ * a double-submit, a reload halfway through the request and the same user on
+ * two devices produce one poster and one render.
+ *
+ * Crucially, a repeat call after the figure is `ready` — or while it is
+ * `rendering`, or after it has `failed` — renders *nothing* and answers 200
+ * with `created: false`. That is what makes this endpoint safe to call again
+ * after a dropped connection, and it is also why a failed figure has to be
+ * retried through {@link retryPoster}: a client polling this endpoint cannot
+ * turn a persistent renderer fault into a render loop.
+ *
+ * `spec.analysisRevisionId` MUST equal `revisionId` and `spec.posterKind` MUST
+ * be `'auto'`; the Worker answers `INVALID_ANALYSIS_CONFIG` otherwise, because
+ * filing a figure of one measurement under another is a provenance failure.
+ * Build the spec with `@aat/plot-spec`'s `buildAutoPosterPlotSpec` and both hold
+ * by construction.
+ */
+export function requestAutoPoster(
+  revisionId: string,
+  spec: PosterPlotSpec,
+): Promise<CloudOutcome<{ poster: PosterFigure; created?: boolean }>> {
+  return request<{ poster: PosterFigure; created?: boolean }>(`/revisions/${id(revisionId)}/poster/auto`, {
+    method: 'POST',
+    ...jsonBody({ spec }),
+  })
+}
+
+/**
+ * POST /api/v1/revisions/:revisionId/posters — a hand-configured figure.
+ *
+ * Deliberately **not** idempotent, and that is the point: a researcher adjusting
+ * the axis bounds and rendering again is asking for a different picture each
+ * time, so collapsing those onto one row would destroy the variant they just
+ * made. Poster history is stored, never overwritten — the custom figures are
+ * excluded from the automatic poster's uniqueness constraint by its
+ * `WHERE kind = 'auto'` clause.
+ *
+ * `spec.posterKind` must be `'custom'`, which is what `buildPosterPlotSpec`
+ * produces and the only kind it can produce.
+ */
+export function createCustomPoster(
+  revisionId: string,
+  spec: PosterPlotSpec,
+): Promise<CloudOutcome<{ poster: PosterFigure }>> {
+  return request<{ poster: PosterFigure }>(`/revisions/${id(revisionId)}/posters`, {
+    method: 'POST',
+    ...jsonBody({ spec }),
+  })
+}
+
+/**
+ * POST /api/v1/posters/:posterId/retry — re-attempt a figure that failed.
+ *
+ * The spec is sent again rather than replayed from storage, and its
+ * `posterKind` must match the stored figure's. Only a `failed` or `queued`
+ * figure may be claimed, and only by the request that wins the conditional
+ * UPDATE, so a user pressing "retry" five times starts one render.
+ */
+export function retryPoster(
+  posterId: string,
+  spec: PosterPlotSpec,
+): Promise<CloudOutcome<{ poster: PosterFigure }>> {
+  return request<{ poster: PosterFigure }>(`/posters/${id(posterId)}/retry`, {
+    method: 'POST',
+    ...jsonBody({ spec }),
+  })
 }
 
 /* ------------------------------------------------------------------------- */
@@ -620,70 +832,53 @@ export function listAuditLog(
 }
 
 /* ------------------------------------------------------------------------- */
-/* Snapshot upload and the automatic poster                                   */
+/* Snapshot upload                                                            */
 /* ------------------------------------------------------------------------- */
 
 export interface SnapshotUploadResult {
-  revisionId: string
+  object: { id: string; byteSize: number }
+  created: boolean
+}
+
+export interface SnapshotUploadQuery {
+  /**
+   * The exact byte length of `body`. Quota is *reserved* against this before
+   * the bytes arrive, and the request body is then read with a hard cap set to
+   * the reservation — so under-declaring does not buy free storage, it
+   * truncates the upload and fails it.
+   */
+  declaredBytes: number
+  /** Lowercase SHA-256 hex of `body`, checked while the Worker reads it and again by R2. */
+  sha256: string
+  format: 'json' | 'json.gz'
 }
 
 /**
- * Persist an analysis revision.
+ * PUT /api/v1/revisions/:revisionId/snapshot — attach the analytical record.
  *
- * The body is a gzipped snapshot produced by `@aat/shared`'s
- * `encodeSnapshot`/`gzipCompress`; this layer only moves the bytes. Retrying
- * with the same `sourceSha256` and `configHash` is safe — the server keys the
- * revision on them, so a double-submit does not create two.
+ * The body is the encoded snapshot from `@aat/shared`'s `encodeSnapshot`,
+ * gzipped; this layer only moves the bytes. Everything the Worker needs to
+ * admit them travels as **query parameters** rather than headers, because the
+ * quota reservation has to happen before the body is read and because R2 is
+ * handed the digest so it verifies the write itself.
  *
- * KNOWN MISMATCH: no `/api/v1/analyses` route exists. The Worker's real path is
- * three calls — `POST /runs`, `POST /runs/:runId/revisions`, then
- * `PUT /revisions/:revisionId/snapshot?declaredBytes=…&sha256=…&format=json.gz`
- * — and reworking `src/cloud/sync.ts` around that is a separate change with its
- * own quota-reservation semantics. Left as-is so the analyzer's behaviour is
- * unchanged; the sync lane reports the failure and the local analysis is
- * untouched, which is exactly the independence the status model promises.
+ * Idempotent for a retry and only for a retry: re-uploading bytes with the same
+ * `sha256` answers 200 with `created: false`, while *different* bytes for a
+ * revision that already has a snapshot are refused with `SNAPSHOT_INVALID` and
+ * `reason: 'revision_already_has_a_different_snapshot'`. A revision is
+ * immutable, and so is its record.
  */
 export function uploadSnapshot(
+  revisionId: string,
   body: Uint8Array,
-  headers: { sourceSha256: string; configHash: string; filename: string },
+  query: SnapshotUploadQuery,
 ): Promise<CloudOutcome<SnapshotUploadResult>> {
-  return request<SnapshotUploadResult>('/analyses', {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/gzip',
-      'X-AAT-Source-Sha256': headers.sourceSha256,
-      'X-AAT-Config-Hash': headers.configHash,
-      // Encoded, because a Japanese filename is not a legal header value raw.
-      'X-AAT-Filename': encodeURIComponent(headers.filename),
-    },
+  return request<SnapshotUploadResult>(`/revisions/${id(revisionId)}/snapshot${queryString({ ...query })}`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/gzip' },
+    // A `Uint8Array` is a legal `BodyInit` at runtime; the DOM lib types it as
+    // `ArrayBufferView<ArrayBufferLike>`, which does not narrow to the
+    // `BufferSource` the signature wants.
     body: body as unknown as BodyInit,
   })
-}
-
-export interface PosterState {
-  status: 'queued' | 'rendering' | 'ready' | 'failed'
-  url?: string
-  message?: string
-}
-
-/**
- * Ask for the automatic formal poster for a revision.
- *
- * Idempotent by contract: exactly one poster exists per
- * `(analysisRevisionId, autoPosterPresetVersion)`, enforced in the database, so
- * calling this again after a dropped connection returns the existing one rather
- * than starting a second render.
- *
- * KNOWN MISMATCH, as above: the Worker's route is
- * `POST /api/v1/revisions/:revisionId/poster/auto` and it requires a validated
- * `@aat/plot-spec` document in the body, which this application has no builder
- * for yet.
- */
-export function requestPoster(revisionId: string): Promise<CloudOutcome<PosterState>> {
-  return request<PosterState>(`/analyses/${id(revisionId)}/poster`, { method: 'POST' })
-}
-
-/** Poll a poster's state. Used while it is queued or rendering. */
-export function fetchPoster(revisionId: string): Promise<CloudOutcome<PosterState>> {
-  return request<PosterState>(`/analyses/${id(revisionId)}/poster`, { method: 'GET' })
 }

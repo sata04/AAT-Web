@@ -431,8 +431,13 @@ watermark. A change to `RENDERER_VERSION` does not, because it is not.
 
 ## Outstanding
 
-- **No poster UI exists.** The endpoints, the container, the spec and the tests are all in place;
-  the screens that would request a poster and display it are not.
+- ~~**No poster UI exists.**~~ The analyzer now carries one: `apps/web/src/poster/` mints
+  full-resolution sources from the analysed dataset, asks for the automatic figure once per revision
+  as soon as the snapshot is stored, shows its status and the rendered PNG, and offers
+  `正式ポスター図を作成` for the selected range through a review dialog whose every bounded choice
+  comes from `@aat/plot-spec`'s form helpers. Reading a poster never starts a render: the panel only
+  ever issues `GET /revisions/:id/posters` and `GET /posters/:id/image`. The Run Gallery's own poster
+  screens are a separate surface.
 - **`poster_presets` is not populated by anything.** The table and its uniqueness constraint exist,
   but no code path inserts the registry rows, so preset provenance currently lives only on the
   individual `poster_figures` rows.
