@@ -28,7 +28,7 @@ import { adminRoutes } from './routes/admin.ts'
 import { meRoutes } from './routes/me.ts'
 import { posterRoutes } from './routes/posters.ts'
 import { revisionRoutes } from './routes/revisions.ts'
-import { projectRoutes, runRoutes } from './routes/runs.ts'
+import { projectRoutes, runRoutes, workspaceRoutes } from './routes/runs.ts'
 
 export { PosterRendererContainer } from './container/poster-renderer.ts'
 
@@ -51,6 +51,10 @@ const v1 = new Hono<AppEnv>()
 v1.route('/me', meRoutes)
 v1.route('/runs', runRoutes)
 v1.route('/projects', projectRoutes)
+// The team gallery. Separate from /runs because it requires a capability /runs does not
+// (`workspace:read`), and this router mounts capabilities as middleware so the route table stays
+// the place where authorization can be read.
+v1.route('/workspace', workspaceRoutes)
 // Revision, snapshot and source-backup routes carry their own full paths (/runs/... and
 // /revisions/...) because a snapshot belongs to a revision but is reached through its run.
 v1.route('/', revisionRoutes)

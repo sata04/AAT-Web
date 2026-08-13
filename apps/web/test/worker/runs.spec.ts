@@ -245,14 +245,25 @@ describe('original CSV backup', () => {
     expect(after.quota.bytesUsed).toBe(0)
   })
 
-  it('is not downloadable by another user', async () => {
+  it('is downloadable by a colleague, but not replaceable or deletable by one', async () => {
     const owner = await createUser()
-    const stranger = await createUser()
+    const colleague = await createUser()
     const runId = await createRun(owner)
     await upload(owner.cookie, runId, true)
 
-    const response = await apiFetch(`/api/v1/runs/${runId}/source`, { cookie: stranger.cookie })
-    expect(response.status).toBe(404)
+    // The shared-workspace policy: re-analysing a colleague's raw measurement is the point.
+    const download = await apiFetch(`/api/v1/runs/${runId}/source`, { cookie: colleague.cookie })
+    expect(download.status).toBe(200)
+    expect(await download.text()).toBe(CSV)
+
+    // Attaching raw bytes to somebody else's experiment, or removing theirs, is not.
+    expect((await upload(colleague.cookie, runId, true)).status).toBe(404)
+    const removed = await apiFetch(`/api/v1/runs/${runId}/source`, {
+      method: 'DELETE',
+      cookie: colleague.cookie,
+    })
+    expect(removed.status).toBe(404)
+    expect((await apiFetch(`/api/v1/runs/${runId}/source`, { cookie: owner.cookie })).status).toBe(200)
   })
 
   it('refuses a Viewer, who has no raw:upload capability', async () => {
@@ -311,13 +322,14 @@ describe('a deleted run takes its revisions with it', () => {
     expect(response.status).toBe(404)
   })
 
-  it('still refuses it to a stranger, and says nothing different', async () => {
+  it('still refuses it to a colleague who could otherwise have read it', async () => {
     const { revisionId } = await deletedRunWithRevision()
-    const stranger = await createUser()
+    const colleague = await createUser()
 
-    // Same answer as for the owner. A deleted run that 404s for its owner but 403s for everyone
-    // else would confirm the id exists to exactly the caller who should not learn that.
-    const response = await apiFetch(`/api/v1/revisions/${revisionId}`, { cookie: stranger.cookie })
+    // Same answer as for the owner, and this is the sharper version of that assertion under the
+    // shared-workspace policy: this caller holds workspace:read and *would* have been served this
+    // revision a moment ago. Deletion has to close the door for everyone, not only for strangers.
+    const response = await apiFetch(`/api/v1/revisions/${revisionId}`, { cookie: colleague.cookie })
     expect(response.status).toBe(404)
   })
 })

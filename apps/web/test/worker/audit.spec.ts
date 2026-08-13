@@ -18,6 +18,7 @@ interface AuditEntry {
   actorUserId: string | null
   targetType: string | null
   targetId: string | null
+  targetOwnerUserId: string | null
   details: Record<string, unknown> | null
 }
 
@@ -51,6 +52,70 @@ describe('audit log', () => {
     ]) {
       expect(actions).toContain(expected)
     }
+  })
+
+  /*
+   * The shared-workspace policy of 2026-08-13 let researchers and administrators reach each
+   * other's measurements. "Who has been reading my runs?" is the question that created, and it is
+   * unanswerable from `actorUserId` alone — so every entry about an owned resource names the owner
+   * too, and the cross-user ones are a filter rather than a four-table join.
+   */
+  it('names the owner of the work, not only the actor, when a colleague reads it', async () => {
+    const admin = await createUser({ role: 'Admin' })
+    const owner = await createUser()
+    const colleague = await createUser()
+    const runId = await createRun(owner)
+    const revisionId = await createRevision(owner, runId)
+
+    const read = await apiFetch(`/api/v1/revisions/${revisionId}/posters`, { cookie: colleague.cookie })
+    expect(read.status).toBe(200)
+
+    const annotated = await apiFetch(`/api/v1/runs/${runId}`, {
+      method: 'PATCH',
+      cookie: colleague.cookie,
+      body: JSON.stringify({ memo: '同僚による注記' }),
+    })
+    expect(annotated.status).toBe(200)
+
+    const updates = await entriesFor(admin.cookie, 'run.update')
+    const entry = updates.find((candidate) => candidate.targetId === runId)
+    expect(entry?.actorUserId).toBe(colleague.userId)
+    expect(entry?.targetOwnerUserId).toBe(owner.userId)
+    // Tagged, so "everything anyone did to someone else's data" is one predicate.
+    expect(entry?.details).toMatchObject({ crossUser: true })
+  })
+
+  it('records a poster rendered on a colleague’s revision against both parties', async () => {
+    const admin = await createUser({ role: 'Admin' })
+    const owner = await createUser()
+    const colleague = await createUser()
+    const runId = await createRun(owner)
+    const revisionId = await createRevision(owner, runId)
+
+    const rendered = await apiFetch(`/api/v1/revisions/${revisionId}/poster/auto`, {
+      method: 'POST',
+      cookie: colleague.cookie,
+      body: JSON.stringify({ spec: posterSpec(revisionId) }),
+    })
+    expect(rendered.status).toBe(201)
+
+    const renders = await entriesFor(admin.cookie, 'poster.render')
+    const entry = renders.find((candidate) => candidate.targetOwnerUserId === owner.userId)
+    expect(entry?.actorUserId).toBe(colleague.userId)
+    expect(entry?.details).toMatchObject({ crossUser: true })
+  })
+
+  it('does not tag an owner acting on their own work as cross-user', async () => {
+    const admin = await createUser({ role: 'Admin' })
+    const owner = await createUser()
+    const runId = await createRun(owner)
+
+    const entries = await entriesFor(admin.cookie, 'run.create')
+    const entry = entries.find((candidate) => candidate.targetId === runId)
+    // The owner is still recorded — an entry that named an owner only when the access was unusual
+    // would make the *absence* of the field the signal, and absences prove nothing.
+    expect(entry?.targetOwnerUserId).toBe(owner.userId)
+    expect(entry?.details ?? {}).not.toHaveProperty('crossUser')
   })
 
   it('records administrative actions with the actor that performed them', async () => {

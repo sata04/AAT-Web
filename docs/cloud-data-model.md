@@ -257,15 +257,26 @@ the capability (`raw:upload`) is one a Researcher legitimately holds.
 The upload is capped at `AAT_MAX_SOURCE_BYTES` (32 MiB) and its filename is stored in
 `cloud_objects.original_filename` as metadata. It is never a key component. Deleting a source
 backup (`DELETE /runs/:runId/source`, capability `raw:delete`) removes the bytes and corrects the
-quota in the same request.
+owner's quota in the same request.
+
+Both writes are resolved at `destroy`, so a colleague reaches neither: consent to a backup of
+*your* CSV is not consent to somebody else filing one under your name, and a Researcher who could
+delete a colleague's raw measurement could destroy the only remaining copy of an experiment.
+**Downloading** one is a `read` and any member may do it — re-analysing a colleague's raw data is
+the point of the shared workspace.
 
 ## R2 keys are built from server-generated identifiers, never accepted
 
 ```
-snapshots/<userId>/<runId>/<revisionId>.<json|json.gz>
-posters/<userId>/<runId>/<revisionId>/<posterId>.png
-sources/<userId>/<runId>/<objectId>.csv
+snapshots/<ownerUserId>/<runId>/<revisionId>.<json|json.gz>
+posters/<ownerUserId>/<runId>/<revisionId>/<posterId>.png
+sources/<ownerUserId>/<runId>/<objectId>.csv
 ```
+
+**`<ownerUserId>` is the owner of the run, never the user who made the request.** Since the shared
+workspace policy a colleague can render a poster from your revision, and an administrator can
+attach a source backup to your run; both objects are keyed, indexed in `cloud_objects` and charged
+under *your* id. See "Object ownership" below for why.
 
 Every segment passes `assertKeySegment` in `worker/services/storage.ts`, which admits only
 `/^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/` and throws `INTERNAL` otherwise. A user-supplied filename in
@@ -273,8 +284,9 @@ an object key is three separate primitives at once: path traversal (`../../other
 collision, and a way to smuggle content into a namespace that authorization decisions are made
 from. "The user picked this name" is precisely the wrong reason to trust a string.
 
-The leading user id is deliberate. It makes a cross-tenant read visible as a mismatch between the
-key and the caller rather than as something only the database could have caught.
+The leading user id is deliberate. It keeps every object a run produced in one namespace, so
+"delete this run's bytes" is a prefix and not a query, and it makes an object filed under the wrong
+owner visible in the key rather than only in the database.
 
 **The bucket is private.** There is no public R2 URL and no presigned-URL issuance. Every read
 goes through the Worker, which checks ownership and then hands `object.body` straight to the
@@ -292,28 +304,159 @@ Three questions, asked in this order, by `worker/middleware/authorize.ts` and no
 2. **May they do this kind of thing?** `requireCapability` checks a capability from
    `@aat/shared`'s vocabulary — `analysis:read`, `cloud:read`, `raw:download`, and so on. Routes
    name capabilities; they never compare role strings.
-3. **May they do it to *this*?** `requireOwnedRun` / `requireOwnedRevision` / `requireOwnedObject`
-   resolve the resource and confirm the caller owns it. A capability is permission to act on your
-   own data, never on someone else's.
+3. **May they do it to *this*?** `requireRun` / `requireRevision` / `requirePosterFigure` resolve
+   the resource and confirm the caller reaches it at the level the route named — `read`,
+   `annotate`, `destroy` or `own`.
 
-Reading a snapshot therefore passes through: session → `cloud:read` → the revision is the
-caller's → the `cloud_objects` row is not soft-deleted **and** its `owner_user_id` equals the
-caller → the R2 object exists. Every one of those is a separate `RESOURCE_NOT_FOUND` on failure.
+Reading a snapshot therefore passes through: session → `cloud:read` → the revision's run is not
+soft-deleted **and** the caller reaches its owner at `read` → the `cloud_objects` row is not
+soft-deleted **and** the caller reaches *its* owner at `read` → the R2 object exists. Every one of
+those is a separate `RESOURCE_NOT_FOUND` on failure.
 
-A resource that exists but belongs to someone else answers `RESOURCE_NOT_FOUND`, never
-`FORBIDDEN`. `FORBIDDEN` on another user's id confirms the id exists, which turns an id space
-into an enumeration oracle over colleagues' run codes.
+### This deployment is one research team's shared workspace (decided 2026-08-13)
 
-**Administrators are not exempt from question 3.** `user:manage`, `invitation:manage`,
-`audit:read` and `quota:manage` let an administrator run the deployment. None of them grants
-access to another researcher's measurements: `GET /admin/storage` returns sizes, counts and
-names, never snapshot or poster bytes. "The admin can read everything" is a policy that has to
-be chosen deliberately, and it has not been.
+Question 3 used to be "do you own it?", full stop, and this document used to say that "the admin
+can read everything" was a policy that had to be chosen deliberately and had not been. The
+repository owner has now chosen it.
+
+Registration is by invitation only and every invitation is issued by the owner of the deployment to
+a member of their own research group. There is no second tenant. Under those conditions, walling
+each researcher off from every other researcher's measurements protected nobody — it meant a group
+that shares a drop tower could not share the analyses of the drops.
+
+| Action | Owner | Researcher | Admin | Viewer |
+| --- | --- | --- | --- | --- |
+| Read run metadata, revisions, metrics, posters | yes | **yes** | **yes** | no |
+| Read/download the snapshot (replay, statistics, Excel, custom poster) | yes | **yes** | **yes** | no |
+| Read/download the original CSV backup | yes | **yes** | **yes** | no |
+| Generate a poster figure, automatic or custom | yes | **yes** | **yes** | no |
+| Edit memo, tags, project | yes | **yes** | **yes** | no |
+| Delete a run; upload or delete an original CSV | yes | no | **yes** | no |
+| Create a revision; upload a snapshot | yes | no | no | no |
+
+The widening is expressed as three capabilities in `packages/shared/src/capabilities.ts`, not as
+role comparisons in handlers:
+
+| Capability | Meaning | Held by |
+| --- | --- | --- |
+| `workspace:read` | May read any member's work in this deployment. | Researcher, Admin |
+| `workspace:annotate` | May annotate any member's work — memo, tags, project. | Researcher, Admin |
+| `workspace:destroy` | May perform destructive actions on any member's work. | Admin |
+
+Four consequences worth stating, because each is a decision rather than a fallout:
+
+- **A Viewer is unchanged.** Viewers hold no `workspace:*` capability, so every resolver refuses
+  them anything they do not own. A Viewer already lacked `analysis:create`; what this policy means
+  for them is that their *read* scope did not widen while everyone else's did.
+- **The last row is narrower than the rest, for everyone including administrators.** Creating a
+  revision on somebody else's run, or filing a snapshot under one, writes into their provenance
+  chain — "who analysed this, with what settings" would stop having one answer. Reusing a
+  colleague's data means reading their snapshot, not appending to their history.
+- **Generating a poster needs `read`, not a write level.** A poster is derived from a revision and
+  leaves it untouched. What separates a Viewer from a Researcher there is the `poster:generate`
+  capability, not the resolver.
+- **There are two listings, and they mean two different things.** `GET /api/v1/runs` is scoped to
+  `owner_user_id = caller` in its WHERE clause and keeps meaning "mine"; `GET
+  /api/v1/workspace/runs` is the team gallery. Folding every colleague's runs into "my runs" would
+  make the one listing a researcher relies on stop meaning anything, and a `?scope=team` parameter
+  on the existing route would have made its capability a request-time branch inside the handler —
+  so a reader of `index.ts` could no longer tell what `GET /runs` requires.
+
+### `GET /api/v1/workspace/runs` — the team gallery
+
+A read nobody can exercise without already knowing a ULID is a permission nobody can use, so the
+widened read needs an enumeration endpoint to be reachable at all. This is it.
+
+| | |
+| --- | --- |
+| Capabilities | `analysis:read` **and** `workspace:read`, both as middleware |
+| Scope | Every member's runs, the caller's own included |
+| Query | `search`, `tag`, `projectId`, `from`, `to`, `limit` (≤ 100, default 25), `cursor`, `ownerUserId` |
+| Row | the `/runs` row plus `ownerUserId` and `ownerDisplayName` |
+| Deleted runs | excluded — the same `IS NULL deleted_at` filter, from the same builder |
+
+The filters come from one shared builder (`runListFilters` in `worker/routes/runs.ts`) so the two
+listings cannot drift on a `%`-escape or a `deleted_at` clause; the scope is the only part each
+endpoint supplies for itself, because it is the only part they genuinely disagree about.
+
+`ownerDisplayName` is there because a gallery that cannot say *whose* run a row is is a list with
+the somebody left out, and the display name is the only identity AAT has — there is no email (see
+`worker/auth/identity.ts`). `ownerUserId=` narrows the gallery to one member.
+
+**A Viewer is refused outright**, with `FORBIDDEN` naming `workspace:read`, rather than being
+served a quietly narrowed list of their own runs. A narrowed list is worse than a refusal twice
+over: a Viewer handed a short gallery has no way to know they were not shown the team's, and an
+endpoint that silently omits rows a caller may not see is an existence oracle by omission. The
+refusal is byte-identical whether or not any colleague's run exists.
+
+A resource that exists but the caller may not reach answers `RESOURCE_NOT_FOUND`, never
+`FORBIDDEN`. `FORBIDDEN` on another user's id confirms the id exists, which turns an id space into
+an enumeration oracle over colleagues' run codes. That matters **more** under this policy, not
+less: with Viewers still confined to their own runs, the difference between 403 and 404 would tell
+a Viewer exactly which run ids the rest of the team holds — and it would tell a Researcher which
+runs exist but may not be deleted.
+
+**Administrators are still not exempt from question 3, and `/admin` still serves no research
+bytes.** `user:manage`, `invitation:manage`, `audit:read` and `quota:manage` let an administrator
+run the deployment; `GET /admin/storage` returns sizes, counts and names and never snapshot or
+poster bytes. An administrator reads a colleague's snapshot through `workspace:read` and the
+ordinary member routes, where the read is resolved by one middleware, attributed to an actor and
+written to the audit log with the owner it touched. A second door through `/admin` would be a
+second authorization path to keep correct and a read the owner's audit trail never sees.
+
+### Every access to somebody else's work is in the audit log
+
+`audit_logs.target_owner_user_id` names the member whose work an action touched, and
+`writeAuditLog` additionally tags the entry `crossUser: true` in `details` when that is not the
+actor. "Who has been reading my measurements?" is the question this policy created, and it cannot
+be answered by filtering on `actor_user_id`. `GET /api/v1/admin/audit` accepts
+`targetOwnerUserId=` and `crossUserOnly=true` for exactly that query.
+
+The owner is recorded on *every* entry about an owned resource, including the ordinary case where
+it equals the actor. An entry that named an owner only when the access was unusual would make the
+absence of the field the interesting signal, and an absence is not something a log can prove.
+
+## Object ownership: an object belongs to the run, not to the uploader
+
+`cloud_objects.owner_user_id` and `poster_figures.owner_user_id` are both **the owner of the run**
+the object hangs off. So is the leading segment of the R2 key, and so is the account whose quota is
+charged. The actor who made the request is recorded in `audit_logs` and nowhere else.
+
+Before the shared-workspace policy the distinction did not exist: only the owner could write
+anything under their own run. It exists now because a colleague can render a poster from your
+revision and an administrator can attach a source backup to your run, so "who does this PNG belong
+to?" became a real question with two possible answers.
+
+It is answered "the run's owner" for one reason, and the reason is deletion. `DELETE
+/api/v1/runs/:runId` walks every non-deleted `cloud_objects` row for the run, deletes the R2
+object, stamps `deleted_at` and calls `releaseUsage(object.owner_user_id, …)`. If objects inside
+one run were charged to several accounts, then:
+
+- the owner would delete their experiment and still be storing — and paying for — the parts of it a
+  colleague created, or else the delete would silently reach into a third party's quota;
+- a colleague's storage would be consumed by a run they cannot delete, and freeing it would mean
+  asking its owner to delete their measurement;
+- `GET /admin/storage` would report a per-user total that no single user can act on.
+
+None of those has a good resolution, and all of them are avoided by the artifact living with the
+run. The cost is the obvious one and it is accepted deliberately: **a researcher can spend a
+colleague's quota** by rendering posters on their runs. That is bounded by
+`AAT_MAX_POSTER_BYTES` per figure and by the per-user poster rate limit, it is attributed in the
+audit log with both parties, and it is reversible by deleting the figure's run. The alternative —
+protecting each researcher's quota from their colleagues — costs an incoherent deletion, which is
+not reversible at all.
+
+The same rule is why `DELETE /runs/:runId/source` no longer filters the objects it deletes by the
+*caller*: every object under a run belongs to the run's owner, the caller has already been resolved
+against that owner at `destroy`, and re-testing each row against the caller would skip exactly the
+objects the administrative path exists to remove — leaving the bytes in R2 while reporting a
+successful delete.
 
 ## Quota accounting: reserve, write, measure, finalise
 
 Storage is charged against `quota_usage`, one row per user, created on first use with
-`AAT_DEFAULT_QUOTA_BYTES` (1 GiB) as the ceiling. The row has three counters and a limit:
+`AAT_DEFAULT_QUOTA_BYTES` (1 GiB) as the ceiling. "Per user" means per *owner of the run* — see
+above. The row has three counters and a limit:
 
 | Column | Meaning |
 | --- | --- |
@@ -388,7 +531,8 @@ reservations matter.
 Deletion is deliberately asymmetric: **soft for the metadata, hard for the bytes.** A "deleted"
 run that still costs storage is a bill nobody can explain.
 
-`DELETE /api/v1/runs/:runId` (capability `analysis:delete`):
+`DELETE /api/v1/runs/:runId` (capability `analysis:delete`, resolved at `destroy` — so the owner or
+an administrator, never a colleague):
 
 1. Selects every non-deleted `cloud_objects` row for the run.
 2. For each: deletes the R2 object, stamps `cloud_objects.deleted_at`, and calls `releaseUsage`
@@ -412,19 +556,25 @@ them and no way to find them.
 
 - **The Run Gallery and Admin console have no UI.** The routes described here exist and are
   covered by the workerd test suite; the screens that would call them do not.
-- **Part of `apps/web/src/cloud/gateway.ts` still targets routes the Worker does not serve.** The
-  run, project, revision, poster-listing, `/me` and `/admin` calls match the route table; snapshot
-  upload still posts to `/analyses`, and the poster calls still use `/analyses/:id/poster`. None of
-  those three paths exists in `worker/index.ts`, and the snapshot upload additionally uses a
-  header-based protocol where the Worker expects `PUT /revisions/:revisionId/snapshot` with
-  `declaredBytes`, `sha256` and `format` query parameters. These have to be reconciled before cloud
-  sync works end to end.
+- ~~**Part of `apps/web/src/cloud/gateway.ts` still targets routes the Worker does not serve.**~~
+  Fixed. Snapshot upload is `PUT /revisions/:revisionId/snapshot` with `declaredBytes`, `sha256` and
+  `format` as query parameters, reached through `POST /runs` and `POST /runs/:runId/revisions`; the
+  poster calls are the three real routes. `apps/web/test/ui/gateway-routes.test.ts` now asserts that
+  every path the gateway constructs resolves to a route the Hono app serves, so a path that does not
+  exist fails CI instead of arriving in production as `RESOURCE_NOT_FOUND` — which the gateway reads
+  as "this deployment has no cloud half", the reason the original mismatch was invisible for so long.
 - **The comment on `poster_figures.status` in `schema.ts` names the wrong vocabulary.** It reads
   `'pending' | 'rendering' | 'succeeded' | 'failed'`; the values the Worker and `@aat/plot-spec`
   actually use are `queued`, `rendering`, `ready`, `failed`.
 - **Snapshots are not compacted or tiered.** Every revision keeps its full-resolution object for
   as long as its run exists. Given the sizes involved this is the right default, but there is no
   lifecycle policy to lean on if it stops being one.
+- **No UI consumes the team gallery yet.** `GET /api/v1/workspace/runs` exists and is covered by
+  the workerd suite; the screen that would show a colleague's run alongside your own does not.
+- **Projects are not shared.** A run can be annotated by any member, but the project it is filed
+  under must belong to the run's *owner*, and `GET /projects` lists only the caller's. So a
+  colleague editing a run cannot see the projects they are allowed to move it between. Sharing
+  projects across the team is a separate decision from sharing runs, and it has not been made.
 
 ## Related documents
 

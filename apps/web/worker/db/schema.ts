@@ -17,9 +17,11 @@
  *    that round-trips a `Date` through SQLite without a string encoding in the middle.
  *
  *  - **Every id is an opaque ULID.** Sequential integers leak how many users exist and how many
- *    runs a colleague has uploaded, and they make an IDOR probe a matter of counting. ULIDs are
- *    also lexicographically sortable by creation time, which is why several indexes below can lean
- *    on the id instead of carrying a separate ordering column.
+ *    runs a colleague has uploaded, and they make an IDOR probe a matter of counting. That still
+ *    matters under the shared-workspace policy: a Viewer reaches only their own rows, and an
+ *    anonymous caller reaches none, so an id space that can be walked is an oracle for both. ULIDs
+ *    are also lexicographically sortable by creation time, which is why several indexes below can
+ *    lean on the id instead of carrying a separate ordering column.
  *
  *  - **No time series.** Not one table stores a sample per row. Full-resolution series live in R2
  *    as snapshot objects; D1 stores the metadata needed to find, authorise and describe them.
@@ -452,6 +454,12 @@ export const posterFigures = sqliteTable(
     analysisRevisionId: text('analysis_revision_id')
       .notNull()
       .references(() => analysisRevisions.id, { onDelete: 'cascade' }),
+    /**
+     * The owner of the revision this figure draws — not the member who asked for the render. A
+     * figure belongs to the measurement, so that the auto-poster uniqueness constraint means the
+     * same thing whoever triggered it and so the PNG is reclaimed with the run. Who rendered it is
+     * recorded in `audit_logs`, which is where an actor belongs.
+     */
     ownerUserId: text('owner_user_id')
       .notNull()
       .references(() => user.id, { onDelete: 'cascade' }),
@@ -492,7 +500,13 @@ export const posterFigures = sqliteTable(
 
 /**
  * The index of everything in R2. Nothing is written to the bucket without a row here first, and
- * nothing is read from the bucket without this row proving who owns it.
+ * nothing is read from the bucket without this row naming who owns it and the resolver in
+ * worker/middleware/authorize.ts deciding whether the caller reaches that owner.
+ *
+ * `ownerUserId` is the owner of the *run* the object belongs to, never the user who happened to
+ * create it. A poster a colleague rendered from your revision is stored, keyed, quota-charged and
+ * reclaimed as yours, because deleting the run has to reclaim every byte it caused — and it cannot
+ * do that coherently if the objects inside one run are charged to several accounts.
  *
  * `originalFilename` is metadata and *only* metadata: it is never a component of `r2Key`. An
  * attacker-supplied filename in an object key is a path-traversal and key-collision primitive, and
@@ -528,6 +542,10 @@ export const cloudObjects = sqliteTable(
 
 /**
  * Per-user storage accounting.
+ *
+ * "Per-user" means per *owner of the run*, not per uploader: an object is charged to whoever the
+ * run belongs to, so that deleting a run gives its bytes back to exactly the account they were
+ * taken from. See worker/services/quota.ts.
  *
  * `bytesReserved` is the in-flight column that makes the quota race-safe: an upload reserves
  * before it writes, so two simultaneous uploads that would each fit individually cannot both
@@ -574,6 +592,12 @@ export const quotaReservations = sqliteTable(
  *
  * `details` is JSON and is written by code that must never put a credential in it: invitation rows
  * are logged by id, never by token or token hash (see worker/services/audit.ts, which strips them).
+ *
+ * `targetOwnerUserId` is the member whose work was acted on, which since the workspace policy of
+ * 2026-08-13 is frequently *not* the actor: a researcher may read, and an administrator may delete,
+ * a colleague's run. "Who touched my measurements?" is the question that policy created, and it
+ * cannot be answered by filtering on `actorUserId`. It is a column rather than a key in `details`
+ * because it is indexed and queried, not merely displayed.
  */
 export const auditLogs = sqliteTable(
   'audit_logs',
@@ -583,6 +607,8 @@ export const auditLogs = sqliteTable(
     action: text('action').notNull(),
     targetType: text('target_type'),
     targetId: text('target_id'),
+    /** The owner of the thing acted on. Null when the action has no owned target. */
+    targetOwnerUserId: text('target_owner_user_id').references(() => user.id, { onDelete: 'set null' }),
     ipAddress: text('ip_address'),
     userAgent: text('user_agent'),
     details: text('details'),
@@ -592,6 +618,8 @@ export const auditLogs = sqliteTable(
     index('audit_logs_created_at_idx').on(table.createdAt),
     index('audit_logs_actor_idx').on(table.actorUserId, table.createdAt),
     index('audit_logs_action_idx').on(table.action, table.createdAt),
+    // "Everything anyone did to this member's data", which is the cross-user question.
+    index('audit_logs_target_owner_idx').on(table.targetOwnerUserId, table.createdAt),
   ],
 )
 
