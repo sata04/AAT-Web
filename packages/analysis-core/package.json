@@ -14,7 +14,7 @@
     "test": "vitest run"
   },
   "devDependencies": {
-    "@types/papaparse": "5.3.16",
+    "@types/papaparse": "5.5.2",
     "vitest": "4.1.10"
   },
   "dependencies": {
