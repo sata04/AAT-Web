@@ -32,6 +32,8 @@ import { AnalyzerScreen } from '../screens/AnalyzerScreen.tsx'
 import { InvitationScreen } from '../screens/InvitationScreen.tsx'
 import { NotFoundScreen } from '../screens/NotFoundScreen.tsx'
 import { PendingScreen } from '../screens/PendingScreen.tsx'
+import { RunDetailScreen } from '../screens/RunDetailScreen.tsx'
+import { RunsScreen } from '../screens/RunsScreen.tsx'
 import { SecurityScreen } from '../screens/SecurityScreen.tsx'
 import { SignInScreen } from '../screens/SignInScreen.tsx'
 import { SessionProvider } from '../session/SessionProvider.tsx'
@@ -51,14 +53,9 @@ function CurrentScreen(): React.JSX.Element {
     case 'security':
       return <SecurityScreen />
     case 'runs':
-      return <PendingScreen title="実験一覧" description="保存した実験と解析リビジョンを一覧します。" />
+      return <RunsScreen />
     case 'run':
-      return (
-        <PendingScreen
-          title="実験の詳細"
-          description="1回のドロップと、その解析リビジョン・ポスター図・メモ・タグを表示します。"
-        />
-      )
+      return <RunDetailScreen />
     case 'admin':
       return <PendingScreen title="管理" description="このデプロイの利用者・招待・保存容量を管理します。" />
     case 'admin-users':

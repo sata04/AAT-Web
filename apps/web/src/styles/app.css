@@ -755,3 +755,387 @@ textarea {
   clip-path: inset(50%);
   white-space: nowrap;
 }
+
+/*
+ * =============================================================================
+ * Run Gallery and Run detail
+ *
+ * Appended as one delimited block so the chrome above stays a single reviewable
+ * unit. Same rules as the rest of this file: hairlines rather than shadows,
+ * accent only where it marks state, and no colour that is not repeating
+ * something the text already says — every status chip below carries its own
+ * word, so the border tint is a second copy and never the only copy.
+ *
+ * The gallery is a grid of wide cards rather than a table because a run is not
+ * one row of numbers: it is a picture, an identity, a note and two sensors'
+ * statistics, and a table of that is a table with a thumbnail column in it.
+ * =============================================================================
+ */
+
+/* ----- Gallery: filters ----- */
+
+/*
+ * `<search>` is a landmark element rather than a layout one, and a browser that
+ * does not know it renders it inline — which would collapse the panel's padding
+ * and border. One declaration makes the fallback behave like the block it is.
+ */
+.run-filter {
+  display: block;
+}
+
+.run-filter__fields {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(13rem, 1fr));
+  gap: var(--space-md);
+}
+
+/* ----- Gallery: the card grid ----- */
+
+.run-grid {
+  display: grid;
+  /* One column until there is room for two full cards; a squeezed card loses the
+     metrics table before it loses anything worth losing. */
+  grid-template-columns: repeat(auto-fill, minmax(28rem, 1fr));
+  gap: var(--space-md);
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.run-card {
+  min-width: 0;
+}
+
+.run-card__inner {
+  display: grid;
+  grid-template-columns: minmax(0, 12rem) minmax(0, 1fr);
+  gap: var(--space-md);
+  height: 100%;
+  padding: var(--space-md);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-panel);
+  background: var(--bg-secondary);
+}
+
+@media (max-width: 640px) {
+  .run-card__inner {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+.run-card__figure {
+  min-width: 0;
+}
+
+.run-card__body {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-xs);
+  min-width: 0;
+}
+
+.run-card__head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: var(--space-sm);
+}
+
+.run-card__code {
+  margin: 0;
+  font-family: var(--font-mono);
+  font-size: var(--size-header);
+  font-weight: var(--weight-bold);
+}
+
+.run-card__code a {
+  color: inherit;
+  text-decoration: none;
+}
+
+.run-card__code a:hover {
+  color: var(--accent);
+  text-decoration: underline;
+}
+
+.run-card__date {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  color: var(--text-secondary);
+}
+
+.run-card__filename {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: var(--space-xs);
+  margin: 0;
+  font-size: var(--size-small);
+  color: var(--text-secondary);
+}
+
+/* A filename is not prose: break it anywhere rather than letting it widen the card. */
+.run-card__filename-name {
+  min-width: 0;
+  font-family: var(--font-mono);
+  overflow-wrap: anywhere;
+}
+
+.run-card__flag {
+  padding: 0 var(--space-2xs);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-pill);
+  font-size: var(--size-small);
+  white-space: nowrap;
+}
+
+.run-card__memo {
+  margin: 0;
+  /* Plain text, wrapped as written. Never markup — see src/runs/memo.ts. */
+  overflow-wrap: anywhere;
+}
+
+.run-card__tags,
+.run-tags__list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2xs);
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.run-tag {
+  display: inline-block;
+  max-width: 16rem;
+  padding: 0 var(--space-xs);
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-pill);
+  font-size: var(--size-small);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.run-card__metrics td,
+.run-card__metrics th {
+  padding: var(--space-3xs) var(--space-xs);
+}
+
+.run-card__gquality {
+  margin: 0;
+}
+
+/* ----- Status chips ----- */
+
+.run-card__status {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2xs);
+  list-style: none;
+  margin: var(--space-2xs) 0 0;
+  padding: 0;
+}
+
+.run-chip {
+  display: inline-flex;
+  align-items: baseline;
+  gap: var(--space-2xs);
+  padding: var(--space-3xs) var(--space-xs);
+  border: 1px solid var(--border);
+  /* The tinted edge is the second copy; the words inside are the first. */
+  border-left-width: 3px;
+  border-left-color: var(--text-disabled);
+  border-radius: var(--radius-form);
+  background: var(--bg-primary);
+  font-size: var(--size-small);
+}
+
+.run-chip--good {
+  border-left-color: var(--success);
+}
+
+.run-chip--bad {
+  border-left-color: var(--error);
+}
+
+.run-chip--busy {
+  border-left-color: var(--accent);
+}
+
+.run-chip__label {
+  color: var(--text-secondary);
+}
+
+.run-chip__value {
+  color: var(--text-primary);
+}
+
+.run-card__facts-error {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-sm);
+  margin: 0;
+  font-size: var(--size-small);
+  color: var(--error);
+}
+
+/* ----- Poster figures ----- */
+
+.run-poster {
+  display: block;
+  max-width: 100%;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-form);
+  /* The frozen preset renders on white; a dark theme must not tint a published figure. */
+  background: #ffffff;
+}
+
+.run-poster--thumb {
+  width: 100%;
+  height: auto;
+  aspect-ratio: 10.6 / 3.4;
+  object-fit: contain;
+}
+
+.run-poster--full {
+  width: 100%;
+  height: auto;
+}
+
+.run-poster--empty {
+  display: grid;
+  place-items: center;
+  min-height: 4rem;
+  margin: 0;
+  padding: var(--space-sm);
+  background: var(--bg-tertiary);
+  color: var(--text-secondary);
+  font-size: var(--size-small);
+  text-align: center;
+}
+
+.run-poster-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-md);
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+/* ----- Memo editor ----- */
+
+.run-memo {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2xs);
+}
+
+.run-memo__field {
+  /* A textarea is not a one-line control, so the shared 30px height does not apply. */
+  min-height: 6rem;
+  padding: var(--space-sm);
+  line-height: 1.6;
+  resize: vertical;
+}
+
+.run-memo__footer {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-sm);
+}
+
+.run-memo__status {
+  flex: 1 1 auto;
+  font-size: var(--size-small);
+}
+
+.run-memo__status--info {
+  color: var(--text-secondary);
+}
+
+.run-memo__status--warning {
+  color: var(--warning);
+}
+
+.run-memo__status--error {
+  color: var(--error);
+}
+
+/* ----- Tag editor ----- */
+
+.run-tags {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-sm);
+}
+
+.run-tags__item {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-3xs);
+}
+
+.run-tags__remove {
+  min-height: auto;
+  padding: 0 var(--space-2xs);
+}
+
+.run-tags__add {
+  display: flex;
+  align-items: flex-end;
+  gap: var(--space-sm);
+}
+
+/* ----- Detail screen ----- */
+
+.run-detail__back {
+  margin: 0;
+  font-size: var(--size-small);
+}
+
+.run-detail__back a {
+  color: var(--accent);
+}
+
+.run-detail__hash {
+  font-family: var(--font-mono);
+  font-size: var(--size-small);
+  overflow-wrap: anywhere;
+}
+
+.run-detail__revision-pick {
+  display: inline-flex;
+  align-items: center;
+}
+
+/* ----- Snapshot replay ----- */
+
+.run-replay {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-sm);
+}
+
+.run-replay__toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-sm);
+}
+
+/*
+ * The replayed graph lives inside a scrolling document rather than inside the
+ * analyzer's viewport-filling grid, so it needs an explicit height: `.plot-frame`
+ * is `flex: 1 1 auto` and would collapse to its 260px minimum here. 22rem is
+ * roughly the desktop export's 10.6 x 3.4 proportion at a readable width.
+ */
+.run-replay__plot {
+  display: flex;
+  height: 22rem;
+  min-height: 0;
+}
