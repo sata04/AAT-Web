@@ -1,0 +1,48 @@
+# Gitleaks configuration for AAT Web.
+#
+# The default rule set, plus the narrowest possible allowlist for values that are
+# synthetic by construction.
+#
+# ## The rule for adding an entry here
+#
+# Allowlist the VALUE, never the path.
+#
+# `paths` is not a narrowing filter, whatever `condition = "AND"` suggests:
+# gitleaks applies it before reading the file, so any allowlist naming a path
+# skips that file entirely and every rule with it. Verified against 8.30.1 —
+# `-l debug` prints `skipping file: global allowlist` and reports the file's
+# bytes as unscanned. A `paths` entry added to silence one synthetic constant
+# would therefore also silence a real credential pasted into the same file
+# later, which is the failure this configuration exists to avoid.
+#
+# Naming the exact literal instead has neither problem. The value is synthetic
+# and known; a real credential is a different string and is still reported,
+# wherever it appears. Never allowlist a *shape* (`inv_<32 hex>`) — that would
+# cover every future token of that kind, including one copied from a running
+# system.
+#
+# `scripts/scanner-canary.mjs` runs against the *default* rules rather than this
+# file, so an allowlist that grew too broad cannot also silence the check that
+# would have noticed.
+
+title = "AAT Web"
+
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = """
+The invitation-token literal in the DOM test for the registration screen.
+
+The test asserts that the token is scrubbed from the URL before the screen
+renders, so it needs a token-shaped string in the URL to scrub. Its 32 hex
+characters read as a generic API key to the entropy rule.
+
+Real invitation tokens are single-use, hashed at rest, and only meaningful
+against a deployment that has never existed.
+
+Introduced by the V1 completion branch; the literal is matched exactly, so this
+entry stops applying the moment the fixture changes.
+"""
+regexTarget = "match"
+regexes = ['''inv_5f9c1c0a8e2b4d7fa1c3e6b0d4728915''']

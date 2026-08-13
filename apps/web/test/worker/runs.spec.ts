@@ -245,14 +245,25 @@ describe('original CSV backup', () => {
     expect(after.quota.bytesUsed).toBe(0)
   })
 
-  it('is not downloadable by another user', async () => {
+  it('is downloadable by a colleague, but not replaceable or deletable by one', async () => {
     const owner = await createUser()
-    const stranger = await createUser()
+    const colleague = await createUser()
     const runId = await createRun(owner)
     await upload(owner.cookie, runId, true)
 
-    const response = await apiFetch(`/api/v1/runs/${runId}/source`, { cookie: stranger.cookie })
-    expect(response.status).toBe(404)
+    // The shared-workspace policy: re-analysing a colleague's raw measurement is the point.
+    const download = await apiFetch(`/api/v1/runs/${runId}/source`, { cookie: colleague.cookie })
+    expect(download.status).toBe(200)
+    expect(await download.text()).toBe(CSV)
+
+    // Attaching raw bytes to somebody else's experiment, or removing theirs, is not.
+    expect((await upload(colleague.cookie, runId, true)).status).toBe(404)
+    const removed = await apiFetch(`/api/v1/runs/${runId}/source`, {
+      method: 'DELETE',
+      cookie: colleague.cookie,
+    })
+    expect(removed.status).toBe(404)
+    expect((await apiFetch(`/api/v1/runs/${runId}/source`, { cookie: owner.cookie })).status).toBe(200)
   })
 
   it('refuses a Viewer, who has no raw:upload capability', async () => {
@@ -262,5 +273,63 @@ describe('original CSV backup', () => {
 
     const response = await upload(viewer.cookie, runId, true)
     expect(response.status).toBe(403)
+  })
+})
+
+/*
+ * Deleting a run has to mean the same thing whichever id you hold.
+ *
+ * A run is deleted by stamping `deleted_at` on the run row; nothing propagates that down to the
+ * revisions hanging off it, and a revision carries its own `owner_user_id`. So an ownership check
+ * that reads only the revision row still passes for a revision whose run is gone — and the
+ * revision stays addressable by id long after the user asked for the run to be deleted.
+ *
+ * These are the doors that reach a revision without going through the run.
+ */
+describe('a deleted run takes its revisions with it', () => {
+  async function deletedRunWithRevision() {
+    const user = await createUser()
+    const runId = await createRun(user)
+    const revisionId = await createRevision(user, runId)
+
+    const deleted = await apiFetch(`/api/v1/runs/${runId}`, { method: 'DELETE', cookie: user.cookie })
+    expect(deleted.status).toBe(200)
+
+    return { user, runId, revisionId }
+  }
+
+  it('stops answering for the revision itself', async () => {
+    const { user, revisionId } = await deletedRunWithRevision()
+
+    const response = await apiFetch(`/api/v1/revisions/${revisionId}`, { cookie: user.cookie })
+    expect(response.status).toBe(404)
+  })
+
+  it('stops answering for the revision’s posters', async () => {
+    const { user, revisionId } = await deletedRunWithRevision()
+
+    const response = await apiFetch(`/api/v1/revisions/${revisionId}/posters`, { cookie: user.cookie })
+    expect(response.status).toBe(404)
+  })
+
+  it('refuses a snapshot upload against it', async () => {
+    const { user, revisionId } = await deletedRunWithRevision()
+
+    const response = await apiFetch(
+      `/api/v1/revisions/${revisionId}/snapshot?declaredBytes=8&sha256=${'c'.repeat(64)}&format=json.gz`,
+      { method: 'PUT', cookie: user.cookie, body: new Uint8Array(8) },
+    )
+    expect(response.status).toBe(404)
+  })
+
+  it('still refuses it to a colleague who could otherwise have read it', async () => {
+    const { revisionId } = await deletedRunWithRevision()
+    const colleague = await createUser()
+
+    // Same answer as for the owner, and this is the sharper version of that assertion under the
+    // shared-workspace policy: this caller holds workspace:read and *would* have been served this
+    // revision a moment ago. Deletion has to close the door for everyone, not only for strangers.
+    const response = await apiFetch(`/api/v1/revisions/${revisionId}`, { cookie: colleague.cookie })
+    expect(response.status).toBe(404)
   })
 })

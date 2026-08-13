@@ -6,10 +6,18 @@
  * visible in one table (@aat/shared's `ROLE_CAPABILITIES`) rather than distributed across
  * handlers.
  *
- * What administration deliberately does NOT include: reading another researcher's measurements.
+ * What administration deliberately does NOT include: serving another researcher's measurements.
  * These endpoints expose *metadata* — who exists, how much they store, what they did — and never
- * snapshot or poster bytes. Running the deployment and reading the data in it are different
- * powers, and only the first has been granted.
+ * snapshot or poster bytes.
+ *
+ * That survived the shared-workspace policy of 2026-08-13, which did grant administrators (and
+ * researchers) read access to every member's data. The grant is `workspace:read` and it is spent on
+ * the ordinary member routes — `GET /runs/:id`, `GET /revisions/:id/snapshot`, `GET
+ * /posters/:id/image` — where each read is resolved by one middleware, attributed to an actor and
+ * written to the audit log with the owner it touched. A second way in through `/admin` would be a
+ * second authorization path to keep correct and a read that the owner's audit trail never sees, so
+ * the widened read deliberately does not have one. Running the deployment and reading the data in
+ * it remain different powers; they are simply both granted now, through different doors.
  */
 
 import { ApiError, ROLES } from '@aat/shared'
@@ -27,6 +35,7 @@ import {
   quotaUsage,
   registrationInvites,
   runs,
+  session as sessionTable,
   user as userTable,
 } from '../db/schema.ts'
 import type { AppEnv } from '../middleware/authorize.ts'
@@ -112,6 +121,29 @@ adminRoutes.patch(
       patch.banReason = body.banned ? (body.banReason ?? null) : null
     }
     await db.update(userTable).set(patch).where(eq(userTable.id, targetId))
+
+    /*
+     * Banning ends the account's live sessions, here and now.
+     *
+     * `requireSession` refuses a banned user on every request, so this is the second of two
+     * independent guards rather than the only one — but it is the one that makes the refusal
+     * unconditional. The middleware check depends on the ban being readable from `session.user`;
+     * deleting the rows depends on nothing, and it is also what makes "disabled" mean the same
+     * thing to Better Auth's own endpoints as it does to this API.
+     *
+     * Only on ban. Unbanning must not sign anybody in.
+     */
+    if (body.banned === true) {
+      await db.delete(sessionTable).where(eq(sessionTable.userId, targetId))
+      await writeAuditLog(db, {
+        actorUserId: actor.userId,
+        action: 'session.revoke_all',
+        targetType: 'user',
+        targetId,
+        details: { reason: 'ban' },
+        headers: context.req.raw.headers,
+      })
+    }
 
     if (body.role !== undefined) {
       await writeAuditLog(db, {
@@ -271,6 +303,29 @@ adminRoutes.post(
         .where(eq(userTable.id, body.targetUserId))
         .limit(1)
       if (!target) throw new ApiError('RECOVERY_INVALID', { details: { reason: 'unknown_user' } })
+
+      /*
+       * Recovery revokes the account's existing sessions.
+       *
+       * docs/auth-security.md says so, and until now nothing did it. The reasoning in that document
+       * is the reason this matters: recovery exists for an account whose credential is gone or is
+       * in the wrong hands, and recovering an account whose old sessions are still live has
+       * recovered nothing — whoever holds the stolen cookie keeps their access alongside the
+       * legitimate owner's new passkey.
+       *
+       * Done when the invitation is issued rather than when it is redeemed, because the window that
+       * matters starts the moment an administrator decides the account is compromised, not whenever
+       * the user gets round to registering a new device.
+       */
+      await db.delete(sessionTable).where(eq(sessionTable.userId, body.targetUserId))
+      await writeAuditLog(db, {
+        actorUserId: actor.userId,
+        action: 'session.revoke_all',
+        targetType: 'user',
+        targetId: body.targetUserId,
+        details: { reason: 'recovery' },
+        headers: context.req.raw.headers,
+      })
     }
 
     const invitation = await createInvitation(
@@ -509,6 +564,13 @@ adminRoutes.put(
 const auditQuerySchema = paginationSchema.extend({
   action: z.string().max(64).optional(),
   actorUserId: z.string().max(64).optional(),
+  /** "Everything anyone did to this member's data" — the question the workspace policy created. */
+  targetOwnerUserId: z.string().max(64).optional(),
+  /** Only entries where the actor was not the owner. */
+  crossUserOnly: z
+    .enum(['true', 'false'])
+    .transform((value) => value === 'true')
+    .optional(),
 })
 
 adminRoutes.get(
@@ -524,6 +586,15 @@ adminRoutes.get(
     if (query.cursor) conditions.push(lt(auditLogs.id, query.cursor))
     if (query.action) conditions.push(eq(auditLogs.action, query.action))
     if (query.actorUserId) conditions.push(eq(auditLogs.actorUserId, query.actorUserId))
+    if (query.targetOwnerUserId) {
+      conditions.push(eq(auditLogs.targetOwnerUserId, query.targetOwnerUserId))
+    }
+    if (query.crossUserOnly) {
+      // An entry with no owner is not cross-user; it is an action with no owned target at all.
+      conditions.push(
+        sql`${auditLogs.targetOwnerUserId} IS NOT NULL AND ${auditLogs.targetOwnerUserId} IS NOT ${auditLogs.actorUserId}`,
+      )
+    }
 
     const rows = await db
       .select()
@@ -540,6 +611,7 @@ adminRoutes.get(
         action: row.action,
         targetType: row.targetType,
         targetId: row.targetId,
+        targetOwnerUserId: row.targetOwnerUserId,
         ipAddress: row.ipAddress,
         details: row.details ? (JSON.parse(row.details) as unknown) : null,
         createdAt: row.createdAt.toISOString(),

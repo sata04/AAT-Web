@@ -49,14 +49,21 @@ read statistics, compare datasets and export Excel. See
 pnpm install                  # frozen lockfile in CI
 pnpm lint                     # biome
 pnpm typecheck
-pnpm test                     # all packages; apps/web runs Node + workerd suites
+pnpm test                     # scripts/*.test.mjs, then all packages
 pnpm build
-pnpm --filter @aat/web exec wrangler deploy --dry-run --outdir dist/worker-bundle
+pnpm check:bundle             # wrangler dry run + the Worker size gate
 
 ./poster-renderer/.venv/bin/python -m pytest poster-renderer/tests -q
 python reference/python/generate_golden.py --check      # goldens must be current
 node scripts/check-commit-identity.mjs --all            # identity audit
+node scripts/detect-changes.mjs --base main --head HEAD # which CI jobs this needs
 ```
+
+CI is three workflows — validation, security scanning, and a manual deploy —
+and which jobs a change runs is decided by `scripts/detect-changes.mjs`, whose
+rules are unit-tested rather than written in YAML. See `docs/ci.md` and
+`docs/security-scanning.md`. A path no rule matches runs everything; that is the
+intended failure direction, not a bug to tune away.
 
 ## Compatibility contracts — do not casually change
 

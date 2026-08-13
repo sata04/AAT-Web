@@ -79,10 +79,13 @@ textarea {
   margin-right: var(--space-sm);
 }
 
+/* An anchor, because it is the way back to the analyzer from every screen. */
 .command-bar__title {
   font-size: var(--size-header);
   font-weight: var(--weight-bold);
   letter-spacing: 0.01em;
+  color: inherit;
+  text-decoration: none;
 }
 
 .command-bar__version {
@@ -99,6 +102,55 @@ textarea {
 
 .command-bar__spacer {
   flex: 1 1 auto;
+}
+
+/* The signed-in user's name. Never an email address — see worker/auth/identity.ts. */
+.command-bar__identity {
+  font-size: var(--size-small);
+  color: var(--text-secondary);
+  white-space: nowrap;
+}
+
+/*
+ * Screen navigation.
+ *
+ * Anchors, not buttons: they have to be openable in a new tab and announced as
+ * links. The active item is marked with `aria-current="page"` and styled from
+ * that attribute, so the accent is carrying the same information the
+ * accessibility tree already has rather than a second, silent copy of it.
+ */
+.app-nav {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3xs);
+}
+
+.app-nav__link {
+  display: inline-flex;
+  align-items: center;
+  min-height: var(--control-height);
+  padding: 0 var(--space-sm);
+  color: var(--text-secondary);
+  text-decoration: none;
+  border: 1px solid transparent;
+  border-radius: var(--radius-form);
+  white-space: nowrap;
+  transition:
+    background var(--transition),
+    color var(--transition),
+    border-color var(--transition);
+}
+
+.app-nav__link:hover {
+  background: var(--bg-tertiary);
+  color: var(--text-primary);
+}
+
+/* Accent marks state, never decoration — this is the only "current" treatment. */
+.app-nav__link[aria-current="page"] {
+  background: var(--bg-selected);
+  border-color: var(--accent);
+  color: var(--accent);
 }
 
 .workspace {
@@ -144,6 +196,56 @@ textarea {
   }
 }
 
+/*
+ * ===== Screens =====
+ *
+ * The analyzer fills the viewport and never scrolls the page; every other screen
+ * is a document. This is the second shape: one scrolling column, capped so lines
+ * of Japanese prose stay readable on a wide display.
+ */
+
+.screen {
+  min-height: 0;
+  overflow-y: auto;
+  padding: var(--space-xl) var(--space-md);
+}
+
+.screen--centred {
+  display: grid;
+  place-items: center;
+}
+
+.screen__inner {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-lg);
+  width: min(60rem, 100%);
+  margin: 0 auto;
+}
+
+.screen__inner--narrow {
+  width: min(32rem, 100%);
+}
+
+.screen__header {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2xs);
+}
+
+.screen__title {
+  margin: 0;
+  font-size: var(--size-header);
+  font-weight: var(--weight-bold);
+}
+
+.screen__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-sm);
+  margin-top: var(--space-md);
+}
+
 /* ===== Controls ===== */
 
 .button {
@@ -158,6 +260,8 @@ textarea {
   border: 1px solid var(--border-strong);
   border-radius: var(--radius-form);
   cursor: pointer;
+  /* So the class works on an anchor as well as a button. */
+  text-decoration: none;
   transition:
     background var(--transition),
     border-color var(--transition);
@@ -274,6 +378,19 @@ textarea {
   padding: var(--space-md);
 }
 
+/*
+ * A panel that stands alone rather than stacking inside the side panel.
+ *
+ * The side panel's dividers come from each panel's bottom border; a panel on a
+ * screen of its own has nothing above or below it, so it closes its own outline.
+ * Still a hairline — the only shadow in this application is `.dialog`.
+ */
+.panel--framed {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-panel);
+  background: var(--bg-secondary);
+}
+
 .panel__header {
   display: flex;
   align-items: baseline;
@@ -290,6 +407,18 @@ textarea {
 .panel__hint {
   font-size: var(--size-small);
   color: var(--text-secondary);
+}
+
+/*
+ * Inline links inside prose.
+ *
+ * Interactivity is state, and the accent is what marks state here. Without this
+ * rule the browser's own link colour applies, which would be the only colour on
+ * screen that is not one of the borrowed desktop tokens.
+ */
+.panel__hint a,
+.notice__body a {
+  color: var(--accent);
 }
 
 .data-table {
@@ -436,9 +565,16 @@ textarea {
   border-left-color: var(--accent);
 }
 
+/*
+ * `pre-line` because notices are written as a statement and its remedy, split by
+ * a newline — an export that was too large for a worksheet, a passkey ceremony
+ * that failed and what to do about it. Collapsing that into one run of text is
+ * how the actionable half stops being read.
+ */
 .notice__body {
   flex: 1 1 auto;
   min-width: 0;
+  white-space: pre-line;
 }
 
 /* ===== Graph ===== */
@@ -462,10 +598,24 @@ textarea {
   color: var(--text-secondary);
 }
 
+/*
+ * The range-selection layer, above uPlot rather than beside it.
+ *
+ * `z-index` is load-bearing, not decoration. The overlay is rendered before the chart, and uPlot
+ * appends its own root when it builds — so in DOM order `.u-over` comes last. With neither element
+ * carrying a z-index, painting order decides, `elementFromPoint` returns `.u-over`, and the pointer
+ * never reaches this layer no matter how correctly its handlers are bound. Dragging a range on the
+ * graph did nothing at all until this line existed; the numeric inputs above the chart kept
+ * working, which is exactly why it was easy to miss.
+ *
+ * `pointer-events` is set inline by the component (auto only while selection is enabled), so it is
+ * deliberately not declared here — two sources for one property is how the next person spends an
+ * afternoon.
+ */
 .selection-overlay {
   position: absolute;
   inset: 0;
-  pointer-events: none;
+  z-index: 1;
 }
 
 .selection-overlay__band {
@@ -618,4 +768,738 @@ textarea {
   overflow: hidden;
   clip-path: inset(50%);
   white-space: nowrap;
+}
+
+/*
+ * =============================================================================
+ * Run Gallery and Run detail
+ *
+ * Appended as one delimited block so the chrome above stays a single reviewable
+ * unit. Same rules as the rest of this file: hairlines rather than shadows,
+ * accent only where it marks state, and no colour that is not repeating
+ * something the text already says — every status chip below carries its own
+ * word, so the border tint is a second copy and never the only copy.
+ *
+ * The gallery is a grid of wide cards rather than a table because a run is not
+ * one row of numbers: it is a picture, an identity, a note and two sensors'
+ * statistics, and a table of that is a table with a thumbnail column in it.
+ * =============================================================================
+ */
+
+/* ----- Gallery: filters ----- */
+
+/*
+ * `<search>` is a landmark element rather than a layout one, and a browser that
+ * does not know it renders it inline — which would collapse the panel's padding
+ * and border. One declaration makes the fallback behave like the block it is.
+ */
+.run-filter {
+  display: block;
+}
+
+.run-filter__fields {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(13rem, 1fr));
+  gap: var(--space-md);
+}
+
+/* ----- Gallery: the card grid ----- */
+
+.run-grid {
+  display: grid;
+  /* One column until there is room for two full cards; a squeezed card loses the
+     metrics table before it loses anything worth losing. */
+  grid-template-columns: repeat(auto-fill, minmax(28rem, 1fr));
+  gap: var(--space-md);
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.run-card {
+  min-width: 0;
+}
+
+.run-card__inner {
+  display: grid;
+  grid-template-columns: minmax(0, 12rem) minmax(0, 1fr);
+  gap: var(--space-md);
+  height: 100%;
+  padding: var(--space-md);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-panel);
+  background: var(--bg-secondary);
+}
+
+@media (max-width: 640px) {
+  .run-card__inner {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+.run-card__figure {
+  min-width: 0;
+}
+
+.run-card__body {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-xs);
+  min-width: 0;
+}
+
+.run-card__head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: var(--space-sm);
+}
+
+.run-card__code {
+  margin: 0;
+  font-family: var(--font-mono);
+  font-size: var(--size-header);
+  font-weight: var(--weight-bold);
+}
+
+.run-card__code a {
+  color: inherit;
+  text-decoration: none;
+}
+
+.run-card__code a:hover {
+  color: var(--accent);
+  text-decoration: underline;
+}
+
+.run-card__date {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  color: var(--text-secondary);
+}
+
+.run-card__filename {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: var(--space-xs);
+  margin: 0;
+  font-size: var(--size-small);
+  color: var(--text-secondary);
+}
+
+/* A filename is not prose: break it anywhere rather than letting it widen the card. */
+.run-card__filename-name {
+  min-width: 0;
+  font-family: var(--font-mono);
+  overflow-wrap: anywhere;
+}
+
+.run-card__flag {
+  padding: 0 var(--space-2xs);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-pill);
+  font-size: var(--size-small);
+  white-space: nowrap;
+}
+
+.run-card__memo {
+  margin: 0;
+  /* Plain text, wrapped as written. Never markup — see src/runs/memo.ts. */
+  overflow-wrap: anywhere;
+}
+
+.run-card__tags,
+.run-tags__list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2xs);
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.run-tag {
+  display: inline-block;
+  max-width: 16rem;
+  padding: 0 var(--space-xs);
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-pill);
+  font-size: var(--size-small);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.run-card__metrics td,
+.run-card__metrics th {
+  padding: var(--space-3xs) var(--space-xs);
+}
+
+.run-card__gquality {
+  margin: 0;
+}
+
+/* ----- Status chips ----- */
+
+.run-card__status {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2xs);
+  list-style: none;
+  margin: var(--space-2xs) 0 0;
+  padding: 0;
+}
+
+.run-chip {
+  display: inline-flex;
+  align-items: baseline;
+  gap: var(--space-2xs);
+  padding: var(--space-3xs) var(--space-xs);
+  border: 1px solid var(--border);
+  /* The tinted edge is the second copy; the words inside are the first. */
+  border-left-width: 3px;
+  border-left-color: var(--text-disabled);
+  border-radius: var(--radius-form);
+  background: var(--bg-primary);
+  font-size: var(--size-small);
+}
+
+.run-chip--good {
+  border-left-color: var(--success);
+}
+
+.run-chip--bad {
+  border-left-color: var(--error);
+}
+
+.run-chip--busy {
+  border-left-color: var(--accent);
+}
+
+.run-chip__label {
+  color: var(--text-secondary);
+}
+
+.run-chip__value {
+  color: var(--text-primary);
+}
+
+.run-card__facts-error {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-sm);
+  margin: 0;
+  font-size: var(--size-small);
+  color: var(--error);
+}
+
+/* ----- Poster figures ----- */
+
+.run-poster {
+  display: block;
+  max-width: 100%;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-form);
+  /* The frozen preset renders on white; a dark theme must not tint a published figure. */
+  background: #ffffff;
+}
+
+.run-poster--thumb {
+  width: 100%;
+  height: auto;
+  aspect-ratio: 10.6 / 3.4;
+  object-fit: contain;
+}
+
+.run-poster--full {
+  width: 100%;
+  height: auto;
+}
+
+.run-poster--empty {
+  display: grid;
+  place-items: center;
+  min-height: 4rem;
+  margin: 0;
+  padding: var(--space-sm);
+  background: var(--bg-tertiary);
+  color: var(--text-secondary);
+  font-size: var(--size-small);
+  text-align: center;
+}
+
+.run-poster-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-md);
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+/* ----- Memo editor ----- */
+
+.run-memo {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2xs);
+}
+
+.run-memo__field {
+  /* A textarea is not a one-line control, so the shared 30px height does not apply. */
+  min-height: 6rem;
+  padding: var(--space-sm);
+  line-height: 1.6;
+  resize: vertical;
+}
+
+.run-memo__footer {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-sm);
+}
+
+.run-memo__status {
+  flex: 1 1 auto;
+  font-size: var(--size-small);
+}
+
+.run-memo__status--info {
+  color: var(--text-secondary);
+}
+
+.run-memo__status--warning {
+  color: var(--warning);
+}
+
+.run-memo__status--error {
+  color: var(--error);
+}
+
+/* ----- Tag editor ----- */
+
+.run-tags {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-sm);
+}
+
+.run-tags__item {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-3xs);
+}
+
+.run-tags__remove {
+  min-height: auto;
+  padding: 0 var(--space-2xs);
+}
+
+.run-tags__add {
+  display: flex;
+  align-items: flex-end;
+  gap: var(--space-sm);
+}
+
+/* ----- Detail screen ----- */
+
+.run-detail__back {
+  margin: 0;
+  font-size: var(--size-small);
+}
+
+.run-detail__back a {
+  color: var(--accent);
+}
+
+.run-detail__hash {
+  font-family: var(--font-mono);
+  font-size: var(--size-small);
+  overflow-wrap: anywhere;
+}
+
+.run-detail__revision-pick {
+  display: inline-flex;
+  align-items: center;
+}
+
+/* ----- Snapshot replay ----- */
+
+.run-replay {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-sm);
+}
+
+.run-replay__toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-sm);
+}
+
+/*
+ * The replayed graph lives inside a scrolling document rather than inside the
+ * analyzer's viewport-filling grid, so it needs an explicit height: `.plot-frame`
+ * is `flex: 1 1 auto` and would collapse to its 260px minimum here. 22rem is
+ * roughly the desktop export's 10.6 x 3.4 proportion at a readable width.
+ */
+.run-replay__plot {
+  display: flex;
+  height: 22rem;
+  min-height: 0;
+}
+
+/* --- Run Gallery: scope selection and owner attribution ------------------------------------ */
+
+/*
+ * The scope control sits above the filters because it decides which route is asked; the filters
+ * only narrow whatever that route returned. Laid out as a row of options rather than a dropdown so
+ * both choices, and which one is current, are visible without opening anything.
+ */
+.run-scope {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-4);
+  align-items: flex-start;
+}
+
+.run-scope > legend {
+  padding-inline: var(--space-2);
+  color: var(--text-muted);
+  font-size: var(--font-size-sm);
+}
+
+.run-scope__option {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 0 var(--space-2);
+  align-items: baseline;
+  cursor: pointer;
+}
+
+.run-scope__option > .panel__hint {
+  grid-column: 2;
+}
+
+.run-scope__label {
+  color: var(--text-primary);
+}
+
+/*
+ * Whose run this is, in the team listing only. Given the same weight as the other metadata rather
+ * than a badge treatment: the owner is a fact about the run, not a status, and colouring it would
+ * imply a state the reader has to act on.
+ */
+.run-card__owner {
+  color: var(--text-muted);
+  font-size: var(--font-size-sm);
+}
+
+/* =============================================================================================
+ * Admin console
+ *
+ * Appended as one delimited block so this screen's styles can be read — and removed — as a unit.
+ * Everything below is structure plus the existing tokens: no new colour is introduced, and no rule
+ * here is the only carrier of a status. Every state this section tints is also stated in words in
+ * the markup (有効 / 停止, 稼働中 / 停止中, 余裕あり / 上限間近), because a colour is not a fact a
+ * monochrome screen, a printed report or a screen reader can recover.
+ * ========================================================================================== */
+
+/* ----- The console's own navigation, matching .app-nav's mechanism exactly ----- */
+
+.admin-nav {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2xs);
+  padding-bottom: var(--space-sm);
+  border-bottom: 1px solid var(--border);
+}
+
+.admin-nav__link {
+  padding: var(--space-2xs) var(--space-sm);
+  border: 1px solid transparent;
+  border-radius: var(--radius-form);
+  color: var(--text-secondary);
+  font-size: var(--size-body);
+  text-decoration: none;
+}
+
+.admin-nav__link:hover {
+  background: var(--bg-tertiary);
+  color: var(--text-primary);
+}
+
+.admin-nav__link[aria-current="page"] {
+  border-color: var(--border-strong);
+  background: var(--bg-selected);
+  color: var(--text-primary);
+  font-weight: var(--weight-medium);
+}
+
+/* ----- Facts: a definition list used as a two-column table of stated values ----- */
+
+.admin-facts {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-sm);
+  margin: 0;
+}
+
+/*
+ * The grid variant is for short scalar facts. `auto-fit` with a wide-ish minimum keeps a narrow
+ * window at one column rather than squeezing a label and a byte count into 12em.
+ */
+.admin-facts--grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(19rem, 1fr));
+  gap: var(--space-md);
+}
+
+.admin-facts__row {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3xs);
+}
+
+.admin-facts__row dt {
+  color: var(--text-secondary);
+  font-size: var(--size-small);
+}
+
+.admin-facts__row dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+/* ----- Status words. The word is the signal; the colour only agrees with it. ----- */
+
+.admin-flag {
+  display: inline-block;
+  padding: 0 var(--space-2xs);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-pill);
+  font-size: var(--size-small);
+  white-space: nowrap;
+}
+
+.admin-flag--good {
+  border-color: var(--success);
+  color: var(--success);
+}
+
+.admin-flag--bad {
+  border-color: var(--error);
+  color: var(--error);
+}
+
+.admin-flag--warn {
+  border-color: var(--warning);
+  color: var(--warning);
+}
+
+.admin-flag--muted {
+  color: var(--text-secondary);
+}
+
+/* ----- The storage meter ----- */
+
+.admin-meter {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3xs);
+}
+
+/*
+ * A native <meter> carries the proportion semantically. Its default rendering differs between
+ * engines, which is acceptable here precisely because the number and the word beside it are what
+ * the reader is meant to use — the bar is the glance, not the answer.
+ */
+.admin-meter__bar {
+  width: 100%;
+  max-width: 22rem;
+  height: 0.75rem;
+}
+
+.admin-meter__text {
+  font-size: var(--size-small);
+}
+
+.admin-meter__detail {
+  color: var(--text-secondary);
+  font-size: var(--size-small);
+}
+
+.admin-meter--critical .admin-meter__text,
+.admin-meter--over .admin-meter__text {
+  color: var(--error);
+}
+
+.admin-meter--warning .admin-meter__text {
+  color: var(--warning);
+}
+
+/* ----- Tables and lists ----- */
+
+.admin-users__name {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3xs);
+  text-align: left;
+}
+
+.admin-consumers,
+.admin-passkeys,
+.admin-lookup {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-md);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.admin-consumers__item {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3xs);
+}
+
+.admin-consumers__name {
+  font-weight: var(--weight-medium);
+}
+
+.admin-passkeys__item,
+.admin-lookup__head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: var(--space-sm);
+}
+
+.admin-lookup__item {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-sm);
+  padding-bottom: var(--space-sm);
+  border-bottom: 1px solid var(--border);
+}
+
+/* ----- The per-account action panel ----- */
+
+.admin-actions {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(20rem, 1fr));
+  gap: var(--space-lg);
+  margin-top: var(--space-md);
+}
+
+.admin-actions__group {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-sm);
+  align-items: flex-start;
+  padding: var(--space-md);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-panel);
+}
+
+/*
+ * The destructive group is bordered in the error colour *and* headed 「アカウントの削除」 with a
+ * paragraph naming what is destroyed. The border is the last of the three signals, never the first.
+ */
+.admin-actions__group--danger {
+  border-color: var(--error);
+}
+
+.admin-actions__title {
+  margin: 0;
+  font-size: var(--size-subheader);
+  font-weight: var(--weight-bold);
+}
+
+.admin-actions__row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: var(--space-sm);
+}
+
+/* ----- Forms ----- */
+
+.admin-form {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-md);
+}
+
+.admin-form__fieldset {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-lg);
+  margin: 0;
+  padding: var(--space-sm) var(--space-md);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-panel);
+}
+
+.admin-form__choice {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3xs);
+  max-width: 26rem;
+}
+
+/* ----- The one-time registration URL ----- */
+
+.admin-secret__url {
+  width: 100%;
+  font-family: var(--font-mono);
+}
+
+/* ----- The audit log ----- */
+
+.admin-audit td {
+  vertical-align: top;
+}
+
+.admin-audit__details {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2xs);
+  margin: var(--space-2xs) 0 0;
+}
+
+.admin-audit__detail {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2xs);
+}
+
+.admin-audit__detail dt {
+  color: var(--text-secondary);
+  font-family: var(--font-mono);
+  font-size: var(--size-small);
+}
+
+/*
+ * Audit detail values are attacker-influenced text. `overflow-wrap: anywhere` keeps a long
+ * unbroken string inside its cell instead of stretching the table off the page, and the value is
+ * already length-capped by `src/admin/audit.ts` before it reaches here.
+ */
+.admin-audit__detail dd {
+  margin: 0;
+  font-family: var(--font-mono);
+  font-size: var(--size-small);
+  overflow-wrap: anywhere;
+}
+
+.admin-breaker {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-md);
 }

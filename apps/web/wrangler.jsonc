@@ -1,7 +1,36 @@
 {
   "$schema": "./node_modules/wrangler/config-schema.json",
-  "name": "aat-web",
+  /*
+   * The private API Worker.
+   *
+   * It has no route, no custom domain and no workers.dev subdomain. The only way
+   * in is the Service binding declared by the Pages project, which is what makes
+   * the public origin single: one hostname serves the SPA and answers /api/*, so
+   * the passkey ceremony, the session cookie and the browser's relative fetches
+   * all see the same origin. See functions/api/[[path]].ts.
+   *
+   * Named for what it is rather than for the product, because the Pages project
+   * is the thing users reach and two objects with one name in the Workers & Pages
+   * list is a trap to hit during an incident.
+   */
+  "name": "aat-api",
   "main": "worker/index.ts",
+
+  /*
+   * No public origin, stated in the file rather than clicked in the dashboard.
+   *
+   * The dashboard toggle does not survive: the next `wrangler deploy` re-opens
+   * the platform-assigned subdomain, which would be a second origin serving the
+   * same API — a second WebAuthn origin that no ceremony would validate against,
+   * and an unauthenticated-looking entry point straight to D1 and R2. The config
+   * key is the only durable control.
+   *
+   * preview_urls defaults to whatever workers_dev is, but it is written out so
+   * that turning workers_dev back on some day does not quietly restore preview
+   * origins as well.
+   */
+  "workers_dev": false,
+  "preview_urls": false,
 
   // workerd 1.20260730.x is what this repository pins; the compatibility date
   // must not be newer than the runtime that is actually installed.
@@ -37,13 +66,26 @@
    * index.html, which is what client-side routes such as /register?token=...
    * need.
    */
-  "assets": {
-    "directory": "./dist/client",
-    "binding": "ASSETS",
-    "html_handling": "auto-trailing-slash",
-    "not_found_handling": "single-page-application",
-    "run_worker_first": ["/api/*"]
-  },
+  // There is no "assets" block. Pages serves dist/client now, and each of the
+  // four things this block used to do has a new owner:
+  //
+  //   directory / html_handling  -> the Pages project's build output
+  //   not_found_handling: "single-page-application"
+  //                              -> implicit on Pages, and implicit is the word:
+  //                                 Pages serves the root document for unmatched
+  //                                 paths only while dist/client contains no
+  //                                 top-level 404.html. There is no config key
+  //                                 for it, so scripts/check-pages-output.mjs
+  //                                 asserts the file's absence after every build.
+  //   run_worker_first: ["/api/*"]
+  //                              -> public/_routes.json. That file is what keeps
+  //                                 the logged-out, offline-first path free of
+  //                                 Function invocations, which docs/web-architecture.md
+  //                                 treats as the governing principle. Note that
+  //                                 `wrangler pages dev` ignores _routes.json, so
+  //                                 the end-to-end suite cannot verify it; the
+  //                                 deploy asserts it instead.
+  //   binding: "ASSETS"          -> gone. Nothing in worker/ ever called it.
 
   /*
    * D1 holds the structured index only: users, runs, immutable analysis
@@ -107,10 +149,13 @@
    * pulling some other account's image.
    *
    * CI builds and tests the image in a credential-free job and pushes it from
-   * the deploy job (see .github/workflows/deploy.yml). Note that Wrangler does
-   * no environment-variable substitution inside this file: the digest the
-   * deploy step captures in POSTER_RENDERER_IMAGE cannot be injected here, so
-   * the tag below and the tag CI pushes have to be kept in step deliberately.
+   * the deploy job (see .github/workflows/deploy.yml). Wrangler does no
+   * environment-variable substitution inside this file, so the placeholder below
+   * is not filled in by the deploy step reading a variable — instead
+   * scripts/resolve-wrangler-config.mjs writes a deploy-time copy of this file
+   * with the pushed digest and the D1 id substituted, and every command that
+   * reads configuration is passed that copy with --config. This committed file
+   * stays invalid on purpose.
    */
   "durable_objects": {
     "bindings": [

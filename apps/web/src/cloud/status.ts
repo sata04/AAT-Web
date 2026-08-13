@@ -25,12 +25,21 @@ export type CloudSyncStatus =
   | { kind: 'saved'; revisionId: string; at: number }
   | { kind: 'failed'; message: string; retryable: boolean }
 
+/**
+ * The automatic poster's lane.
+ *
+ * `posterId` is optional throughout because the figure may not have one yet: the request that would
+ * have created it can be refused before a row exists (the renderer shedding load, a rate limit, an
+ * unreachable Worker). When it *is* present it is what makes a retry precise — a failed figure is
+ * re-attempted through `POST /posters/:posterId/retry`, which is conditional on the figure still
+ * being failed, rather than by asking for the automatic poster again.
+ */
 export type PosterStatus =
   | { kind: 'unavailable' }
-  | { kind: 'queued' }
-  | { kind: 'rendering' }
-  | { kind: 'ready'; url: string }
-  | { kind: 'failed'; message: string; retryable: boolean }
+  | { kind: 'queued'; posterId?: string }
+  | { kind: 'rendering'; posterId?: string }
+  | { kind: 'ready'; url: string; posterId?: string }
+  | { kind: 'failed'; message: string; retryable: boolean; posterId?: string }
 
 export interface CloudStatuses {
   analysis: AnalysisStatus

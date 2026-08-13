@@ -17,9 +17,11 @@
  *    that round-trips a `Date` through SQLite without a string encoding in the middle.
  *
  *  - **Every id is an opaque ULID.** Sequential integers leak how many users exist and how many
- *    runs a colleague has uploaded, and they make an IDOR probe a matter of counting. ULIDs are
- *    also lexicographically sortable by creation time, which is why several indexes below can lean
- *    on the id instead of carrying a separate ordering column.
+ *    runs a colleague has uploaded, and they make an IDOR probe a matter of counting. That still
+ *    matters under the shared-workspace policy: a Viewer reaches only their own rows, and an
+ *    anonymous caller reaches none, so an id space that can be walked is an oracle for both. ULIDs
+ *    are also lexicographically sortable by creation time, which is why several indexes below can
+ *    lean on the id instead of carrying a separate ordering column.
  *
  *  - **No time series.** Not one table stores a sample per row. Full-resolution series live in R2
  *    as snapshot objects; D1 stores the metadata needed to find, authorise and describe them.
@@ -120,12 +122,14 @@ export const account = sqliteTable(
 )
 
 /**
- * Better Auth's verification table, used here as the store for short-lived single-use values:
- * WebAuthn challenges and registration contexts.
+ * Better Auth's verification table, used as the store for short-lived single-use values — here,
+ * the WebAuthn challenges the passkey plugin issues.
  *
  * It is used rather than a bespoke table because `internalAdapter.consumeVerificationValue()`
  * deletes and returns a row atomically, which is exactly the "exactly one caller may spend this
- * challenge" property a replay-resistant ceremony needs.
+ * challenge" property a replay-resistant ceremony needs. The plugin names the row from a signed
+ * cookie, so a replayed ceremony finds nothing left to consume and is refused without this
+ * project having to implement its own compare-and-delete.
  */
 export const verification = sqliteTable(
   'verification',
@@ -146,15 +150,27 @@ export const verification = sqliteTable(
 /**
  * Registered passkeys (WebAuthn credentials).
  *
- * Column names mirror the shape Better Auth's own passkey plugin uses, so a future migration onto
- * that plugin — once it is a dependency this project can take — is a code change and not a data
- * migration. `publicKey` holds the COSE key exactly as the authenticator produced it, base64url
- * encoded; re-deriving a CryptoKey from it on each assertion is cheap and avoids committing to a
- * WebCrypto-specific import format on disk.
+ * This is the `@better-auth/passkey` plugin's own model, spelled in Drizzle. The plugin writes
+ * every row here through Better Auth's adapter, which resolves a field by indexing this exported
+ * table object with the field name from the plugin's schema — so `publicKey`, `credentialID`,
+ * `deviceType` and `backedUp` are not free-choice names, they are the plugin's. `publicKey` holds
+ * the COSE key exactly as the authenticator produced it, base64 encoded by the plugin;
+ * `transports` is the comma-joined list the plugin stores, not JSON.
  *
  * `counter` is the authenticator's signature counter. A counter that fails to advance on an
- * authenticator that uses them is the documented clone signal, and it is checked on every
- * assertion.
+ * authenticator that uses them is the documented clone signal, and `@simplewebauthn/server` checks
+ * it on every assertion.
+ *
+ * Two deliberate departures from the plugin's schema, both additive so the plugin never notices:
+ *
+ *  - **`credential_id` is UNIQUE**, where the plugin asks only for an index. One credential
+ *    belonging to two accounts is not a state this system should be able to reach, and the
+ *    registration seam refuses it with a clean error before the constraint ever fires. The index
+ *    is the backstop for the case the seam misses.
+ *  - **`last_used_at` exists and is nullable.** The plugin does not maintain it; AAT does, from
+ *    the authentication seam, because "which of my passkeys is stale?" is the question the
+ *    credential-management screen exists to answer. Nullable is what keeps it invisible to the
+ *    plugin: the adapter only ever writes fields the plugin's schema declares.
  */
 export const passkey = sqliteTable(
   'passkey',
@@ -171,7 +187,6 @@ export const passkey = sqliteTable(
     backedUp: integer('backed_up', { mode: 'boolean' }).notNull().default(false),
     transports: text('transports'),
     aaguid: text('aaguid'),
-    algorithm: integer('algorithm').notNull(),
     createdAt: integer('created_at', { mode: 'timestamp' }).notNull(),
     lastUsedAt: integer('last_used_at', { mode: 'timestamp' }),
   },
@@ -243,22 +258,25 @@ export const registrationInvites = sqliteTable(
 /* Research data                                                                                */
 /* ------------------------------------------------------------------------------------------- */
 
-/** A research grouping. A project owns runs; it is not itself an experiment. */
-export const projects = sqliteTable(
-  'projects',
-  {
-    id: text('id').primaryKey(),
-    ownerUserId: text('owner_user_id')
-      .notNull()
-      .references(() => user.id, { onDelete: 'cascade' }),
-    name: text('name').notNull(),
-    description: text('description'),
-    createdAt: integer('created_at', { mode: 'timestamp' }).notNull(),
-    updatedAt: integer('updated_at', { mode: 'timestamp' }).notNull(),
-    archivedAt: integer('archived_at', { mode: 'timestamp' }),
-  },
-  (table) => [index('projects_owner_idx').on(table.ownerUserId, table.createdAt)],
-)
+/*
+ * There is no `projects` table, and that is a decision rather than an omission.
+ *
+ * One existed until migration 0003. It was a second grouping mechanism beside `run_tags`, and it
+ * never finished being one: nothing could create a project except a hand-written HTTP request (no
+ * client ever built one), nothing could file a run into one from any screen, `archived_at` was read
+ * by the listing and written by nothing, and when this deployment became one research group's
+ * shared workspace the grouping did not follow — `GET /projects` listed the caller's own while the
+ * run PATCH demanded one belonging to the run's *owner*, so the field was unusable on precisely the
+ * colleague's run the shared-workspace policy exists to let you annotate.
+ *
+ * Tags are the grouping. They are free-form text on a run (`run_tags` below), any member may edit
+ * any member's, both listings filter by them in D1's WHERE clause, and there is an editor for them.
+ * "A campaign, a paper, a student's thesis" — the three things the projects entity was described
+ * as being for — are three tags. What a project could have expressed and a tag cannot is
+ * exclusivity (a run belongs to at most one), a description, and renaming the grouping in one
+ * place; none of those was asked for, and the first is a liability in a lab where one drop is
+ * analysed for both a paper and a thesis. See docs/cloud-data-model.md.
+ */
 
 /**
  * One physical experiment — one drop of the capsule.
@@ -278,7 +296,6 @@ export const runs = sqliteTable(
     ownerUserId: text('owner_user_id')
       .notNull()
       .references(() => user.id, { onDelete: 'cascade' }),
-    projectId: text('project_id').references(() => projects.id, { onDelete: 'set null' }),
     runCode: text('run_code').notNull(),
     /** ISO `yyyy-mm-dd`, or null when the filename did not follow the run-code convention. */
     experimentDate: text('experiment_date'),
@@ -295,7 +312,6 @@ export const runs = sqliteTable(
     // The gallery's default ordering: a user's runs, newest experiment first.
     index('runs_owner_experiment_date_idx').on(table.ownerUserId, table.experimentDate),
     index('runs_owner_created_at_idx').on(table.ownerUserId, table.createdAt),
-    index('runs_project_idx').on(table.projectId),
   ],
 )
 
@@ -439,6 +455,12 @@ export const posterFigures = sqliteTable(
     analysisRevisionId: text('analysis_revision_id')
       .notNull()
       .references(() => analysisRevisions.id, { onDelete: 'cascade' }),
+    /**
+     * The owner of the revision this figure draws — not the member who asked for the render. A
+     * figure belongs to the measurement, so that the auto-poster uniqueness constraint means the
+     * same thing whoever triggered it and so the PNG is reclaimed with the run. Who rendered it is
+     * recorded in `audit_logs`, which is where an actor belongs.
+     */
     ownerUserId: text('owner_user_id')
       .notNull()
       .references(() => user.id, { onDelete: 'cascade' }),
@@ -449,7 +471,11 @@ export const posterFigures = sqliteTable(
     /** SHA-256 of the canonical plot spec that was sent to the renderer. */
     specHash: text('spec_hash').notNull(),
     rendererVersion: text('renderer_version'),
-    /** 'pending' | 'rendering' | 'succeeded' | 'failed'. */
+    /**
+     * 'queued' | 'rendering' | 'ready' | 'failed' — the vocabulary in `@aat/plot-spec`'s
+     * `PosterFigureStatusSchema`, which is what `services/poster.ts` writes and what the client
+     * parses. One vocabulary spans browser, Worker and database on purpose.
+     */
     status: text('status').notNull(),
     objectId: text('object_id'),
     errorCode: text('error_code'),
@@ -475,7 +501,13 @@ export const posterFigures = sqliteTable(
 
 /**
  * The index of everything in R2. Nothing is written to the bucket without a row here first, and
- * nothing is read from the bucket without this row proving who owns it.
+ * nothing is read from the bucket without this row naming who owns it and the resolver in
+ * worker/middleware/authorize.ts deciding whether the caller reaches that owner.
+ *
+ * `ownerUserId` is the owner of the *run* the object belongs to, never the user who happened to
+ * create it. A poster a colleague rendered from your revision is stored, keyed, quota-charged and
+ * reclaimed as yours, because deleting the run has to reclaim every byte it caused — and it cannot
+ * do that coherently if the objects inside one run are charged to several accounts.
  *
  * `originalFilename` is metadata and *only* metadata: it is never a component of `r2Key`. An
  * attacker-supplied filename in an object key is a path-traversal and key-collision primitive, and
@@ -511,6 +543,10 @@ export const cloudObjects = sqliteTable(
 
 /**
  * Per-user storage accounting.
+ *
+ * "Per-user" means per *owner of the run*, not per uploader: an object is charged to whoever the
+ * run belongs to, so that deleting a run gives its bytes back to exactly the account they were
+ * taken from. See worker/services/quota.ts.
  *
  * `bytesReserved` is the in-flight column that makes the quota race-safe: an upload reserves
  * before it writes, so two simultaneous uploads that would each fit individually cannot both
@@ -557,6 +593,12 @@ export const quotaReservations = sqliteTable(
  *
  * `details` is JSON and is written by code that must never put a credential in it: invitation rows
  * are logged by id, never by token or token hash (see worker/services/audit.ts, which strips them).
+ *
+ * `targetOwnerUserId` is the member whose work was acted on, which since the workspace policy of
+ * 2026-08-13 is frequently *not* the actor: a researcher may read, and an administrator may delete,
+ * a colleague's run. "Who touched my measurements?" is the question that policy created, and it
+ * cannot be answered by filtering on `actorUserId`. It is a column rather than a key in `details`
+ * because it is indexed and queried, not merely displayed.
  */
 export const auditLogs = sqliteTable(
   'audit_logs',
@@ -566,6 +608,8 @@ export const auditLogs = sqliteTable(
     action: text('action').notNull(),
     targetType: text('target_type'),
     targetId: text('target_id'),
+    /** The owner of the thing acted on. Null when the action has no owned target. */
+    targetOwnerUserId: text('target_owner_user_id').references(() => user.id, { onDelete: 'set null' }),
     ipAddress: text('ip_address'),
     userAgent: text('user_agent'),
     details: text('details'),
@@ -575,6 +619,8 @@ export const auditLogs = sqliteTable(
     index('audit_logs_created_at_idx').on(table.createdAt),
     index('audit_logs_actor_idx').on(table.actorUserId, table.createdAt),
     index('audit_logs_action_idx').on(table.action, table.createdAt),
+    // "Everything anyone did to this member's data", which is the cross-user question.
+    index('audit_logs_target_owner_idx').on(table.targetOwnerUserId, table.createdAt),
   ],
 )
 

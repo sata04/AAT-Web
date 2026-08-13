@@ -14,3 +14,7 @@ playwright-report/
 .pytest_cache/
 htmlcov/
 .coverage
+
+# Generated at deploy time from Doppler: it carries the Pages project name,
+# which is the public hostname. See apps/web/scripts/resolve-pages-config.mjs.
+apps/web/pages/wrangler.jsonc

@@ -1,6 +1,23 @@
 /** Shared test fixtures for building valid/invalid poster plot spec inputs. */
 
+import { asFullResolutionSeries, type FullResolutionSeries } from '../src/source.ts'
 import { encodeSeries } from '../src/wire.ts'
+
+/**
+ * Build a branded full-resolution source series from plain arrays, `null` meaning a gap.
+ *
+ * Tests mint the brand exactly as the application does — through `asFullResolutionSeries` — rather
+ * than casting, so the builder's tests exercise the same door every caller has to use.
+ */
+export function fullResolutionSeries(
+  time: readonly number[],
+  values: readonly (number | null)[],
+): FullResolutionSeries {
+  return asFullResolutionSeries(
+    Float64Array.from(time),
+    Float64Array.from(values, (value) => (value === null ? Number.NaN : value)),
+  )
+}
 
 /** Build a wire-format series pair (time + values) from plain arrays, `null` meaning a gap. */
 export function buildSeriesData(time: readonly number[], values: readonly (number | null)[]) {
