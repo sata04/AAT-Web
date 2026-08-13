@@ -159,31 +159,28 @@ test.describe('authenticated research flow', () => {
   })
 
   /**
-   * KNOWN APPLICATION DEFECT — `test.fail()` says "this is expected to fail today".
+   * Regression: re-analysing a stored run used to report a failure for something that succeeded.
    *
-   * Opening the same CSV again — a new tab, a reload, tomorrow morning — always ends with the cloud
-   * lane reading 失敗 and offering a retry that can never succeed. The data is fine: `POST /runs`
-   * correctly reports `run_code_already_exists` and the revision is correctly reused rather than
-   * duplicated. What fails is the snapshot upload, with
+   * Opening the same CSV again — a new tab, a reload, tomorrow morning — used to end with the cloud
+   * lane reading 失敗 and offering a retry that could never succeed, even though the data was fine.
+   * `POST /runs` correctly reported `run_code_already_exists` and the revision was correctly reused;
+   * what failed was the snapshot upload, with
    * `SNAPSHOT_INVALID / revision_already_has_a_different_snapshot` (422).
    *
-   * The cause is that `src/cloud/sync.ts`'s `buildSnapshot` stamps
-   * `provenance.uploadedAt = new Date().toISOString()` into the document every time it is called, so
-   * two snapshots of the same analysis are never byte-identical. `PUT /revisions/:id/snapshot`
-   * answers a byte-identical re-upload idempotently — that path exists and is tested in
-   * `test/worker/revisions.spec.ts` — but the browser can never produce those bytes twice, so the
-   * only reachable branch is the refusal.
+   * The Worker accepts a byte-identical re-upload idempotently, but the browser could never produce
+   * those bytes twice: the snapshot records when the analysis ran, and a second analysis genuinely
+   * ran at a different time. So the only reachable branch was the refusal. `sync.ts` now skips the
+   * upload when the resolved revision already carries a snapshot, which is correct because a
+   * revision is immutable and identified by (source bytes, config) — there is nothing to update.
    *
-   * Second-analysis-of-a-run is a normal thing to do, and the researcher is shown a failure for
-   * something that in fact succeeded. Fixing it means changing `src/cloud/sync.ts` (or the route),
-   * which this suite deliberately does not do.
+   * This test is the reason the defect was found at all, so it stays as the guard against it
+   * returning.
    */
   test('re-analysing an already-stored run syncs again instead of reporting a failure', async ({
     page,
     harness,
     authenticator,
   }) => {
-    test.fail()
     void authenticator
 
     const { token } = await harness.createInvitation({

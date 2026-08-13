@@ -42,7 +42,15 @@ export interface SelectionOverlayProps {
 export function SelectionOverlay(props: SelectionOverlayProps): React.JSX.Element | null {
   const { geometry, selection, onSelectionChange, enabled } = props
   const [drag, setDrag] = useState<SelectionDrag | null>(null)
-  const layerRef = useRef<HTMLDivElement | null>(null)
+  /*
+   * The layer is held in state, not only in a ref, because the effect below has to bind its pointer
+   * listeners at the moment the element appears — and it does not appear on the first render. A ref
+   * assignment does not re-render, so an effect reading the ref would run once,
+   * find null, bail out, and never run again: the graph would silently have no pointer handlers.
+   * A callback ref that sets state gives the effect something that actually changes when the node
+   * arrives.
+   */
+  const [layer, setLayer] = useState<HTMLDivElement | null>(null)
 
   // Refs so the pointer handlers, which are attached once, always see current
   // values instead of the render they were created in.
@@ -55,16 +63,17 @@ export function SelectionOverlay(props: SelectionOverlayProps): React.JSX.Elemen
   const onChangeRef = useRef(onSelectionChange)
   onChangeRef.current = onSelectionChange
 
-  const valueAt = useCallback((clientX: number): number | null => {
-    const layer = layerRef.current
-    const currentGeometry = geometryRef.current
-    if (layer === null || currentGeometry === null) return null
-    const rect = layer.getBoundingClientRect()
-    return pixelToValue(currentGeometry, clientX - rect.left)
-  }, [])
+  const valueAt = useCallback(
+    (clientX: number): number | null => {
+      const currentGeometry = geometryRef.current
+      if (layer === null || currentGeometry === null) return null
+      const rect = layer.getBoundingClientRect()
+      return pixelToValue(currentGeometry, clientX - rect.left)
+    },
+    [layer],
+  )
 
   useEffect(() => {
-    const layer = layerRef.current
     if (layer === null || !enabled) return
 
     const onPointerDown = (event: PointerEvent) => {
@@ -114,7 +123,7 @@ export function SelectionOverlay(props: SelectionOverlayProps): React.JSX.Elemen
       layer.removeEventListener('pointerup', finish)
       layer.removeEventListener('pointercancel', finish)
     }
-  }, [enabled, valueAt])
+  }, [enabled, valueAt, layer])
 
   if (geometry === null) return null
 
@@ -124,7 +133,7 @@ export function SelectionOverlay(props: SelectionOverlayProps): React.JSX.Elemen
   return (
     <div
       className="selection-overlay"
-      ref={layerRef}
+      ref={setLayer}
       style={{
         // The layer covers the whole chart root but only accepts pointers over
         // the plot area, so the axes stay clickable for focus and text
