@@ -8,6 +8,11 @@
  * an end-to-end exercise of the onboarding path. The only shortcut taken is creating the *first*
  * invitation directly through `createInvitation`, because in production that is done by an
  * administrator who, in a fresh deployment, does not yet exist.
+ *
+ * A passkey ceremony is two requests, and the second one only works because it carries the signed
+ * challenge cookie the first one set. That cookie *is* the link between the challenge the server
+ * issued and the response it is asked to verify, so the helpers below thread it through
+ * explicitly rather than hiding it: a test that forgets it is testing a different thing.
  */
 
 import { env, SELF } from 'cloudflare:test'
@@ -45,13 +50,66 @@ export interface TestUser {
   displayName: string
 }
 
-/** Extract the session cookie(s) from a response, in a form suitable for a `Cookie` header. */
+/** Extract the cookie(s) a response set, in a form suitable for a `Cookie` header. */
 export function sessionCookie(response: Response): string {
   const cookies = response.headers.getSetCookie()
   return cookies
     .map((entry) => entry.split(';')[0] ?? '')
     .filter((entry) => entry !== '')
     .join('; ')
+}
+
+export interface RegistrationCeremony {
+  /** The `Cookie` header value carrying the plugin's signed challenge cookie. */
+  cookie: string
+  challenge: string
+  excludeCredentials: { id: string }[]
+}
+
+/**
+ * Ask the passkey plugin for registration options.
+ *
+ * `context` is AAT's registration context; without a session it is the only thing that tells
+ * `resolveUser` who the ceremony is for. Omitting it is the signed-in path — a user adding a
+ * second credential — in which case `cookie` must carry their session.
+ */
+export async function registrationOptions(
+  options: { context?: string; cookie?: string } = {},
+): Promise<RegistrationCeremony> {
+  const query = options.context ? `?context=${encodeURIComponent(options.context)}` : ''
+  const response = await apiFetch(`/api/auth/passkey/generate-register-options${query}`, {
+    ...(options.cookie ? { cookie: options.cookie } : {}),
+  })
+  if (response.status !== 200) {
+    throw new Error(`registration options failed: ${response.status} ${await response.text()}`)
+  }
+  const body = (await response.json()) as {
+    challenge: string
+    excludeCredentials?: { id: string }[]
+  }
+  const challengeCookie = sessionCookie(response)
+  return {
+    cookie: options.cookie ? `${options.cookie}; ${challengeCookie}` : challengeCookie,
+    challenge: body.challenge,
+    excludeCredentials: body.excludeCredentials ?? [],
+  }
+}
+
+/** Complete a registration ceremony. The caller owns the outcome, including a failure. */
+export async function verifyRegistration(ceremony: { cookie: string }, response: unknown): Promise<Response> {
+  return apiFetch('/api/auth/passkey/verify-registration', {
+    method: 'POST',
+    cookie: ceremony.cookie,
+    body: JSON.stringify({ response }),
+  })
+}
+
+/** Redeem an invitation token for a registration context. */
+export async function redeemInvitation(token: string): Promise<Response> {
+  return apiFetch('/api/auth/aat/invitation/redeem', {
+    method: 'POST',
+    body: JSON.stringify({ token }),
+  })
 }
 
 export interface CreateUserOptions {
@@ -75,37 +133,33 @@ export async function issueInvitationToken(options: CreateUserOptions = {}): Pro
 
 /** Redeem a token and complete a passkey registration, returning a signed-in user. */
 export async function registerWithToken(token: string): Promise<TestUser> {
-  const redeem = await apiFetch('/api/auth/aat/invitation/redeem', {
-    method: 'POST',
-    body: JSON.stringify({ token }),
-  })
+  const redeem = await redeemInvitation(token)
   if (redeem.status !== 200) {
     throw new Error(`invitation redeem failed: ${redeem.status} ${await redeem.text()}`)
   }
-  const redeemed = (await redeem.json()) as {
-    registrationContext: string
-    options: { challenge: string; user: { id: string; displayName: string } }
-  }
+  const redeemed = (await redeem.json()) as { registrationContext: string }
 
+  const ceremony = await registrationOptions({ context: redeemed.registrationContext })
   const authenticator = new VirtualAuthenticator(RP_ID, ORIGIN)
-  const credential = await authenticator.register(redeemed.options.challenge)
-
-  const registered = await apiFetch('/api/auth/aat/passkey/register', {
-    method: 'POST',
-    body: JSON.stringify({ registrationContext: redeemed.registrationContext, credential }),
-  })
+  const registered = await verifyRegistration(ceremony, await authenticator.register(ceremony.challenge))
   if (registered.status !== 200) {
     throw new Error(`passkey registration failed: ${registered.status} ${await registered.text()}`)
   }
-  const body = (await registered.json()) as { user: { id: string; displayName: string; role: Role } }
 
-  return {
-    userId: body.user.id,
-    role: body.user.role,
-    displayName: body.user.displayName,
-    cookie: sessionCookie(registered),
-    authenticator,
+  // `verify-registration` answers with the passkey row; the session it opened is in the cookie.
+  // Reading the identity back through the ordinary API is also the assertion that the cookie works.
+  const cookie = sessionCookie(registered)
+  return { ...(await identify(cookie)), cookie, authenticator }
+}
+
+/** Who does this session belong to? Asked the way any client would ask. */
+async function identify(cookie: string): Promise<Omit<TestUser, 'cookie' | 'authenticator'>> {
+  const me = await apiFetch('/api/v1/me', { cookie })
+  if (me.status !== 200) {
+    throw new Error(`session did not authenticate: ${me.status} ${await me.text()}`)
   }
+  const body = (await me.json()) as { user: { id: string; displayName: string; role: Role } }
+  return { userId: body.user.id, role: body.user.role, displayName: body.user.displayName }
 }
 
 /** The common case: invite a user with `role` and sign them in. */
@@ -113,15 +167,47 @@ export async function createUser(options: CreateUserOptions = {}): Promise<TestU
   return registerWithToken(await issueInvitationToken(options))
 }
 
+export interface AuthenticationCeremony {
+  cookie: string
+  challenge: string
+  allowCredentials: { id: string }[]
+}
+
+/** Ask the passkey plugin for authentication options, anonymously unless a cookie is supplied. */
+export async function authenticationOptions(
+  options: { cookie?: string } = {},
+): Promise<AuthenticationCeremony> {
+  const response = await apiFetch('/api/auth/passkey/generate-authenticate-options', {
+    ...(options.cookie ? { cookie: options.cookie } : {}),
+  })
+  if (response.status !== 200) {
+    throw new Error(`authentication options failed: ${response.status} ${await response.text()}`)
+  }
+  const body = (await response.json()) as { challenge: string; allowCredentials?: { id: string }[] }
+  return {
+    cookie: sessionCookie(response),
+    challenge: body.challenge,
+    allowCredentials: body.allowCredentials ?? [],
+  }
+}
+
+/** Complete an authentication ceremony. The caller owns the outcome, including a failure. */
+export async function verifyAuthentication(
+  ceremony: { cookie: string },
+  response: unknown,
+): Promise<Response> {
+  return apiFetch('/api/auth/passkey/verify-authentication', {
+    method: 'POST',
+    cookie: ceremony.cookie,
+    body: JSON.stringify({ response }),
+  })
+}
+
 /** Sign an existing user in again with their passkey, returning the new session cookie. */
 export async function signIn(user: TestUser): Promise<string> {
-  const options = await apiFetch('/api/auth/aat/passkey/authenticate/options', { method: 'POST' })
-  const issued = (await options.json()) as { challengeId: string; options: { challenge: string } }
-  const assertion = await user.authenticator.authenticate(issued.options.challenge)
-  const verified = await apiFetch('/api/auth/aat/passkey/authenticate/verify', {
-    method: 'POST',
-    body: JSON.stringify({ challengeId: issued.challengeId, credential: assertion }),
-  })
+  const ceremony = await authenticationOptions()
+  const assertion = await user.authenticator.authenticate(ceremony.challenge)
+  const verified = await verifyAuthentication(ceremony, assertion)
   if (verified.status !== 200) {
     throw new Error(`sign-in failed: ${verified.status} ${await verified.text()}`)
   }

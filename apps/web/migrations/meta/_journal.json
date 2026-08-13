@@ -8,6 +8,27 @@
       "when": 1786531202941,
       "tag": "0000_initial_schema",
       "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "6",
+      "when": 1786576097220,
+      "tag": "0001_drop_passkey_algorithm",
+      "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "6",
+      "when": 1786579518745,
+      "tag": "0002_add_audit_target_owner",
+      "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "6",
+      "when": 1786615602778,
+      "tag": "0003_drop_projects",
+      "breakpoints": true
     }
   ]
 }

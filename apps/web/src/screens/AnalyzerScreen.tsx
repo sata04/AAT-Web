@@ -1,0 +1,870 @@
+/**
+ * The analyzer: the screen AAT Web exists for.
+ *
+ * Holds the working state — open datasets, the view mode, the selection, the
+ * viewport, the three cloud statuses — and wires the pieces together. It owns no
+ * arithmetic: the numbers come from the analysis worker, the plot content from
+ * `plot-model.ts`, the selection maths from `selection.ts`. That separation is
+ * what keeps the interesting logic testable without a DOM, which matters here
+ * because jsdom is deliberately not a dependency.
+ *
+ * This was `App.tsx` until routing arrived. The move is a move: the state, the
+ * callbacks and the markup are the same, and the only substantive change is that
+ * "am I signed in" now comes from the shared session provider instead of a local
+ * boolean fed by a probe this component fired itself. That matters because the
+ * rule it guards has not changed — the local analysis is complete and usable
+ * before any cloud call is made, and `if (signedIn) void syncToCloud(dataset)`
+ * is the last line of the success path for exactly that reason. Signed out,
+ * offline, or deployed with no Worker at all, everything above that line still
+ * runs.
+ */
+
+import type { AnalysisConfig } from '@aat/shared'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { AnalysisClient, type AnalysisProgress, AnalysisWorkerError } from '../analysis/client.ts'
+import { defaultDialogMapping } from '../analysis/mapping.ts'
+import type { ColumnMapping, OpenedSource } from '../analysis/protocol.ts'
+import { type Dataset, datasetFromPayload, sensorModeFrom } from '../app/dataset.ts'
+import { rangeStatisticsFor } from '../app/range-statistics.ts'
+import { loadConfig, saveConfig } from '../app/settings.ts'
+import { clearCache } from '../cache/analysis-cache.ts'
+import type { PosterFigure } from '../cloud/gateway.ts'
+import { type CloudStatuses, INITIAL_STATUSES, type PosterStatus } from '../cloud/status.ts'
+import { syncDataset } from '../cloud/sync.ts'
+import { CloudStatusBar } from '../components/CloudStatusBar.tsx'
+import { ColumnSelectorDialog } from '../components/ColumnSelectorDialog.tsx'
+import { CommandBar } from '../components/CommandBar.tsx'
+import { FileDropZone } from '../components/FileDropZone.tsx'
+import { RangeStatisticsPanel } from '../components/RangeStatisticsPanel.tsx'
+import { SettingsDialog } from '../components/SettingsDialog.tsx'
+import { StatisticsPanel } from '../components/StatisticsPanel.tsx'
+import { ExportClient, ExportTooLargeForWorksheet, saveBlob } from '../exporting/client.ts'
+import { workbookInputFor } from '../exporting/input.ts'
+import { canvasToPng, PNG_PARITY_NOTICE } from '../exporting/png.ts'
+import type { ChartGeometry } from '../graph/geometry.ts'
+import { buildPlotModel, modelDataRange } from '../graph/plot-model.ts'
+import { SelectionOverlay } from '../graph/SelectionOverlay.tsx'
+import type { SelectionRange } from '../graph/selection.ts'
+import { graphPalette, prefersDarkScheme, resolveTheme, themeSettingFrom } from '../graph/theme.ts'
+import { type ChartViewport, UPlotChart } from '../graph/UPlotChart.tsx'
+import {
+  canSelectRange,
+  isComparing,
+  isGQuality,
+  isShowingAll,
+  transition,
+  type ViewMode,
+} from '../graph/view-mode.ts'
+import { PosterPanel } from '../poster/PosterPanel.tsx'
+import { generateAutoPoster, type PosterContext, retryAutoPoster } from '../poster/requests.ts'
+import { useSession } from '../session/SessionProvider.tsx'
+
+/** How many notices stay on screen at once; older ones drop off. */
+const MAX_NOTICES = 6
+
+interface Notice {
+  id: number
+  tone: 'info' | 'warning' | 'error'
+  text: string
+}
+
+interface PendingColumnChoice {
+  source: OpenedSource
+  initial: ColumnMapping
+  reason: string | undefined
+}
+
+export function AnalyzerScreen(): React.JSX.Element {
+  const [config, setConfig] = useState<AnalysisConfig>(loadConfig)
+  const [datasets, setDatasets] = useState<Dataset[]>([])
+  const [activeName, setActiveName] = useState<string | null>(null)
+  const [mode, setMode] = useState<ViewMode>('NORMAL')
+  const [selection, setSelection] = useState<SelectionRange | null>(null)
+  const [viewport, setViewport] = useState<ChartViewport | null>(null)
+  const [geometry, setGeometry] = useState<ChartGeometry | null>(null)
+  const [canvas, setCanvas] = useState<HTMLCanvasElement | null>(null)
+  const [statuses, setStatuses] = useState<CloudStatuses>(INITIAL_STATUSES)
+  const [pendingColumns, setPendingColumns] = useState<PendingColumnChoice | null>(null)
+  const [settingsOpen, setSettingsOpen] = useState(false)
+  const [notices, setNotices] = useState<Notice[]>([])
+  // The revision the poster figures of the last synced dataset hang from. Null
+  // until an analysis has been stored, which is most of the time: local-first.
+  const [syncedPoster, setSyncedPoster] = useState<PosterContext | null>(null)
+  const [customPosters, setCustomPosters] = useState<PosterFigure[]>([])
+
+  // One probe for the whole application, in the provider. A negative answer is
+  // the normal, fully functional local-only mode.
+  const sessionStatus = useSession().status
+  const signedIn = sessionStatus === 'signed-in'
+
+  const analysisClient = useRef<AnalysisClient | null>(null)
+  const exportClient = useRef<ExportClient | null>(null)
+  const noticeId = useRef(0)
+  // Aborts the poster poll when the screen goes away or a newer request starts.
+  // Polling is a read loop against the poster listing; abandoning one costs the
+  // renderer nothing, which is the point of not queueing work server-side.
+  const posterPoll = useRef<AbortController | null>(null)
+
+  // Lazily constructed so that merely loading the page does not start a worker,
+  // and stable so the callbacks that use them do not change identity per render.
+  const getAnalysisClient = useCallback(() => {
+    analysisClient.current ??= new AnalysisClient()
+    return analysisClient.current
+  }, [])
+  const getExportClient = useCallback(() => {
+    exportClient.current ??= new ExportClient()
+    return exportClient.current
+  }, [])
+
+  useEffect(
+    () => () => {
+      analysisClient.current?.dispose()
+      exportClient.current?.dispose()
+      posterPoll.current?.abort()
+    },
+    [],
+  )
+
+  const notify = useCallback((tone: Notice['tone'], text: string) => {
+    noticeId.current += 1
+    const id = noticeId.current
+    // Capped: a disturbed recording can raise a warning per stage per sensor,
+    // and a wall of notices buries the graph it is trying to qualify.
+    setNotices((current) => [...current, { id, tone, text }].slice(-MAX_NOTICES))
+  }, [])
+
+  const dismissNotice = (id: number) => setNotices((current) => current.filter((n) => n.id !== id))
+
+  /* ---------------------------------------------------------------- theme */
+
+  const [systemDark, setSystemDark] = useState(prefersDarkScheme)
+  useEffect(() => {
+    if (typeof window === 'undefined' || typeof window.matchMedia !== 'function') return
+    const query = window.matchMedia('(prefers-color-scheme: dark)')
+    const listener = (event: MediaQueryListEvent) => setSystemDark(event.matches)
+    query.addEventListener('change', listener)
+    return () => query.removeEventListener('change', listener)
+  }, [])
+
+  const theme = resolveTheme(themeSettingFrom(config.theme), systemDark)
+  useEffect(() => {
+    document.documentElement.dataset.theme = theme
+  }, [theme])
+  const palette = useMemo(() => graphPalette(theme), [theme])
+
+  /* ------------------------------------------------------------ datasets */
+
+  const active = useMemo(
+    () => datasets.find((dataset) => dataset.name === activeName) ?? null,
+    [datasets, activeName],
+  )
+
+  const plotModel = useMemo(
+    () =>
+      buildPlotModel({
+        datasets,
+        active,
+        mode,
+        sensorMode: sensorModeFrom(config.graph_sensor_mode),
+        palette,
+        ylimMin: config.ylim_min,
+        ylimMax: config.ylim_max,
+        defaultGraphDuration: config.default_graph_duration,
+      }),
+    [datasets, active, mode, config, palette],
+  )
+
+  const dataRange = useMemo(() => modelDataRange(plotModel), [plotModel])
+
+  const defaultViewport = useMemo((): ChartViewport => {
+    if (plotModel.xRange !== null) return { min: plotModel.xRange[0], max: plotModel.xRange[1] }
+    if (dataRange !== null && dataRange.max > dataRange.min) return { min: dataRange.min, max: dataRange.max }
+    return { min: 0, max: config.default_graph_duration }
+  }, [plotModel, dataRange, config.default_graph_duration])
+
+  const bounds = useMemo((): ChartViewport => {
+    if (dataRange === null) return defaultViewport
+    // Zooming out is bounded by the data plus whatever fixed window the mode
+    // pins, so a reset always lands somewhere meaningful.
+    return {
+      min: Math.min(dataRange.min, defaultViewport.min),
+      max: Math.max(dataRange.max, defaultViewport.max),
+    }
+  }, [dataRange, defaultViewport])
+
+  // `null` means "follow the mode's default framing". Switching dataset or mode
+  // clears it, which is how the desktop re-frames the graph on both.
+  const effectiveViewport = viewport ?? defaultViewport
+
+  const selectionEnabled = canSelectRange(mode)
+  const rangeResult = useMemo(() => {
+    if (active === null || selection === null || !selectionEnabled) return null
+    return rangeStatisticsFor(active, selection)
+  }, [active, selection, selectionEnabled])
+
+  /* ---------------------------------------------------------------- cloud */
+
+  const setPosterStatus = useCallback((poster: PosterStatus) => {
+    setStatuses((current) => ({ ...current, poster }))
+  }, [])
+
+  /**
+   * Ask for the automatic poster.
+   *
+   * There is no client-side "have I already asked for this?" flag here on
+   * purpose. The guarantee that a revision has at most one automatic poster is
+   * the partial unique index `poster_figures_auto_unique` in D1, claimed by an
+   * `INSERT ... ON CONFLICT DO NOTHING`; a repeat call reads the existing row
+   * back and renders nothing. A second mechanism in the browser could only be
+   * weaker — it loses to a reload, a second tab and another device — and having
+   * two would make it unclear which one was actually holding the line.
+   *
+   * What the browser *is* responsible for is not calling this from anywhere a
+   * rerender can reach: it is invoked from a completed cloud sync and from the
+   * explicit retry control, and from nowhere else.
+   */
+  const startAutoPoster = useCallback(
+    async (context: PosterContext, posterId: string | null) => {
+      posterPoll.current?.abort()
+      const controller = new AbortController()
+      posterPoll.current = controller
+      const outcome =
+        posterId === null
+          ? await generateAutoPoster(context, setPosterStatus, controller.signal)
+          : await retryAutoPoster(context, posterId, setPosterStatus, controller.signal)
+      if (!outcome.ok && outcome.kind === 'spec') {
+        // The spec could not be built, so nothing was sent. Retrying identical
+        // inputs would fail identically, which is why this one is not retryable.
+        setPosterStatus({ kind: 'failed', message: outcome.advice.message, retryable: false })
+      }
+    },
+    [setPosterStatus],
+  )
+
+  const syncToCloud = useCallback(
+    async (dataset: Dataset) => {
+      setStatuses((current) => ({ ...current, sync: { kind: 'saving' } }))
+      const outcome = await syncDataset(dataset, config)
+      if (!outcome.ok) {
+        setStatuses((current) => ({
+          ...current,
+          sync: {
+            kind: 'failed',
+            message: outcome.message,
+            // An unreachable cloud is always worth retrying — it is usually a
+            // network that came back.
+            retryable: outcome.kind === 'unavailable' || outcome.retryable,
+          },
+        }))
+        return
+      }
+      const { revisionId, runCode } = outcome.value
+      const context: PosterContext = { revisionId, runCode, dataset }
+      setSyncedPoster(context)
+      setStatuses((current) => ({
+        ...current,
+        sync: { kind: 'saved', revisionId, at: Date.now() },
+        poster: { kind: 'queued' },
+      }))
+
+      // Poster generation is a separate lane on purpose: it can be slow, it can
+      // fail, and neither outcome touches the analysis the user already has.
+      await startAutoPoster(context, null)
+    },
+    [config, startAutoPoster],
+  )
+
+  // A poster belongs to one revision of one file, so the panel shows one only
+  // while that file is the one on screen. Switching datasets does not clear the
+  // stored context — coming back to the file brings its poster back with it.
+  const posterContext = useMemo(() => {
+    if (syncedPoster === null || active === null) return null
+    return syncedPoster.dataset.name === active.name ? syncedPoster : null
+  }, [syncedPoster, active])
+
+  const posterUnavailableReason = useMemo(() => {
+    if (posterContext !== null) return null
+    if (sessionStatus === 'unavailable') {
+      return 'この環境ではクラウド機能を利用できません。解析・グラフ・統計・書き出しはこのまま利用できます。'
+    }
+    if (sessionStatus === 'signed-out') {
+      return 'サインインすると、解析結果を保存してデスクトップ版と同じ体裁のポスター図を作成できます。解析・グラフ・統計・書き出しはサインインなしで利用できます。'
+    }
+    // Signed in, but this dataset has not been stored yet. The panel's own
+    // default sentence says so; there is nothing more specific to add.
+    return null
+  }, [posterContext, sessionStatus])
+
+  const activeCustomPosters = useMemo(
+    () =>
+      posterContext === null
+        ? []
+        : customPosters.filter((poster) => poster.analysisRevisionId === posterContext.revisionId),
+    [customPosters, posterContext],
+  )
+
+  /* ------------------------------------------------------------- opening */
+
+  const runAnalysis = useCallback(
+    async (source: OpenedSource, mapping: ColumnMapping) => {
+      const client = getAnalysisClient()
+      const onProgress = (progress: AnalysisProgress) => {
+        setStatuses((current) => ({
+          ...current,
+          analysis: { kind: 'running', stage: progress.stage, percent: progress.percent },
+        }))
+      }
+
+      try {
+        const result = await client.analyse(
+          {
+            sourceSha256: source.sourceSha256,
+            filename: source.filename,
+            config,
+            mapping,
+            skipGQuality: !config.auto_calculate_g_quality,
+            useCache: config.use_cache,
+          },
+          onProgress,
+        )
+        const dataset = datasetFromPayload(result.payload, result.fromCache)
+        setDatasets((current) => [...current.filter((existing) => existing.name !== dataset.name), dataset])
+        setActiveName(dataset.name)
+        setSelection(null)
+        setViewport(null)
+        setStatuses((current) => ({
+          ...current,
+          analysis: { kind: 'ready', fromCache: result.fromCache },
+        }))
+
+        for (const warning of dataset.warnings) {
+          notify('warning', `${dataset.name}: ${warning.message}`)
+        }
+
+        // The local analysis is finished and usable at this point. Everything
+        // below is optional and must never gate it.
+        if (signedIn) void syncToCloud(dataset)
+      } catch (error) {
+        if (error instanceof AnalysisWorkerError && error.code === 'COLUMN_NOT_FOUND') {
+          // The desktop answers this by reopening column selection; so do we,
+          // rather than presenting a dead end.
+          setPendingColumns({
+            source,
+            initial: mapping,
+            reason: `次の列が見つかりませんでした: ${error.missingColumns.join(', ')}\n使用する列を選び直してください。`,
+          })
+          setStatuses((current) => ({ ...current, analysis: { kind: 'idle' } }))
+          return
+        }
+        const message = error instanceof Error ? error.message : String(error)
+        const code = error instanceof AnalysisWorkerError ? error.code : 'INTERNAL'
+        setStatuses((current) => ({ ...current, analysis: { kind: 'failed', message, code } }))
+        notify('error', `${source.filename}: ${message}`)
+      }
+    },
+    [config, signedIn, notify, syncToCloud, getAnalysisClient],
+  )
+
+  const openFiles = useCallback(
+    async (files: File[]) => {
+      const client = getAnalysisClient()
+      for (const file of files) {
+        setStatuses((current) => ({
+          ...current,
+          analysis: { kind: 'running', stage: 'decoding', percent: 0 },
+        }))
+        try {
+          const bytes = await file.arrayBuffer()
+          const source = await client.open(file.name, bytes, (progress) => {
+            setStatuses((current) => ({
+              ...current,
+              analysis: { kind: 'running', stage: progress.stage, percent: progress.percent },
+            }))
+          })
+          if (source.suggestedMapping === null) {
+            // Ambiguous or missing candidates: ask, rather than guess. A wrong
+            // guess does not fail — it produces a believable graph of the wrong
+            // column, which is far worse.
+            setPendingColumns({
+              source,
+              initial: defaultDialogMapping(source.detected),
+              reason: undefined,
+            })
+            setStatuses((current) => ({ ...current, analysis: { kind: 'idle' } }))
+            const remaining = files.length - files.indexOf(file) - 1
+            if (remaining > 0) {
+              // The dialog is modal, so the rest of the batch cannot be analysed
+              // behind it. Say so rather than dropping files silently.
+              notify('info', `残り ${remaining} 件は列を選択したあとで開き直してください。`)
+            }
+            return
+          }
+          await runAnalysis(source, source.suggestedMapping)
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error)
+          const code = error instanceof AnalysisWorkerError ? error.code : 'INTERNAL'
+          setStatuses((current) => ({ ...current, analysis: { kind: 'failed', message, code } }))
+          notify('error', `${file.name}: ${message}`)
+        }
+      }
+    },
+    [runAnalysis, notify, getAnalysisClient],
+  )
+
+  const closeDataset = useCallback(
+    (dataset: Dataset) => {
+      setDatasets((current) => current.filter((existing) => existing.name !== dataset.name))
+      setActiveName((current) => (current === dataset.name ? null : current))
+      void getAnalysisClient().release(dataset.sourceSha256)
+    },
+    [getAnalysisClient],
+  )
+
+  const retrySync = () => {
+    if (active === null) return
+    void syncToCloud(active)
+  }
+
+  /**
+   * Retry the automatic poster.
+   *
+   * A figure that has an id and reached `failed` goes through the retry
+   * endpoint, which is conditional on it still being failed — so five presses
+   * start one render. A figure with no id (the request itself was refused, or
+   * the renderer shed load before a row existed) goes back through the
+   * idempotent endpoint, which picks up the queued row.
+   */
+  const retryPoster = () => {
+    if (syncedPoster === null) return
+    const posterId = statuses.poster.kind === 'failed' ? (statuses.poster.posterId ?? null) : null
+    void startAutoPoster(syncedPoster, posterId)
+  }
+
+  /* --------------------------------------------------------------- modes */
+
+  const applyEvent = (event: Parameters<typeof transition>[1]) => {
+    setMode((current) => {
+      const next = transition(current, event)
+      // Leaving the normal view invalidates a selection: every other view either
+      // has no time axis or has several, so the span would no longer mean the
+      // thing it was drawn over.
+      if (!canSelectRange(next)) setSelection(null)
+      return next
+    })
+    setViewport(null)
+  }
+
+  const startComparison = () => {
+    if (datasets.length < 2) {
+      notify('warning', '比較するには少なくとも2つのファイルが必要です。')
+      return
+    }
+    applyEvent('ENTER_COMPARING')
+  }
+
+  /* -------------------------------------------------------------- export */
+
+  const doExport = async (format: 'xlsx' | 'csv') => {
+    if (active === null) return
+    const input = workbookInputFor(
+      active,
+      config.sampling_rate,
+      rangeResult === null
+        ? null
+        : { range: rangeResult.range, inner: rangeResult.inner, drag: rangeResult.drag },
+    )
+    try {
+      const result = await getExportClient().run(format, input)
+      saveBlob(result.blob, `${active.name}.${format === 'xlsx' ? 'xlsx' : 'csv'}`)
+      notify('info', `${active.name} を書き出しました。`)
+    } catch (error) {
+      if (error instanceof ExportTooLargeForWorksheet) {
+        // Never truncate. Say how big it is and offer the format that has no
+        // row limit.
+        notify('warning', `${error.message}\n「CSVで書き出す」を選ぶと、行数制限なしで保存できます。`)
+        return
+      }
+      notify('error', error instanceof Error ? error.message : String(error))
+    }
+  }
+
+  const doPngExport = async () => {
+    if (canvas === null) {
+      notify('warning', 'グラフが表示されていないため、PNGを保存できません。')
+      return
+    }
+    try {
+      const blob = await canvasToPng(canvas, { scale: 2, background: palette.background })
+      saveBlob(blob, `${active?.name ?? 'graph'}_gl.png`)
+      notify('info', PNG_PARITY_NOTICE)
+    } catch (error) {
+      notify('error', error instanceof Error ? error.message : String(error))
+    }
+  }
+
+  /* --------------------------------------------------------------- render */
+
+  const hasDatasets = datasets.length > 0
+
+  return (
+    <div className="app">
+      <CommandBar
+        trailing={
+          <div className="command-bar__group">
+            <button
+              type="button"
+              className="button"
+              disabled={active === null}
+              onClick={() => void doExport('xlsx')}
+            >
+              Excelで書き出す
+            </button>
+            <button
+              type="button"
+              className="button"
+              disabled={active === null}
+              onClick={() => void doExport('csv')}
+            >
+              CSVで書き出す
+            </button>
+            <button
+              type="button"
+              className="button"
+              disabled={canvas === null}
+              title={PNG_PARITY_NOTICE}
+              onClick={() => void doPngExport()}
+            >
+              PNGを保存
+            </button>
+            <button type="button" className="button button--flat" onClick={() => setSettingsOpen(true)}>
+              設定
+            </button>
+          </div>
+        }
+      >
+        <div className="command-bar__group">
+          <label className="button">
+            ファイルを開く
+            <input
+              className="visually-hidden"
+              type="file"
+              accept=".csv,text/csv"
+              multiple
+              onChange={(event) => {
+                const files = [...(event.target.files ?? [])]
+                if (files.length > 0) void openFiles(files)
+                event.target.value = ''
+              }}
+            />
+          </label>
+        </div>
+
+        <fieldset className="command-bar__group segmented">
+          <legend className="visually-hidden">表示モード</legend>
+          <button
+            type="button"
+            className="button"
+            aria-pressed={!isShowingAll(mode) && !isGQuality(mode)}
+            disabled={!hasDatasets}
+            onClick={() => applyEvent(isShowingAll(mode) ? 'SHOW_ALL_OFF' : 'G_QUALITY_OFF')}
+          >
+            通常
+          </button>
+          <button
+            type="button"
+            className="button"
+            aria-pressed={isShowingAll(mode)}
+            disabled={!hasDatasets || isGQuality(mode)}
+            onClick={() => applyEvent(isShowingAll(mode) ? 'SHOW_ALL_OFF' : 'SHOW_ALL_ON')}
+          >
+            全データ
+          </button>
+          <button
+            type="button"
+            className="button"
+            aria-pressed={isGQuality(mode)}
+            disabled={!hasDatasets}
+            onClick={() => applyEvent(isGQuality(mode) ? 'G_QUALITY_OFF' : 'G_QUALITY_ON')}
+          >
+            G-quality
+          </button>
+        </fieldset>
+
+        <div className="command-bar__group">
+          <button
+            type="button"
+            className="button"
+            aria-pressed={isComparing(mode)}
+            disabled={datasets.length < 2 && !isComparing(mode)}
+            onClick={() => (isComparing(mode) ? applyEvent('LEAVE_COMPARING') : startComparison())}
+          >
+            比較
+          </button>
+        </div>
+
+        <div className="command-bar__group">
+          <label className="field">
+            <span className="visually-hidden">表示するセンサー</span>
+            <select
+              className="select"
+              value={config.graph_sensor_mode}
+              onChange={(event) => {
+                const next = { ...config, graph_sensor_mode: sensorModeFrom(event.target.value) }
+                setConfig(next)
+                saveConfig(next)
+              }}
+            >
+              <option value="both">両方</option>
+              <option value="inner_only">Inner Capsule のみ</option>
+              <option value="drag_only">Drag Shield のみ</option>
+            </select>
+          </label>
+        </div>
+
+        <div className="command-bar__group">
+          <button type="button" className="button" onClick={() => setViewport(null)} disabled={!hasDatasets}>
+            全体表示
+          </button>
+          <button
+            type="button"
+            className="button"
+            disabled={!hasDatasets}
+            onClick={() => {
+              const span = effectiveViewport.max - effectiveViewport.min
+              const centre = (effectiveViewport.max + effectiveViewport.min) / 2
+              setViewport({ min: centre - span / 4, max: centre + span / 4 })
+            }}
+          >
+            拡大
+          </button>
+          <button
+            type="button"
+            className="button"
+            disabled={!hasDatasets}
+            onClick={() => {
+              const span = effectiveViewport.max - effectiveViewport.min
+              const centre = (effectiveViewport.max + effectiveViewport.min) / 2
+              setViewport({
+                min: Math.max(bounds.min, centre - span),
+                max: Math.min(bounds.max, centre + span),
+              })
+            }}
+          >
+            縮小
+          </button>
+        </div>
+      </CommandBar>
+
+      <div className={hasDatasets ? 'workspace' : 'workspace workspace--single'}>
+        <main className="graph-area">
+          {notices.length === 0 ? null : (
+            <div>
+              {notices.map((notice) => (
+                <div className={`notice notice--${notice.tone}`} key={notice.id} role="status">
+                  <span className="notice__body">{notice.text}</span>
+                  <button
+                    type="button"
+                    className="button button--flat"
+                    onClick={() => dismissNotice(notice.id)}
+                  >
+                    閉じる
+                  </button>
+                </div>
+              ))}
+            </div>
+          )}
+
+          {statuses.analysis.kind === 'running' ? (
+            <progress className="progress" max={100} value={statuses.analysis.percent}>
+              {statuses.analysis.percent}%
+            </progress>
+          ) : null}
+
+          {hasDatasets ? (
+            <UPlotChart
+              model={plotModel}
+              palette={palette}
+              viewport={effectiveViewport}
+              onViewportChange={setViewport}
+              bounds={bounds}
+              onGeometryChange={setGeometry}
+              onCanvasChange={setCanvas}
+              primaryDragReserved={selectionEnabled}
+            >
+              <SelectionOverlay
+                geometry={geometry}
+                selection={selection}
+                onSelectionChange={setSelection}
+                enabled={selectionEnabled}
+              />
+            </UPlotChart>
+          ) : (
+            <FileDropZone onFiles={(files) => void openFiles(files)} disabled={false} />
+          )}
+        </main>
+
+        {hasDatasets ? (
+          <aside className="side-panel">
+            <section className="panel" aria-label="データセット">
+              <div className="panel__header">
+                <h2 className="panel__title">データセット</h2>
+                <span className="panel__hint">{datasets.length} 件</span>
+              </div>
+              <ul className="dataset-list">
+                {datasets.map((dataset) => (
+                  // Two sibling buttons rather than one nested inside the other:
+                  // a button inside a button is invalid HTML, and assistive
+                  // technology cannot reach the inner one.
+                  <li className="dataset-list__item" key={dataset.name}>
+                    <button
+                      type="button"
+                      className="button button--flat dataset-list__name"
+                      aria-current={dataset.name === activeName}
+                      onClick={() => {
+                        setActiveName(dataset.name)
+                        setSelection(null)
+                        setViewport(null)
+                      }}
+                    >
+                      {dataset.name}
+                    </button>
+                    {dataset.fromCache ? <span className="panel__hint">キャッシュ</span> : null}
+                    <button
+                      type="button"
+                      className="button button--flat"
+                      aria-label={`${dataset.name} を閉じる`}
+                      onClick={() => closeDataset(dataset)}
+                    >
+                      閉じる
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            </section>
+
+            <StatisticsPanel
+              datasets={isComparing(mode) ? datasets : active === null ? [] : [active]}
+              mode={mode}
+            />
+
+            <RangeStatisticsPanel
+              selection={selection}
+              result={rangeResult}
+              enabled={selectionEnabled}
+              onChange={setSelection}
+            />
+
+            <PosterPanel
+              context={posterContext}
+              unavailableReason={posterUnavailableReason}
+              status={posterContext === null ? { kind: 'unavailable' } : statuses.poster}
+              selection={selectionEnabled ? selection : null}
+              selectionEnabled={selectionEnabled}
+              onRetryAuto={retryPoster}
+              customPosters={activeCustomPosters}
+              onCustomCreated={(poster) => {
+                // Newest first, and never overwritten: a custom figure is a new
+                // variant, not a replacement for the one it was derived from.
+                setCustomPosters((current) => [poster, ...current])
+                notify('info', 'ポスター図を作成しました。')
+              }}
+            />
+
+            <section className="panel" aria-label="ファイル情報">
+              <div className="panel__header">
+                <h2 className="panel__title">ファイル情報</h2>
+              </div>
+              {active === null ? (
+                <p className="panel__hint">データセットを選択してください。</p>
+              ) : (
+                <div className="table-scroll">
+                  <table className="data-table">
+                    <tbody>
+                      <tr>
+                        <th scope="row">文字コード</th>
+                        <td>{active.encoding}</td>
+                      </tr>
+                      <tr>
+                        <th scope="row">行数</th>
+                        <td className="numeric">{active.sampleCount.toLocaleString()}</td>
+                      </tr>
+                      <tr>
+                        <th scope="row">時間列</th>
+                        <td>{active.mapping.timeColumn}</td>
+                      </tr>
+                      <tr>
+                        <th scope="row">Inner Capsule</th>
+                        <td>{active.mapping.useInner ? active.mapping.innerColumn : '未使用'}</td>
+                      </tr>
+                      <tr>
+                        <th scope="row">Drag Shield</th>
+                        <td>{active.mapping.useDrag ? active.mapping.dragColumn : '未使用'}</td>
+                      </tr>
+                    </tbody>
+                  </table>
+                </div>
+              )}
+              <button
+                type="button"
+                className="button"
+                disabled={active === null}
+                onClick={() => {
+                  if (active === null) return
+                  setPendingColumns({
+                    source: {
+                      sourceSha256: active.sourceSha256,
+                      filename: active.filename,
+                      encoding: active.encoding,
+                      columnNames: [...active.columnNames],
+                      detected: { time: [], acceleration: [] },
+                      rowCount: active.sampleCount,
+                      suggestedMapping: active.mapping,
+                      ambiguity: null,
+                    },
+                    initial: active.mapping,
+                    reason: undefined,
+                  })
+                }}
+              >
+                列を選び直す
+              </button>
+            </section>
+          </aside>
+        ) : null}
+      </div>
+
+      <CloudStatusBar statuses={statuses} onRetrySync={retrySync} onRetryPoster={retryPoster} />
+
+      {pendingColumns === null ? null : (
+        <ColumnSelectorDialog
+          source={pendingColumns.source}
+          initial={pendingColumns.initial}
+          reason={pendingColumns.reason}
+          onCancel={() => setPendingColumns(null)}
+          onConfirm={(mapping) => {
+            const source = pendingColumns.source
+            setPendingColumns(null)
+            void runAnalysis(source, mapping)
+          }}
+        />
+      )}
+
+      {settingsOpen ? (
+        <SettingsDialog
+          config={config}
+          onCancel={() => setSettingsOpen(false)}
+          onApply={(next) => {
+            setConfig(next)
+            if (!saveConfig(next)) {
+              notify('warning', '設定をブラウザに保存できませんでした。今回のセッションのみ有効です。')
+            }
+            setSettingsOpen(false)
+          }}
+          onClearCache={() => {
+            void clearCache().then(() => notify('info', 'ローカルキャッシュを削除しました。'))
+          }}
+        />
+      ) : null}
+    </div>
+  )
+}

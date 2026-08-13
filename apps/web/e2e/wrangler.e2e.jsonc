@@ -1,0 +1,115 @@
+{
+  "$schema": "../node_modules/wrangler/config-schema.json",
+
+  /*
+   * The end-to-end stack. Never deployed, never referenced by `pnpm build`, and deliberately kept
+   * out of `apps/web/wrangler.jsonc` so that the production configuration cannot drift into
+   * something a test made convenient.
+   *
+   * What is the same as production, on purpose:
+   *   - `worker/index.ts` is the code under test, reached through `e2e/worker/entry.ts`;
+   *   - the compatibility date and `nodejs_compat`, so Better Auth boots the way it deploys;
+   *   - Workers Static Assets with SPA fallback and `run_worker_first`, so `/register?token=…`
+   *     resolves the same way it will in production;
+   *   - a real local D1 with the committed migrations applied, and a real local R2 bucket.
+   *
+   * What differs, and why:
+   *   - the container binding is a plain Durable Object that proxies to a poster-renderer image
+   *     running under Docker (see `e2e/worker/entry.ts`), because `workerd` outside Cloudflare has
+   *     no `ctx.container`;
+   *   - `/__e2e__/*` is routed to the Worker so the harness can reach its SQL endpoint;
+   *   - the five auth secrets are `vars` holding **development-only** values (below).
+   */
+
+  "name": "aat-web-e2e",
+  "main": "worker/entry.ts",
+  "compatibility_date": "2026-07-30",
+  "compatibility_flags": ["nodejs_compat"],
+
+  "assets": {
+    "directory": "../dist/client",
+    "binding": "ASSETS",
+    "html_handling": "auto-trailing-slash",
+    "not_found_handling": "single-page-application",
+    "run_worker_first": ["/api/*", "/__e2e__/*"]
+  },
+
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "aat-e2e-db",
+      // Local-only: `wrangler dev --local` never resolves this against an account. It is a
+      // syntactically valid UUID rather than the production placeholder so that a copy-paste into
+      // a real deployment is obviously wrong.
+      "database_id": "e2e00000-0000-4000-8000-000000000000",
+      "migrations_dir": "../migrations"
+    }
+  ],
+
+  "r2_buckets": [
+    {
+      "binding": "AAT_OBJECTS",
+      "bucket_name": "aat-e2e-objects"
+    }
+  ],
+
+  /*
+   * No `containers` block. Declaring one would make `wrangler dev` try to resolve and start a
+   * Cloudflare Container image; the class below is an ordinary Durable Object that forwards to the
+   * renderer over HTTP instead, so the image is started by the harness with `docker run`.
+   */
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "POSTER_RENDERER",
+        "class_name": "PosterRendererContainer"
+      }
+    ]
+  },
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": ["PosterRendererContainer"]
+    }
+  ],
+
+  "vars": {
+    /*
+     * ---------------------------------------------------------------------------------------
+     * DEVELOPMENT-ONLY CREDENTIALS. Not secrets, and not usable anywhere but this local suite.
+     * ---------------------------------------------------------------------------------------
+     * In production these five are Worker secrets supplied from Doppler (docs/deployment.md).
+     * Here they are committed on purpose: the suite must run on a fresh clone with no network and
+     * no account, and asking a contributor for production credentials in order to run the tests is
+     * exactly what docs/deployment.md says a test must never do.
+     *
+     * BETTER_AUTH_SECRET is a fixed, published string. It signs session cookies for a database
+     * that is deleted at the start of every run and never leaves the machine. Do not copy it.
+     *
+     * AAT_RP_ID is `localhost`, which is the one relying-party id a browser will accept over
+     * plain HTTP — `http://localhost` is a secure context, so a real WebAuthn ceremony (and
+     * Chromium's virtual authenticator) works without a certificate. The port is therefore fixed:
+     * AAT_TRUSTED_ORIGINS is compared by exact equality, so 8788 here and 8788 in
+     * `e2e/harness/stack.ts` have to agree.
+     */
+    "BETTER_AUTH_SECRET": "aat-web-e2e-development-only-secret-do-not-reuse-0123456789",
+    "BETTER_AUTH_URL": "http://localhost:8788",
+    "AAT_RP_ID": "localhost",
+    "AAT_RP_NAME": "AAT (E2E)",
+    "AAT_TRUSTED_ORIGINS": "http://localhost:8788",
+
+    // The production values from wrangler.jsonc. Kept identical so a limit that would bite a
+    // researcher bites the suite too.
+    "AAT_DEFAULT_QUOTA_BYTES": "1073741824",
+    "AAT_MAX_SNAPSHOT_BYTES": "16777216",
+    "AAT_MAX_SOURCE_BYTES": "33554432",
+    "AAT_MAX_POSTER_BYTES": "8388608",
+    "AAT_MAX_CONCURRENT_RENDERS": "1",
+    "AAT_RENDER_STALE_SECONDS": "300",
+    "AAT_RESERVATION_TTL_SECONDS": "900"
+  },
+
+  "limits": {
+    "cpu_ms": 30000
+  }
+}

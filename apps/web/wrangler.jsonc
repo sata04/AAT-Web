@@ -107,10 +107,13 @@
    * pulling some other account's image.
    *
    * CI builds and tests the image in a credential-free job and pushes it from
-   * the deploy job (see .github/workflows/deploy.yml). Note that Wrangler does
-   * no environment-variable substitution inside this file: the digest the
-   * deploy step captures in POSTER_RENDERER_IMAGE cannot be injected here, so
-   * the tag below and the tag CI pushes have to be kept in step deliberately.
+   * the deploy job (see .github/workflows/deploy.yml). Wrangler does no
+   * environment-variable substitution inside this file, so the placeholder below
+   * is not filled in by the deploy step reading a variable — instead
+   * scripts/resolve-wrangler-config.mjs writes a deploy-time copy of this file
+   * with the pushed digest and the D1 id substituted, and every command that
+   * reads configuration is passed that copy with --config. This committed file
+   * stays invalid on purpose.
    */
   "durable_objects": {
     "bindings": [

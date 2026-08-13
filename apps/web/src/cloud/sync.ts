@@ -21,11 +21,19 @@ import {
   encodeSeries,
   encodeSnapshot,
   gzipCompress,
+  parseRunFilename,
   SNAPSHOT_FORMAT_VERSION,
+  sha256Hex,
 } from '@aat/shared'
 import type { Dataset } from '../app/dataset.ts'
 import { ANALYSIS_ENGINE_VERSION, APP_VERSION } from '../app/version.ts'
-import { type CloudOutcome, type SnapshotUploadResult, uploadSnapshot } from './gateway.ts'
+import {
+  type CloudOutcome,
+  createRevision,
+  createRun,
+  type RevisionMetrics,
+  uploadSnapshot,
+} from './gateway.ts'
 
 function statistics(value: WindowStatistics): AnalysisSnapshot['statistics']['inner'] {
   return {
@@ -107,22 +115,199 @@ export async function buildSnapshot(dataset: Dataset, config: AnalysisConfig): P
 }
 
 /**
- * Encode, compress and upload.
+ * The headline numbers `analysis_metrics` denormalises out of the snapshot.
+ *
+ * They are a convenience for the gallery, not a second source of truth: the
+ * snapshot in R2 remains the analytical record, and every value here is read
+ * back out of it. The G-quality sweep is *omitted* rather than truncated when it
+ * is longer than the route accepts — a partial sweep filed under the same name
+ * as a complete one is a lie the gallery would repeat, and the full sweep is in
+ * the snapshot either way.
+ */
+const MAX_METRIC_G_QUALITY_ROWS = 1000
+
+function metricsFor(dataset: Dataset, config: AnalysisConfig): RevisionMetrics {
+  const gQuality =
+    dataset.gQuality.length > MAX_METRIC_G_QUALITY_ROWS
+      ? undefined
+      : dataset.gQuality.map((row) => ({
+          windowSize: row.windowSize,
+          innerStartTime: encodeScalar(row.innerStartTime),
+          innerMean: encodeScalar(row.innerMean),
+          innerStd: encodeScalar(row.innerStd),
+          dragStartTime: encodeScalar(row.dragStartTime),
+          dragMean: encodeScalar(row.dragMean),
+          dragStd: encodeScalar(row.dragStd),
+        }))
+
+  return {
+    windowSize: config.window_size,
+    inner: {
+      mean: encodeScalar(dataset.statistics.inner.mean),
+      std: encodeScalar(dataset.statistics.inner.std),
+      startTime: encodeScalar(dataset.statistics.inner.startTime),
+    },
+    drag: {
+      mean: encodeScalar(dataset.statistics.drag.mean),
+      std: encodeScalar(dataset.statistics.drag.std),
+      startTime: encodeScalar(dataset.statistics.drag.startTime),
+    },
+    // The filtered segment is what the statistics were computed over, so it is
+    // the count that explains them. The unfiltered row count is in the snapshot.
+    innerSampleCount: dataset.inner.filteredGravity.length,
+    dragSampleCount: dataset.drag.filteredGravity.length,
+    warningCount: dataset.warnings.length,
+    ...(gQuality === undefined ? {} : { gQuality }),
+  }
+}
+
+/** Everything the analyzer needs to keep working with a synced analysis. */
+export interface CloudSyncResult {
+  runId: string
+  /** Six digits and an optional suffix letter. Also the poster spec's `runCode`. */
+  runCode: string
+  revisionId: string
+  /** False when this exact analysis had already been stored — a retry, or a second device. */
+  revisionCreated: boolean
+  /**
+   * Compressed snapshot size, for the status line, or null when nothing was uploaded because the
+   * revision already carried its snapshot. Null is "already stored", never "stored zero bytes".
+   */
+  snapshotBytes: number | null
+}
+
+/**
+ * A refusal this module makes itself, in the same shape the gateway produces.
+ *
+ * The only one there is: a filename that does not carry a run code. The Worker
+ * cannot record an experiment without one, and neither can a poster spec, so
+ * discovering it here — before three requests have been made — is both cheaper
+ * and clearer than relaying `run_code_required` back from the server.
+ */
+function refuse(message: string): CloudOutcome<never> {
+  return { ok: false, kind: 'error', code: 'INVALID_ANALYSIS_CONFIG', message, retryable: false }
+}
+
+/**
+ * Store an analysis in the cloud: run, then revision, then snapshot.
+ *
+ * Three requests, in that order, because that is the shape the Worker serves and
+ * because each one is the thing the next one hangs from. All three are safe to
+ * repeat:
+ *
+ *  - `POST /runs` is refused for a run code the caller already owns, and the
+ *    refusal names the existing run — so a second analysis of the same drop
+ *    becomes a second *revision*, which is what the data model means by "same
+ *    capsule drop, different settings".
+ *  - `POST /runs/:runId/revisions` is keyed on `(source bytes, config, engine)`,
+ *    so re-analysing identical bytes with identical settings returns the
+ *    revision that exists rather than minting a duplicate.
+ *  - `PUT /revisions/:id/snapshot` answers a byte-identical re-upload
+ *    idempotently, and refuses *different* bytes for a revision that already has
+ *    a snapshot.
  *
  * Gzip because these documents are mostly base64 of slowly varying floats, which
  * compresses well, and because the upload is the one part of this that a
  * researcher on a conference network will notice.
+ *
+ * Nothing here is required for the application to work. If every call fails, the
+ * user still has the analysis, the graph and the exports.
  */
 export async function syncDataset(
   dataset: Dataset,
   config: AnalysisConfig,
-): Promise<CloudOutcome<SnapshotUploadResult>> {
+): Promise<CloudOutcome<CloudSyncResult>> {
+  const parsed = parseRunFilename(dataset.filename)
+  if (parsed.runCode === null) {
+    return refuse(
+      `ファイル名「${dataset.filename}」から実験の識別子（ラン番号）を読み取れないため、クラウドに保存できません。` +
+        'YYMMDD_data.csv（同じ日に複数回行った場合は YYMMDDa_data.csv）の形式で保存し直してください。',
+    )
+  }
+  const runCode = parsed.runCode
+
+  const created = await createRun({ originalFilename: dataset.filename })
+  let runId: string
+  if (created.ok) {
+    runId = created.value.run.id
+  } else {
+    // The run code is already recorded for this owner. That is not a failure: it
+    // is the normal state from the second analysis of a run onwards, and the
+    // refusal carries the id of the run to attach this revision to.
+    const existingRunId =
+      created.kind === 'error' &&
+      created.code === 'INVALID_ANALYSIS_CONFIG' &&
+      created.details?.reason === 'run_code_already_exists' &&
+      typeof created.details.runId === 'string'
+        ? created.details.runId
+        : null
+    if (existingRunId === null) return created
+    runId = existingRunId
+  }
+
   const snapshot = await buildSnapshot(dataset, config)
-  const encoded = encodeSnapshot(snapshot)
-  const compressed = await gzipCompress(encoded)
-  return uploadSnapshot(compressed, {
+
+  const revision = await createRevision(runId, {
     sourceSha256: dataset.sourceSha256,
     configHash: snapshot.configHash,
-    filename: dataset.filename,
+    config,
+    engineVersion: ANALYSIS_ENGINE_VERSION,
+    appVersion: APP_VERSION,
+    snapshotFormatVersion: SNAPSHOT_FORMAT_VERSION,
+    metrics: metricsFor(dataset, config),
   })
+  if (!revision.ok) return revision
+
+  /*
+   * A revision that already carries its snapshot is finished, and re-uploading is not just
+   * redundant — it cannot succeed.
+   *
+   * A revision is identified by (source bytes, config), so re-opening the same CSV tomorrow
+   * resolves to the same revision. The Worker accepts a byte-identical re-upload idempotently, but
+   * the browser cannot produce those bytes twice: `analysisTimestamp` records when the analysis
+   * ran, and a second analysis genuinely ran at a different time. So the only reachable branch was
+   * the refusal — `SNAPSHOT_INVALID / revision_already_has_a_different_snapshot` — and a researcher
+   * doing the ordinary thing of opening a file again was shown 失敗 with a retry that could never
+   * work, for an analysis that had in fact been stored correctly the first time.
+   *
+   * The immutability of a revision is what makes skipping correct rather than merely convenient:
+   * the stored snapshot and this one describe the same analysis of the same bytes under the same
+   * configuration, so there is nothing to update. `hasSnapshot` is checked rather than
+   * `created`, because a revision whose first upload failed exists without one and must still be
+   * able to receive it.
+   */
+  if (!revision.value.created && revision.value.revision.hasSnapshot) {
+    return {
+      ok: true,
+      value: {
+        runId,
+        runCode,
+        revisionId: revision.value.revision.id,
+        revisionCreated: false,
+        snapshotBytes: null,
+      },
+    }
+  }
+
+  const compressed = await gzipCompress(encodeSnapshot(snapshot))
+  const upload = await uploadSnapshot(revision.value.revision.id, compressed, {
+    declaredBytes: compressed.length,
+    // Hashed here and re-hashed by the Worker while it reads the body, then
+    // handed to R2 so the store verifies the write as well. The client's number
+    // is never trusted; it is what the other two are compared against.
+    sha256: await sha256Hex(compressed),
+    format: 'json.gz',
+  })
+  if (!upload.ok) return upload
+
+  return {
+    ok: true,
+    value: {
+      runId,
+      runCode,
+      revisionId: revision.value.revision.id,
+      revisionCreated: revision.value.created,
+      snapshotBytes: upload.value.object.byteSize,
+    },
+  }
 }

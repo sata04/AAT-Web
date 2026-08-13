@@ -12,6 +12,24 @@
  * and the configuration that produced them. It is validated on upload — decoded, schema-checked,
  * and cross-checked against the revision's own `sourceSha256` and `configHash` — because a
  * snapshot that does not match the revision it is filed under is worse than no snapshot at all.
+ *
+ * ## Who may reach whose revision
+ *
+ * Reads are open to the team and writes into the analytical record are not, which is why the
+ * levels below are not symmetric:
+ *
+ * | Route                                | Level     | Why |
+ * | ------------------------------------ | --------- | --- |
+ * | `GET  /runs/:id/revisions`           | `read`    | Metadata about a colleague's analyses. |
+ * | `GET  /revisions/:id`                | `read`    | Same, one revision deep. |
+ * | `GET  /revisions/:id/snapshot`       | `read`    | The whole point: replay, statistics, Excel. |
+ * | `GET  /runs/:id/source`              | `read`    | Re-analysing a colleague's raw CSV. |
+ * | `POST /runs/:id/revisions`           | `own`     | Writes into somebody else's provenance chain. |
+ * | `PUT  /revisions/:id/snapshot`       | `own`     | Same — the record must have one author. |
+ * | `PUT  /runs/:id/source`              | `destroy` | Raw bytes, charged to and stored under the owner. |
+ * | `DELETE /runs/:id/source`            | `destroy` | Deletes bytes nobody can recompute. |
+ *
+ * See worker/middleware/authorize.ts for what each level means and who holds it.
  */
 
 import {
@@ -30,8 +48,9 @@ import { newId } from '../lib/ids.ts'
 import type { AppEnv } from '../middleware/authorize.ts'
 import {
   requireCapability,
-  requireOwnedRevision,
-  requireOwnedRun,
+  requireObjectAccess,
+  requireRevision,
+  requireRun,
   requireSession,
   withDatabase,
 } from '../middleware/authorize.ts'
@@ -135,6 +154,12 @@ function revisionResponse(revision: typeof analysisRevisions.$inferSelect) {
  * Idempotent by analysis identity: a second call with the same source bytes, configuration and
  * engine version returns the first revision with 200 rather than creating a duplicate. That is
  * what makes a retried request — a flaky network, a double-clicked button — safe.
+ *
+ * `own`, and deliberately not widened by the workspace policy: a revision records who analysed a
+ * measurement with which settings, and letting a colleague — or an administrator — append to
+ * somebody else's run would make "whose analysis is this?" a question the provenance chain could
+ * no longer answer. Reusing a colleague's data means reading their snapshot, not writing into
+ * their history.
  */
 revisionRoutes.post(
   '/runs/:runId/revisions',
@@ -143,7 +168,7 @@ revisionRoutes.post(
   async (context) => {
     const db = context.get('db')
     const actor = context.get('actor')
-    const run = await requireOwnedRun(context, context.req.param('runId'))
+    const run = await requireRun(context, context.req.param('runId'), 'own')
     const body = context.req.valid('json')
     const now = new Date()
 
@@ -240,6 +265,7 @@ revisionRoutes.post(
       action: 'revision.create',
       targetType: 'analysis_revision',
       targetId: inserted.id,
+      targetOwnerUserId: run.ownerUserId,
       details: { runId: run.id, configHash: body.configHash, engineVersion: body.engineVersion },
       headers: context.req.raw.headers,
     })
@@ -250,7 +276,7 @@ revisionRoutes.post(
 
 revisionRoutes.get('/runs/:runId/revisions', requireCapability('analysis:read'), async (context) => {
   const db = context.get('db')
-  const run = await requireOwnedRun(context, context.req.param('runId'))
+  const run = await requireRun(context, context.req.param('runId'), 'read')
   const rows = await db
     .select()
     .from(analysisRevisions)
@@ -261,7 +287,7 @@ revisionRoutes.get('/runs/:runId/revisions', requireCapability('analysis:read'),
 
 revisionRoutes.get('/revisions/:revisionId', requireCapability('analysis:read'), async (context) => {
   const db = context.get('db')
-  const revision = await requireOwnedRevision(context, context.req.param('revisionId'))
+  const revision = await requireRevision(context, context.req.param('revisionId'), 'read')
   const [metrics] = await db
     .select()
     .from(analysisMetrics)
@@ -305,7 +331,9 @@ revisionRoutes.put(
     const db = context.get('db')
     const actor = context.get('actor')
     const config = resolveConfig(context.env)
-    const revision = await requireOwnedRevision(context, context.req.param('revisionId'))
+    // `own`: the snapshot IS the analytical record of this revision, so only the researcher whose
+    // revision it is may file one. Nothing widens this level.
+    const revision = await requireRevision(context, context.req.param('revisionId'), 'own')
     const query = context.req.valid('query')
     const now = new Date()
 
@@ -336,11 +364,15 @@ revisionRoutes.put(
     // here means the cleanup runs exactly when quota pressure is real.
     await sweepStaleReservations(db, context.env.AAT_OBJECTS, now)
 
-    await ensureQuotaRow(db, actor.userId, config.defaultQuotaBytes, now)
-    const key = snapshotKey(actor.userId, revision.runId, revision.id, query.format)
+    // Storage is charged to the owner of the run, never to whoever made the request. Here the two
+    // are the same person by construction (`own` above), and it is written this way so that the
+    // accounting rule is stated identically on all three upload paths rather than inferred.
+    const ownerUserId = revision.ownerUserId
+    await ensureQuotaRow(db, ownerUserId, config.defaultQuotaBytes, now)
+    const key = snapshotKey(ownerUserId, revision.runId, revision.id, query.format)
     const reservation = await reserveQuota(
       db,
-      actor.userId,
+      ownerUserId,
       query.declaredBytes,
       'snapshot',
       key,
@@ -379,7 +411,7 @@ revisionRoutes.put(
         // R2 verifies this itself and rejects the write on mismatch, so the stored bytes cannot
         // differ from the bytes that were hashed.
         sha256: body.sha256,
-        customMetadata: { revisionId: revision.id, runId: revision.runId, ownerUserId: actor.userId },
+        customMetadata: { revisionId: revision.id, runId: revision.runId, ownerUserId },
       })
 
       // R2 is the authority on how many bytes exist, not the counter kept while reading.
@@ -392,7 +424,7 @@ revisionRoutes.put(
       const objectId = newId()
       await db.insert(cloudObjects).values({
         id: objectId,
-        ownerUserId: actor.userId,
+        ownerUserId,
         kind: 'snapshot',
         r2Key: key,
         byteSize: actualBytes,
@@ -404,7 +436,7 @@ revisionRoutes.put(
         createdAt: now,
       })
 
-      await finaliseReservation(db, reservation, actualBytes, actor.userId, now)
+      await finaliseReservation(db, reservation, actualBytes, ownerUserId, now)
       await db
         .update(analysisRevisions)
         .set({ snapshotObjectId: objectId })
@@ -415,15 +447,16 @@ revisionRoutes.put(
         action: 'snapshot.upload',
         targetType: 'analysis_revision',
         targetId: revision.id,
+        targetOwnerUserId: ownerUserId,
         details: { byteSize: actualBytes, format: query.format },
         headers: context.req.raw.headers,
       })
 
       return context.json({ object: { id: objectId, byteSize: actualBytes }, created: true }, 201)
     } catch (error) {
-      // Every failure path gives the reservation back. Leaking one would slowly consume a user's
-      // quota with bytes that were never stored.
-      await releaseReservation(db, reservation, actor.userId, now)
+      // Every failure path gives the reservation back — to the account it was taken from. Leaking
+      // one would slowly consume a user's quota with bytes that were never stored.
+      await releaseReservation(db, reservation, ownerUserId, now)
       throw error
     }
   },
@@ -432,7 +465,7 @@ revisionRoutes.put(
 revisionRoutes.get('/revisions/:revisionId/snapshot', requireCapability('cloud:read'), async (context) => {
   const db = context.get('db')
   const actor = context.get('actor')
-  const revision = await requireOwnedRevision(context, context.req.param('revisionId'))
+  const revision = await requireRevision(context, context.req.param('revisionId'), 'read')
   if (!revision.snapshotObjectId) throw new ApiError('RESOURCE_NOT_FOUND')
 
   const [record] = await db
@@ -440,7 +473,10 @@ revisionRoutes.get('/revisions/:revisionId/snapshot', requireCapability('cloud:r
     .from(cloudObjects)
     .where(and(eq(cloudObjects.id, revision.snapshotObjectId), isNull(cloudObjects.deletedAt)))
     .limit(1)
-  if (!record || record.ownerUserId !== actor.userId) throw new ApiError('RESOURCE_NOT_FOUND')
+  if (!record) throw new ApiError('RESOURCE_NOT_FOUND')
+  // Re-asked against the object row rather than inherited from the revision: the two owners agree
+  // by construction, and a check that assumes they do would be silently wrong the day they stop.
+  requireObjectAccess(context, record.ownerUserId, 'read')
 
   const object = await context.env.AAT_OBJECTS.get(record.r2Key)
   if (!object) throw new ApiError('RESOURCE_NOT_FOUND')
@@ -450,6 +486,7 @@ revisionRoutes.get('/revisions/:revisionId/snapshot', requireCapability('cloud:r
     action: 'snapshot.download',
     targetType: 'analysis_revision',
     targetId: revision.id,
+    targetOwnerUserId: revision.ownerUserId,
     headers: context.req.raw.headers,
   })
 
@@ -475,6 +512,11 @@ const sourceQuerySchema = z.object({
  * the behaviour this header exists to make impossible to write by accident.
  *
  * The uploaded filename is stored as metadata and never becomes part of the R2 key.
+ *
+ * `destroy`, not `annotate`: this attaches raw measurement bytes to somebody else's experiment
+ * and charges them for the storage. Consent to a backup of *your* CSV is not consent to a
+ * colleague filing one under your name, so a Researcher reaches only their own runs here and an
+ * administrator reaches the rest.
  */
 revisionRoutes.put(
   '/runs/:runId/source',
@@ -484,7 +526,7 @@ revisionRoutes.put(
     const db = context.get('db')
     const actor = context.get('actor')
     const config = resolveConfig(context.env)
-    const run = await requireOwnedRun(context, context.req.param('runId'))
+    const run = await requireRun(context, context.req.param('runId'), 'destroy')
     const query = context.req.valid('query')
     const now = new Date()
 
@@ -496,13 +538,17 @@ revisionRoutes.put(
     }
 
     await sweepStaleReservations(db, context.env.AAT_OBJECTS, now)
-    await ensureQuotaRow(db, actor.userId, config.defaultQuotaBytes, now)
+
+    // Charged to the run's owner, not to the administrator who uploaded it: the object lives with
+    // the run, and deleting the run has to give the bytes back to the account they came out of.
+    const ownerUserId = run.ownerUserId
+    await ensureQuotaRow(db, ownerUserId, config.defaultQuotaBytes, now)
 
     const objectId = newId()
-    const key = sourceKey(actor.userId, run.id, objectId)
+    const key = sourceKey(ownerUserId, run.id, objectId)
     const reservation = await reserveQuota(
       db,
-      actor.userId,
+      ownerUserId,
       query.declaredBytes,
       'source',
       key,
@@ -519,13 +565,13 @@ revisionRoutes.put(
       const put = await context.env.AAT_OBJECTS.put(key, body.bytes as ArrayBufferView, {
         httpMetadata: { contentType: 'text/csv' },
         sha256: body.sha256,
-        customMetadata: { runId: run.id, ownerUserId: actor.userId },
+        customMetadata: { runId: run.id, ownerUserId },
       })
       const actualBytes = put?.size ?? body.bytes.length
 
       await db.insert(cloudObjects).values({
         id: objectId,
-        ownerUserId: actor.userId,
+        ownerUserId,
         kind: 'source',
         r2Key: key,
         byteSize: actualBytes,
@@ -536,20 +582,21 @@ revisionRoutes.put(
         runId: run.id,
         createdAt: now,
       })
-      await finaliseReservation(db, reservation, actualBytes, actor.userId, now)
+      await finaliseReservation(db, reservation, actualBytes, ownerUserId, now)
 
       await writeAuditLog(db, {
         actorUserId: actor.userId,
         action: 'source.upload',
         targetType: 'run',
         targetId: run.id,
+        targetOwnerUserId: ownerUserId,
         details: { byteSize: actualBytes },
         headers: context.req.raw.headers,
       })
 
       return context.json({ object: { id: objectId, byteSize: actualBytes } }, 201)
     } catch (error) {
-      await releaseReservation(db, reservation, actor.userId, now)
+      await releaseReservation(db, reservation, ownerUserId, now)
       throw error
     }
   },
@@ -558,7 +605,7 @@ revisionRoutes.put(
 revisionRoutes.get('/runs/:runId/source', requireCapability('raw:download'), async (context) => {
   const db = context.get('db')
   const actor = context.get('actor')
-  const run = await requireOwnedRun(context, context.req.param('runId'))
+  const run = await requireRun(context, context.req.param('runId'), 'read')
 
   const [record] = await db
     .select()
@@ -567,7 +614,8 @@ revisionRoutes.get('/runs/:runId/source', requireCapability('raw:download'), asy
       and(eq(cloudObjects.runId, run.id), eq(cloudObjects.kind, 'source'), isNull(cloudObjects.deletedAt)),
     )
     .limit(1)
-  if (!record || record.ownerUserId !== actor.userId) throw new ApiError('RESOURCE_NOT_FOUND')
+  if (!record) throw new ApiError('RESOURCE_NOT_FOUND')
+  requireObjectAccess(context, record.ownerUserId, 'read')
 
   const object = await context.env.AAT_OBJECTS.get(record.r2Key)
   if (!object) throw new ApiError('RESOURCE_NOT_FOUND')
@@ -577,6 +625,7 @@ revisionRoutes.get('/runs/:runId/source', requireCapability('raw:download'), asy
     action: 'source.download',
     targetType: 'run',
     targetId: run.id,
+    targetOwnerUserId: run.ownerUserId,
     headers: context.req.raw.headers,
   })
 
@@ -586,7 +635,7 @@ revisionRoutes.get('/runs/:runId/source', requireCapability('raw:download'), asy
 revisionRoutes.delete('/runs/:runId/source', requireCapability('raw:delete'), async (context) => {
   const db = context.get('db')
   const actor = context.get('actor')
-  const run = await requireOwnedRun(context, context.req.param('runId'))
+  const run = await requireRun(context, context.req.param('runId'), 'destroy')
   const now = new Date()
 
   const records = await db
@@ -596,8 +645,11 @@ revisionRoutes.delete('/runs/:runId/source', requireCapability('raw:delete'), as
       and(eq(cloudObjects.runId, run.id), eq(cloudObjects.kind, 'source'), isNull(cloudObjects.deletedAt)),
     )
 
+  // Every object under a run belongs to the run's owner, and the caller has already been resolved
+  // against that owner at `destroy`. Re-testing each row against the *caller* here would skip the
+  // owner's objects on exactly the administrative path this route exists to serve, and would
+  // leave the bytes in R2 while reporting a successful delete.
   for (const record of records) {
-    if (record.ownerUserId !== actor.userId) continue
     await context.env.AAT_OBJECTS.delete(record.r2Key)
     await db.update(cloudObjects).set({ deletedAt: now }).where(eq(cloudObjects.id, record.id))
     await releaseUsage(db, record.ownerUserId, record.byteSize, now)
@@ -608,6 +660,7 @@ revisionRoutes.delete('/runs/:runId/source', requireCapability('raw:delete'), as
     action: 'source.delete',
     targetType: 'run',
     targetId: run.id,
+    targetOwnerUserId: run.ownerUserId,
     details: { objectsDeleted: records.length },
     headers: context.req.raw.headers,
   })
