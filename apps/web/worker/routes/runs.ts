@@ -19,6 +19,7 @@ import { ApiError, parseRunFilename } from '@aat/shared'
 import { and, asc, desc, eq, gte, inArray, isNull, like, lt, lte, or, type SQL, sql } from 'drizzle-orm'
 import { Hono } from 'hono'
 import { z } from 'zod'
+import { rowsAffected } from '../db/client.ts'
 import {
   analysisRevisions,
   cloudObjects,
@@ -407,10 +408,31 @@ runRoutes.delete('/:runId', requireCapability('analysis:delete'), async (context
     .from(cloudObjects)
     .where(and(eq(cloudObjects.runId, run.id), isNull(cloudObjects.deletedAt)))
 
+  /*
+   * The quota release is gated on winning the tombstone, not on having read the row.
+   *
+   * `requireRun` and this loop are several statements apart, so two concurrent deletes of the same
+   * run can both pass the ownership check and both walk the same object list. An unconditional
+   * decrement would then release the same bytes twice, drifting the account's usage below what it
+   * actually stores — and quota is enforced against that number, so the drift is free storage.
+   *
+   * `AND deleted_at IS NULL` in the UPDATE makes the tombstone the claim: exactly one caller sees
+   * a row affected, and only that caller releases. This is the same shape as every other race in
+   * this codebase — the invitation claim, the quota reservation, the poster render claim — a
+   * conditional UPDATE whose WHERE clause carries the entire precondition.
+   *
+   * The R2 delete stays unconditional and outside the claim, because it is idempotent and because
+   * deleting bytes twice is harmless where releasing them twice is not.
+   */
   for (const object of objects) {
     await context.env.AAT_OBJECTS.delete(object.r2Key)
-    await db.update(cloudObjects).set({ deletedAt: now }).where(eq(cloudObjects.id, object.id))
-    await releaseUsage(db, object.ownerUserId, object.byteSize, now)
+    const claimed = await db
+      .update(cloudObjects)
+      .set({ deletedAt: now })
+      .where(and(eq(cloudObjects.id, object.id), isNull(cloudObjects.deletedAt)))
+    if (rowsAffected(claimed) === 1) {
+      await releaseUsage(db, object.ownerUserId, object.byteSize, now)
+    }
   }
 
   const revisionIds = await db

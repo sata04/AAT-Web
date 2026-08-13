@@ -39,6 +39,14 @@ export type AuditAction =
   | 'passkey.authenticate_failed'
   | 'passkey.delete'
   | 'passkey.recover'
+  /**
+   * Every live session of one account ended at once, by an administrator.
+   *
+   * Distinct from the user's own sign-out because the actor is not the subject: this is somebody
+   * being removed from an account, and `details.reason` says whether that was a ban or the start of
+   * a recovery. Both are events an investigator needs to be able to find later.
+   */
+  | 'session.revoke_all'
   | 'run.create'
   | 'run.update'
   | 'run.delete'

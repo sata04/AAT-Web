@@ -18,11 +18,12 @@
  *
  * ## What this screen does not offer, and why
  *
- *  - **Session revocation.** There is no AAT route for it. What there *is* is 停止: Better Auth's
- *    admin plugin rejects a banned user's session on every request and the passkey seam refuses
- *    before a cookie is ever issued, so disabling an account ends its sessions immediately. That is
- *    the honest control to offer; a button that called an endpoint this application does not serve
- *    would be worse than none.
+ *  - **Session revocation as a separate button.** 停止 already is one: banning deletes the
+ *    account's session rows, `requireSession` refuses a banned user on every subsequent request,
+ *    and the passkey seam refuses before a new cookie is ever issued. Starting a recovery revokes
+ *    them too, because recovering an account whose old sessions are still live has recovered
+ *    nothing. A third control that did the same thing under a different name would only invite the
+ *    question of which one really worked.
  *  - **A separate "disable" and "ban".** The backend has one boolean and one reason string. Two
  *    controls over one column would be an invented distinction that the audit log — which records
  *    `user.ban` / `user.unban` — could not tell apart.
