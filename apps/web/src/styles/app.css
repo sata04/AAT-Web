@@ -1185,3 +1185,307 @@ textarea {
   color: var(--text-muted);
   font-size: var(--font-size-sm);
 }
+
+/* =============================================================================================
+ * Admin console
+ *
+ * Appended as one delimited block so this screen's styles can be read — and removed — as a unit.
+ * Everything below is structure plus the existing tokens: no new colour is introduced, and no rule
+ * here is the only carrier of a status. Every state this section tints is also stated in words in
+ * the markup (有効 / 停止, 稼働中 / 停止中, 余裕あり / 上限間近), because a colour is not a fact a
+ * monochrome screen, a printed report or a screen reader can recover.
+ * ========================================================================================== */
+
+/* ----- The console's own navigation, matching .app-nav's mechanism exactly ----- */
+
+.admin-nav {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2xs);
+  padding-bottom: var(--space-sm);
+  border-bottom: 1px solid var(--border);
+}
+
+.admin-nav__link {
+  padding: var(--space-2xs) var(--space-sm);
+  border: 1px solid transparent;
+  border-radius: var(--radius-form);
+  color: var(--text-secondary);
+  font-size: var(--size-body);
+  text-decoration: none;
+}
+
+.admin-nav__link:hover {
+  background: var(--bg-tertiary);
+  color: var(--text-primary);
+}
+
+.admin-nav__link[aria-current="page"] {
+  border-color: var(--border-strong);
+  background: var(--bg-selected);
+  color: var(--text-primary);
+  font-weight: var(--weight-medium);
+}
+
+/* ----- Facts: a definition list used as a two-column table of stated values ----- */
+
+.admin-facts {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-sm);
+  margin: 0;
+}
+
+/*
+ * The grid variant is for short scalar facts. `auto-fit` with a wide-ish minimum keeps a narrow
+ * window at one column rather than squeezing a label and a byte count into 12em.
+ */
+.admin-facts--grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(19rem, 1fr));
+  gap: var(--space-md);
+}
+
+.admin-facts__row {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3xs);
+}
+
+.admin-facts__row dt {
+  color: var(--text-secondary);
+  font-size: var(--size-small);
+}
+
+.admin-facts__row dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+/* ----- Status words. The word is the signal; the colour only agrees with it. ----- */
+
+.admin-flag {
+  display: inline-block;
+  padding: 0 var(--space-2xs);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-pill);
+  font-size: var(--size-small);
+  white-space: nowrap;
+}
+
+.admin-flag--good {
+  border-color: var(--success);
+  color: var(--success);
+}
+
+.admin-flag--bad {
+  border-color: var(--error);
+  color: var(--error);
+}
+
+.admin-flag--warn {
+  border-color: var(--warning);
+  color: var(--warning);
+}
+
+.admin-flag--muted {
+  color: var(--text-secondary);
+}
+
+/* ----- The storage meter ----- */
+
+.admin-meter {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3xs);
+}
+
+/*
+ * A native <meter> carries the proportion semantically. Its default rendering differs between
+ * engines, which is acceptable here precisely because the number and the word beside it are what
+ * the reader is meant to use — the bar is the glance, not the answer.
+ */
+.admin-meter__bar {
+  width: 100%;
+  max-width: 22rem;
+  height: 0.75rem;
+}
+
+.admin-meter__text {
+  font-size: var(--size-small);
+}
+
+.admin-meter__detail {
+  color: var(--text-secondary);
+  font-size: var(--size-small);
+}
+
+.admin-meter--critical .admin-meter__text,
+.admin-meter--over .admin-meter__text {
+  color: var(--error);
+}
+
+.admin-meter--warning .admin-meter__text {
+  color: var(--warning);
+}
+
+/* ----- Tables and lists ----- */
+
+.admin-users__name {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3xs);
+  text-align: left;
+}
+
+.admin-consumers,
+.admin-passkeys,
+.admin-lookup {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-md);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.admin-consumers__item {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3xs);
+}
+
+.admin-consumers__name {
+  font-weight: var(--weight-medium);
+}
+
+.admin-passkeys__item,
+.admin-lookup__head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: var(--space-sm);
+}
+
+.admin-lookup__item {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-sm);
+  padding-bottom: var(--space-sm);
+  border-bottom: 1px solid var(--border);
+}
+
+/* ----- The per-account action panel ----- */
+
+.admin-actions {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(20rem, 1fr));
+  gap: var(--space-lg);
+  margin-top: var(--space-md);
+}
+
+.admin-actions__group {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-sm);
+  align-items: flex-start;
+  padding: var(--space-md);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-panel);
+}
+
+/*
+ * The destructive group is bordered in the error colour *and* headed 「アカウントの削除」 with a
+ * paragraph naming what is destroyed. The border is the last of the three signals, never the first.
+ */
+.admin-actions__group--danger {
+  border-color: var(--error);
+}
+
+.admin-actions__title {
+  margin: 0;
+  font-size: var(--size-subheader);
+  font-weight: var(--weight-bold);
+}
+
+.admin-actions__row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: var(--space-sm);
+}
+
+/* ----- Forms ----- */
+
+.admin-form {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-md);
+}
+
+.admin-form__fieldset {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-lg);
+  margin: 0;
+  padding: var(--space-sm) var(--space-md);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-panel);
+}
+
+.admin-form__choice {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3xs);
+  max-width: 26rem;
+}
+
+/* ----- The one-time registration URL ----- */
+
+.admin-secret__url {
+  width: 100%;
+  font-family: var(--font-mono);
+}
+
+/* ----- The audit log ----- */
+
+.admin-audit td {
+  vertical-align: top;
+}
+
+.admin-audit__details {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2xs);
+  margin: var(--space-2xs) 0 0;
+}
+
+.admin-audit__detail {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2xs);
+}
+
+.admin-audit__detail dt {
+  color: var(--text-secondary);
+  font-family: var(--font-mono);
+  font-size: var(--size-small);
+}
+
+/*
+ * Audit detail values are attacker-influenced text. `overflow-wrap: anywhere` keeps a long
+ * unbroken string inside its cell instead of stretching the table off the page, and the value is
+ * already length-capped by `src/admin/audit.ts` before it reaches here.
+ */
+.admin-audit__detail dd {
+  margin: 0;
+  font-family: var(--font-mono);
+  font-size: var(--size-small);
+  overflow-wrap: anywhere;
+}
+
+.admin-breaker {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-md);
+}

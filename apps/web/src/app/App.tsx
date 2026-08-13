@@ -28,10 +28,19 @@
 
 import { RouteErrorBoundary } from '../components/RouteErrorBoundary.tsx'
 import { RouterProvider, useRoute } from '../router/Router.tsx'
+import { AdminAuditScreen } from '../screens/AdminAuditScreen.tsx'
+import { AdminInvitationsScreen } from '../screens/AdminInvitationsScreen.tsx'
+import { AdminOverviewScreen } from '../screens/AdminOverviewScreen.tsx'
+import { AdminRendererScreen } from '../screens/AdminRendererScreen.tsx'
+import { AdminRunsScreen } from '../screens/AdminRunsScreen.tsx'
+import { AdminSettingsScreen } from '../screens/AdminSettingsScreen.tsx'
+import { AdminUsersScreen } from '../screens/AdminUsersScreen.tsx'
 import { AnalyzerScreen } from '../screens/AnalyzerScreen.tsx'
 import { InvitationScreen } from '../screens/InvitationScreen.tsx'
 import { NotFoundScreen } from '../screens/NotFoundScreen.tsx'
-import { PendingScreen } from '../screens/PendingScreen.tsx'
+// `PendingScreen` is no longer reached from here: the seven admin routes it stood in for now have
+// screens. The module is left in place rather than deleted — it is the honest answer for any future
+// route whose API exists before its UI does, which is exactly the situation it was written for.
 import { RunDetailScreen } from '../screens/RunDetailScreen.tsx'
 import { RunsScreen } from '../screens/RunsScreen.tsx'
 import { SecurityScreen } from '../screens/SecurityScreen.tsx'
@@ -57,24 +66,19 @@ function CurrentScreen(): React.JSX.Element {
     case 'run':
       return <RunDetailScreen />
     case 'admin':
-      return <PendingScreen title="管理" description="このデプロイの利用者・招待・保存容量を管理します。" />
+      return <AdminOverviewScreen />
     case 'admin-users':
-      return <PendingScreen title="利用者" description="利用者の権限、停止、削除を管理します。" />
+      return <AdminUsersScreen />
     case 'admin-invitations':
-      return <PendingScreen title="招待" description="登録用・再登録用の招待リンクを発行し、失効させます。" />
+      return <AdminInvitationsScreen />
     case 'admin-runs':
-      return <PendingScreen title="実験と保存容量" description="デプロイ全体の実験数と保存量を表示します。" />
+      return <AdminRunsScreen />
     case 'admin-renderer':
-      return (
-        <PendingScreen
-          title="ポスターレンダラー"
-          description="ポスター生成コンテナのサーキットブレーカーを操作します。"
-        />
-      )
+      return <AdminRendererScreen />
     case 'admin-audit':
-      return <PendingScreen title="監査ログ" description="管理操作と認証イベントの記録を表示します。" />
+      return <AdminAuditScreen />
     case 'admin-settings':
-      return <PendingScreen title="設定" description="デプロイ全体の設定と利用上限を表示します。" />
+      return <AdminSettingsScreen />
     case 'not-found':
       return <NotFoundScreen />
   }
