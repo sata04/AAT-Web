@@ -198,15 +198,20 @@ jobs:
           doppler-config: prd
 
       # Fail closed rather than deploying something subtly broken. Without
-      # DEPLOY_HOSTNAME the Worker has no public route; without
+      # AAT_PAGES_PROJECT there is nothing to deploy the client to; without
       # BETTER_AUTH_SECRET / AAT_RP_ID passkeys cannot be verified, and an RP ID
       # mismatch would invalidate every credential users have registered.
+      #
+      # CLOUDFLARE_ZONE_ID is deliberately absent. The public origin is the Pages
+      # project's own hostname, which is not in a zone this account controls —
+      # so there is no zone to name, and, as docs/security-scanning.md records,
+      # no zone-scoped WAF or rate limiting either.
       - name: Validate required secrets
         env:
           CF_DEPLOY_TOKEN_VALUE: ${{ steps.doppler.outputs.CF_DEPLOY_TOKEN_VALUE }}
           CLOUDFLARE_ACCOUNT_ID: ${{ steps.doppler.outputs.CLOUDFLARE_ACCOUNT_ID }}
-          CLOUDFLARE_ZONE_ID: ${{ steps.doppler.outputs.CLOUDFLARE_ZONE_ID }}
           DEPLOY_HOSTNAME: ${{ steps.doppler.outputs.DEPLOY_HOSTNAME }}
+          AAT_PAGES_PROJECT: ${{ steps.doppler.outputs.AAT_PAGES_PROJECT }}
           BETTER_AUTH_SECRET: ${{ steps.doppler.outputs.BETTER_AUTH_SECRET }}
           BETTER_AUTH_URL: ${{ steps.doppler.outputs.BETTER_AUTH_URL }}
           AAT_RP_ID: ${{ steps.doppler.outputs.AAT_RP_ID }}
@@ -214,7 +219,7 @@ jobs:
           AAT_D1_DATABASE_ID: ${{ steps.doppler.outputs.AAT_D1_DATABASE_ID }}
         run: |
           missing=""
-          for key in CF_DEPLOY_TOKEN_VALUE CLOUDFLARE_ACCOUNT_ID CLOUDFLARE_ZONE_ID DEPLOY_HOSTNAME \
+          for key in CF_DEPLOY_TOKEN_VALUE CLOUDFLARE_ACCOUNT_ID DEPLOY_HOSTNAME AAT_PAGES_PROJECT \
                      BETTER_AUTH_SECRET BETTER_AUTH_URL AAT_RP_ID AAT_TRUSTED_ORIGINS \
                      AAT_D1_DATABASE_ID; do
             if [ -z "${!key}" ]; then missing="$missing $key"; fi
@@ -302,24 +307,95 @@ jobs:
             --config "${{ steps.wrangler_config.outputs.path }}"
           rm -f "$RUNNER_TEMP/worker-secrets.json"
 
-      # The production hostname is deliberately not committed to the repository;
-      # it comes from Doppler. The Workers Domains API is idempotent, so
-      # re-running converges on the same record.
-      - name: Ensure custom domain
+      # ---------------------------------------------------------------------
+      # The public origin. Deployed SECOND, on purpose.
+      #
+      # The Pages Function holds a Service binding to the Worker above, and a
+      # binding to a Worker that does not yet exist is at best a failed deploy
+      # and at worst a live front door onto nothing. Worker first, Pages second,
+      # on every release, so the callee is always in place before the caller
+      # references it.
+      #
+      # The old "Ensure custom domain" step is gone. It PUT `service: "aat-web"`
+      # to the Workers Domains API, and the Worker is now `aat-api` — the call
+      # would have failed *after* the migrations had already been applied, which
+      # is the worst place in this workflow to fail. Worse, "fixing" it by
+      # renaming the service would have given the private Worker a public custom
+      # domain: a second WebAuthn origin and an unauthenticated-looking path to
+      # D1 and R2, defeating `workers_dev: false` entirely. A Pages project needs
+      # no domain step at all.
+      # ---------------------------------------------------------------------
+
+      # `wrangler pages deploy` has no --config flag; it reads wrangler.jsonc
+      # from the working directory. apps/web/wrangler.jsonc is the Worker's — it
+      # has `main` and no `pages_build_output_dir`, so Pages would warn, ignore
+      # it, and deploy WITHOUT the service binding, making env.AAT_API undefined
+      # and failing every /api/* request on a green deploy. Hence a directory of
+      # its own, and a generated configuration inside it.
+      #
+      # Generated rather than committed because a Pages project's hostname is
+      # mechanically its project name, and this repository does not carry its own
+      # deployment's hostname.
+      - name: Resolve Pages configuration
+        working-directory: apps/web
+        env:
+          AAT_PAGES_PROJECT: ${{ steps.doppler.outputs.AAT_PAGES_PROJECT }}
+        run: node scripts/resolve-pages-config.mjs
+
+      # Assert what Pages infers from the directory instead of reading from
+      # configuration: SPA fallback (on only while no top-level 404.html exists)
+      # and Function scoping (_routes.json, which replaces run_worker_first).
+      # Both fail as a plausible 200 rather than as an error, and neither is
+      # reproduced by `wrangler pages dev`, so this is the last place to catch
+      # them.
+      - name: Check the Pages output
+        working-directory: apps/web
+        run: node scripts/check-pages-output.mjs dist/client
+
+      # --branch is explicit and must equal the project's production branch.
+      # Wrangler otherwise infers it from the git workspace, and Actions checks
+      # out in detached HEAD — which never matches, so the release would land as
+      # a PREVIEW: a permanent, public, unlisted hostname running the same
+      # Function, with the same Service binding, onto the same D1 and R2.
+      #
+      # NOTE on the trust boundary: this step compiles apps/web/pages/functions/
+      # with esbuild, inside the job that holds the credentials, which the header
+      # of this file says must not happen. There is no supported way to
+      # pre-compile a Pages Function without switching to advanced mode, where a
+      # _worker.js takes over every request and the routing model changes. The
+      # regression is therefore accepted and bounded instead: the Function is a
+      # single reviewed file, typechecked by apps/web/pages/tsconfig.json, and
+      # resolve-pages-config.mjs refuses to run if it imports anything — so what
+      # compiles here can contain nothing but itself.
+      - name: Deploy the client to Pages
+        working-directory: apps/web/pages
         env:
           CLOUDFLARE_API_TOKEN: ${{ steps.doppler.outputs.CF_DEPLOY_TOKEN_VALUE }}
           CLOUDFLARE_ACCOUNT_ID: ${{ steps.doppler.outputs.CLOUDFLARE_ACCOUNT_ID }}
-          CLOUDFLARE_ZONE_ID: ${{ steps.doppler.outputs.CLOUDFLARE_ZONE_ID }}
-          DEPLOY_HOSTNAME: ${{ steps.doppler.outputs.DEPLOY_HOSTNAME }}
+          AAT_PAGES_PROJECT: ${{ steps.doppler.outputs.AAT_PAGES_PROJECT }}
         run: |
-          jq -n 'env | {
-            zone_id: .CLOUDFLARE_ZONE_ID,
-            hostname: .DEPLOY_HOSTNAME,
-            service: "aat-web",
-            environment: "production"
-          }' | curl -sS --fail-with-body -o /dev/null \
-            -X PUT "https://api.cloudflare.com/client/v4/accounts/${CLOUDFLARE_ACCOUNT_ID}/workers/domains" \
-            -H "Authorization: Bearer ${CLOUDFLARE_API_TOKEN}" \
-            -H "Content-Type: application/json" \
-            --data @-
-          echo "Custom domain assignment confirmed"
+          pnpm exec wrangler pages deploy \
+            --project-name "$AAT_PAGES_PROJECT" \
+            --branch main \
+            --commit-dirty=true \
+            | tee "$RUNNER_TEMP/pages-deploy.log"
+
+      # Three things that are only visible in the deploy log, each of which
+      # otherwise produces a working-looking site with a broken API.
+      - name: Confirm the deployment carries its Function and routes
+        run: |
+          log="$RUNNER_TEMP/pages-deploy.log"
+          fail=0
+          grep -qi 'Functions bundle' "$log" || {
+            echo "::error::No Functions bundle was uploaded. /api/* would fall through to the SPA and return index.html with HTTP 200."
+            fail=1
+          }
+          grep -qi '_routes.json' "$log" || {
+            echo "::error::_routes.json was not uploaded. Pages would generate its own route table and send static requests to the Function."
+            fail=1
+          }
+          grep -qi 'Deployment complete' "$log" || {
+            echo "::error::wrangler did not report a completed deployment."
+            fail=1
+          }
+          exit $fail
