@@ -49,7 +49,7 @@ import { adminRoutes } from '../../worker/routes/admin.ts'
 import { meRoutes } from '../../worker/routes/me.ts'
 import { posterRoutes } from '../../worker/routes/posters.ts'
 import { revisionRoutes } from '../../worker/routes/revisions.ts'
-import { projectRoutes, runRoutes } from '../../worker/routes/runs.ts'
+import { projectRoutes, runRoutes, workspaceRoutes } from '../../worker/routes/runs.ts'
 
 /* ------------------------------------------------------------------------------------------- */
 /* The router, assembled from the entry point's own mount table                                  */
@@ -64,6 +64,7 @@ const ROUTERS: Readonly<Record<string, Hono<any>>> = {
   revisionRoutes,
   posterRoutes,
   adminRoutes,
+  workspaceRoutes,
 }
 
 interface RoutePattern {
@@ -184,6 +185,7 @@ async function callEveryEndpoint(): Promise<void> {
   await gateway.deleteMyPasskey('pk_1')
 
   await gateway.listRuns({ search: '260811', limit: 10 })
+  await gateway.listWorkspaceRuns({ search: '260811', limit: 10 })
   await gateway.createRun({ originalFilename: '260811a_data.csv' })
   await gateway.fetchRun(runId)
   await gateway.updateRun(runId, { memo: 'memo' })
@@ -312,6 +314,7 @@ describe('gateway paths against the Worker router', () => {
       'listProjects',
       'listRevisions',
       'listRuns',
+      'listWorkspaceRuns',
       'requestAutoPoster',
       'retryPoster',
       'revokeInvitation',
