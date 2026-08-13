@@ -554,8 +554,12 @@ them and no way to find them.
 
 ## Outstanding
 
-- **The Run Gallery and Admin console have no UI.** The routes described here exist and are
-  covered by the workerd test suite; the screens that would call them do not.
+- ~~**The Run Gallery and Admin console have no UI.**~~ Both exist. The gallery reads
+  `GET /workspace/runs` (every member's runs) or `GET /runs` (the caller's own), a Run detail screen
+  replays a snapshot without the original CSV, and the seven admin screens cover membership,
+  invitations, runs and storage, the renderer breaker, the audit log and settings. What each admin
+  screen *cannot* answer is listed on the screen itself rather than guessed at — see the gaps noted
+  under the relevant tables above.
 - ~~**Part of `apps/web/src/cloud/gateway.ts` still targets routes the Worker does not serve.**~~
   Fixed. Snapshot upload is `PUT /revisions/:revisionId/snapshot` with `declaredBytes`, `sha256` and
   `format` as query parameters, reached through `POST /runs` and `POST /runs/:runId/revisions`; the
@@ -563,9 +567,9 @@ them and no way to find them.
   every path the gateway constructs resolves to a route the Hono app serves, so a path that does not
   exist fails CI instead of arriving in production as `RESOURCE_NOT_FOUND` — which the gateway reads
   as "this deployment has no cloud half", the reason the original mismatch was invisible for so long.
-- **The comment on `poster_figures.status` in `schema.ts` names the wrong vocabulary.** It reads
-  `'pending' | 'rendering' | 'succeeded' | 'failed'`; the values the Worker and `@aat/plot-spec`
-  actually use are `queued`, `rendering`, `ready`, `failed`.
+- ~~**The comment on `poster_figures.status` in `schema.ts` names the wrong vocabulary.**~~ Fixed;
+  the comment now names `queued`, `rendering`, `ready`, `failed`, which is what the Worker and
+  `@aat/plot-spec` actually use.
 - **Snapshots are not compacted or tiered.** Every revision keeps its full-resolution object for
   as long as its run exists. Given the sizes involved this is the right default, but there is no
   lifecycle policy to lean on if it stops being one.
