@@ -27,7 +27,8 @@
  */
 
 import { type ErrorCode, isErrorCode } from '@aat/shared'
-import type { CloudErrorDetails, CloudOutcome, RunSummary } from '../cloud/gateway.ts'
+import type { AdminUser, CloudErrorDetails, CloudOutcome, RunSummary } from '../cloud/gateway.ts'
+import { listAdminUsers } from '../cloud/gateway.ts'
 
 const API_BASE = '/api/v1'
 
@@ -205,4 +206,80 @@ export interface WorkspaceRunQuery {
  */
 export function listWorkspaceRuns(query: WorkspaceRunQuery = {}): Promise<CloudOutcome<WorkspaceRunPage>> {
   return request<WorkspaceRunPage>(`/workspace/runs${queryString({ ...query })}`, { method: 'GET' })
+}
+
+/* ------------------------------------------------------------------------------------------- */
+/* Two bounded aggregations the console needs and no single route answers                       */
+/* ------------------------------------------------------------------------------------------- */
+
+/** The `/admin/users` ceiling. Asking for more is a validation failure, not a bigger page. */
+const ADMIN_USER_PAGE_LIMIT = 200
+
+/**
+ * Every member of the deployment, by following the cursor.
+ *
+ * The user table is the console's membership list and half the screens join against it — the
+ * storage report labels its rows from it, the audit log's actor ids are resolved through it, the
+ * run listing's owner filter is built from it. A *page* of members cannot serve any of those: a
+ * storage row whose user happened to be on page two would appear with no name, and an owner filter
+ * would silently omit half the team.
+ *
+ * So the pages are followed, and the walk is bounded rather than open. `maxPages` is the promise
+ * this function makes to the browser: at most `maxPages × 200` rows and at most `maxPages`
+ * requests, whatever the deployment holds. `complete` says which happened, and every caller shows
+ * it — a list quietly truncated at a thousand members would be a list that answers "who is in this
+ * deployment" incorrectly, which is worse than one that says it stopped counting.
+ *
+ * This deployment is one research group (`docs/cloud-data-model.md`), so five pages is roughly two
+ * orders of magnitude of headroom over any real membership.
+ */
+export async function listAllAdminUsers(
+  maxPages = 5,
+): Promise<CloudOutcome<{ users: AdminUser[]; complete: boolean }>> {
+  const users: AdminUser[] = []
+  let cursor: string | undefined
+  for (let page = 0; page < maxPages; page += 1) {
+    const outcome = await listAdminUsers({ limit: ADMIN_USER_PAGE_LIMIT, cursor })
+    // A failure part-way through is a failure: half a membership list presented as the whole one is
+    // exactly the silent-omission failure this function exists to avoid.
+    if (!outcome.ok) return outcome
+    users.push(...outcome.value.users)
+    if (outcome.value.nextCursor === null) return { ok: true, value: { users, complete: true } }
+    cursor = outcome.value.nextCursor
+  }
+  return { ok: true, value: { users, complete: false } }
+}
+
+export interface OwnerRunCount {
+  count: number
+  /** True when the walk hit its page bound, so `count` is a floor rather than a total. */
+  truncated: boolean
+}
+
+/**
+ * How many runs one member owns.
+ *
+ * There is no route that counts runs per user — `GET /admin/storage` counts objects and bytes, and
+ * the run listings return rows — so this counts rows through the team gallery with
+ * `ownerUserId=`, one page at a time, and stops. It is deliberately *not* fired for every row of
+ * the user table: `maxPages × 100` requests per screen load would be the console generating more
+ * load than the researchers it is watching. The users screen offers it per account, on demand.
+ *
+ * The result is honest about its bound. `truncated` means "at least this many", and the screen says
+ * so with a plus sign rather than presenting a floor as a total.
+ */
+export async function countRunsForOwner(
+  ownerUserId: string,
+  maxPages = 5,
+): Promise<CloudOutcome<OwnerRunCount>> {
+  let count = 0
+  let cursor: string | undefined
+  for (let page = 0; page < maxPages; page += 1) {
+    const outcome = await listWorkspaceRuns({ ownerUserId, limit: 100, cursor })
+    if (!outcome.ok) return outcome
+    count += outcome.value.runs.length
+    if (outcome.value.nextCursor === null) return { ok: true, value: { count, truncated: false } }
+    cursor = outcome.value.nextCursor
+  }
+  return { ok: true, value: { count, truncated: true } }
 }

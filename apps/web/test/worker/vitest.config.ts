@@ -131,7 +131,11 @@ export default defineConfig({
     }),
   ],
   test: {
-    include: ['**/*.spec.ts'],
+    // Anchored to this directory, not `**`. The pattern is resolved against the project root
+    // (apps/web), so a bare `**/*.spec.ts` also matches `e2e/specs/*.spec.ts` — Playwright specs,
+    // which import @playwright/test and cannot even be imported inside workerd. `.spec.ts` is the
+    // right suffix for both suites; what distinguishes them is where they live, so the glob says so.
+    include: ['test/worker/**/*.spec.ts'],
     setupFiles: [path.join(here, 'setup.ts')],
     // The invitation race and the quota race run several requests at once; a generous timeout
     // keeps a slow CI machine from turning a passing race into a flake.
