@@ -294,3 +294,23 @@ reason = "pytest: not invoked by the running service; fixed by the pytest 9.1.1 
 id = "PYSEC-2026-1845"
 ignoreUntil = 2026-10-12
 reason = "pytest: not invoked by the running service; fixed by the pytest 9.1.1 bump on the V1 branch."
+
+# ---------------------------------------------------------------------------
+# nanoid 3.3.17 — 1 advisory, and this entry is bookkeeping, not a decision
+#
+# Reached only through postcss <- vite, i.e. build tooling. Confirmed absent
+# from the deployed artefact: the Worker bundle produced by `wrangler deploy
+# --dry-run` contains neither the package name nor its implementation markers
+# (`urlAlphabet`, `useandom`).
+#
+# The fix is a version bump and it is Renovate's to make — the entry exists so
+# that "OSV is red" keeps meaning "something NEW appeared" while that happens,
+# rather than going red permanently and training everyone to skim past it. The
+# date is deliberately short: if Renovate has not landed it by then, that is
+# itself the thing worth being told about.
+# ---------------------------------------------------------------------------
+
+[[IgnoredVulns]]
+id = "GHSA-2v37-7h3g-55p8"
+ignoreUntil = 2026-09-13
+reason = "nanoid: build-tooling only (postcss <- vite), absent from the Worker bundle; awaiting Renovate."
