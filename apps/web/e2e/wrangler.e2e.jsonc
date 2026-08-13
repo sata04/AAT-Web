@@ -9,30 +9,36 @@
    * What is the same as production, on purpose:
    *   - `worker/index.ts` is the code under test, reached through `e2e/worker/entry.ts`;
    *   - the compatibility date and `nodejs_compat`, so Better Auth boots the way it deploys;
-   *   - Workers Static Assets with SPA fallback and `run_worker_first`, so `/register?token=…`
-   *     resolves the same way it will in production;
+   *   - this Worker serves no assets and has no public origin. The browser talks to a Pages dev
+   *     server (`e2e/pages/`) which forwards `/api/*` here over a Service binding, exactly as the
+   *     deployed Pages project does — so the ceremony origin, the session cookie and the extra
+   *     hop are all the ones production has;
    *   - a real local D1 with the committed migrations applied, and a real local R2 bucket.
    *
    * What differs, and why:
    *   - the container binding is a plain Durable Object that proxies to a poster-renderer image
    *     running under Docker (see `e2e/worker/entry.ts`), because `workerd` outside Cloudflare has
    *     no `ctx.container`;
-   *   - `/__e2e__/*` is routed to the Worker so the harness can reach its SQL endpoint;
+   *   - `/__e2e__/*` is forwarded here too, so the harness can reach its SQL endpoint through the
+   *     same path the browser uses rather than round a different side of the stack;
    *   - the five auth secrets are `vars` holding **development-only** values (below).
+   *
+   * What the local stack CANNOT reproduce, and which is therefore asserted at deploy time
+   * instead (see `scripts/check-pages-output.mjs`): `wrangler pages dev` ignores `_routes.json`,
+   * so the guarantee that a logged-out visitor never invokes a Function is not exercised here;
+   * and production Pages replaces an unhandled Function exception with a static asset, where dev
+   * returns the stack trace.
    */
 
-  "name": "aat-web-e2e",
+  "name": "aat-api-e2e",
   "main": "worker/entry.ts",
   "compatibility_date": "2026-07-30",
   "compatibility_flags": ["nodejs_compat"],
 
-  "assets": {
-    "directory": "../dist/client",
-    "binding": "ASSETS",
-    "html_handling": "auto-trailing-slash",
-    "not_found_handling": "single-page-application",
-    "run_worker_first": ["/api/*", "/__e2e__/*"]
-  },
+  // No "assets". The end-to-end stack now mirrors production: a Pages dev
+  // server serves dist/client and forwards /api/* and /__e2e__/* here over a
+  // Service binding, and this Worker answers nothing else. See e2e/pages/ and
+  // e2e/harness/stack.ts.
 
   "d1_databases": [
     {

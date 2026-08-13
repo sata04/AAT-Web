@@ -14,6 +14,7 @@ export default async function globalSetup(): Promise<() => Promise<void>> {
   const stack = await startStack()
 
   process.env.AAT_E2E_BASE_URL = stack.baseUrl
+  process.env.AAT_E2E_API_URL = stack.apiUrl
   process.env.AAT_E2E_HARNESS_TOKEN = stack.harnessToken
   process.env.AAT_E2E_RENDERER = stack.rendererAvailable ? '1' : '0'
 

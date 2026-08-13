@@ -128,10 +128,25 @@ export class Harness {
 }
 
 export function harnessFromEnvironment(): Harness {
-  const baseUrl = process.env.AAT_E2E_BASE_URL
+  /*
+   * The API Worker's own port, not the browser's.
+   *
+   * Cloudflare Pages excludes paths beginning with `_` from Functions routing —
+   * `_worker.js`, `_routes.json` and `_headers` are reserved — so a
+   * `functions/__e2e__/` directory is never invoked and `/__e2e__/sql` falls
+   * through to the static pipeline, which answers 405 to a POST. Verified, not
+   * assumed: that 405 is what nine authenticated specs failed on.
+   *
+   * Renaming the prefix would work, but it would also be the wrong trade. This
+   * endpoint is the suite's stand-in for `wrangler d1 execute --local`; it is
+   * test scaffolding, and routing it through the production front door buys
+   * nothing. What has to mirror production is the path the BROWSER takes, and
+   * that still goes through Pages and the Service binding.
+   */
+  const baseUrl = process.env.AAT_E2E_API_URL
   const token = process.env.AAT_E2E_HARNESS_TOKEN
   if (baseUrl === undefined || token === undefined) {
-    throw new Error('The e2e stack is not running: AAT_E2E_BASE_URL / AAT_E2E_HARNESS_TOKEN are unset.')
+    throw new Error('The e2e stack is not running: AAT_E2E_API_URL / AAT_E2E_HARNESS_TOKEN are unset.')
   }
   return new Harness(baseUrl, token)
 }
