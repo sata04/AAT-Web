@@ -173,5 +173,9 @@ describe('uniqueness constraints', () => {
     // second one from recording their own experiment.
     expect(index?.sql).toContain('owner_user_id')
     expect(index?.sql).toContain('run_code')
+    // ...and to LIVE runs. A run is deleted by stamping `deleted_at` and keeping the row, so
+    // without this predicate a tombstone reserves its run code forever and the experiment can
+    // never be synced again — there is no endpoint that clears `deleted_at`. Migration 0004.
+    expect(index?.sql?.replace(/\s+/g, ' ')).toMatch(/WHERE deleted_at IS NULL/i)
   })
 })

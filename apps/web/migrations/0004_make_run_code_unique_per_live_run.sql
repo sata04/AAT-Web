@@ -1,0 +1,26 @@
+-- Scope run-code uniqueness to LIVE runs, so deleting an experiment no longer burns its run code.
+--
+-- A run is deleted by stamping `deleted_at` and keeping the row (worker/routes/runs.ts). The old
+-- index covered every row including tombstones, so a deleted run went on reserving its code for
+-- that owner forever, and there is no endpoint anywhere that clears `deleted_at`. Re-syncing the
+-- same experiment failed like this, end to end:
+--
+--   POST /runs                  -> 400 run_code_already_exists, naming the TOMBSTONED run's id
+--                                  (the lookup behind that message did not filter `deleted_at`)
+--   the browser then treats it  -> "same run, new revision" and posts against that dead id
+--   POST /runs/:id/revisions    -> 404, because `requireRun` DOES filter `deleted_at`
+--
+-- leaving the user a "not found" for a run they cannot see, cannot list and cannot restore.
+--
+-- This migration is retroactively curative: tombstones already in the table stop matching the
+-- index the moment it is recreated, so codes burned before the fix are freed without a data patch.
+--
+-- Safe as a plain index swap — no table rebuild, so none of migration 0003's twelve-step SQLite
+-- procedure applies. The new predicate is strictly weaker than the old index, so any data that
+-- satisfied the old one satisfies this one and the CREATE cannot fail on existing rows.
+--
+-- After this, several tombstones may share a run code with each other and with one live run. That
+-- is the intent: a tombstone records that an experiment was deleted, and re-syncing is a NEW run
+-- under the same code, not a resurrection — the original's R2 bytes were hard-deleted with it.
+DROP INDEX `runs_owner_run_code_unique`;--> statement-breakpoint
+CREATE UNIQUE INDEX `runs_owner_run_code_unique` ON `runs` (`owner_user_id`,`run_code`) WHERE deleted_at IS NULL;

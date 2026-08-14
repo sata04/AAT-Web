@@ -308,7 +308,25 @@ export const runs = sqliteTable(
     deletedAt: integer('deleted_at', { mode: 'timestamp' }),
   },
   (table) => [
-    uniqueIndex('runs_owner_run_code_unique').on(table.ownerUserId, table.runCode),
+    /*
+     * One LIVE run per code per owner.
+     *
+     * The `WHERE deleted_at IS NULL` is the whole point and was missing until migration 0004. A run
+     * is deleted by stamping `deleted_at` and keeping the row, so without the predicate a tombstone
+     * went on reserving its run code forever: deleting 260815a made 260815a permanently
+     * unsynceable for that owner. `POST /runs` hit the constraint, found the tombstone and reported
+     * the dead run's id as "already exists", the browser attached a revision to it, and
+     * `requireRun` — which does filter `deleted_at` — answered 404 for a run the user could not see
+     * and had no endpoint to restore.
+     *
+     * A tombstone records history. It must not hold a name in the live namespace, and re-syncing a
+     * deleted experiment is a *new* run under the same code: the R2 bytes were hard-deleted with
+     * the original, so there is nothing to resurrect. Several tombstones may therefore share a code
+     * with each other and with one live run, which is exactly the intent.
+     */
+    uniqueIndex('runs_owner_run_code_unique')
+      .on(table.ownerUserId, table.runCode)
+      .where(sql`deleted_at IS NULL`),
     // The gallery's default ordering: a user's runs, newest experiment first.
     index('runs_owner_experiment_date_idx').on(table.ownerUserId, table.experimentDate),
     index('runs_owner_created_at_idx').on(table.ownerUserId, table.createdAt),
