@@ -27,8 +27,9 @@
  *    itself contain the pattern and neither the scanner nor push protection has
  *    anything to react to.
  *
- * The value is synthetic and grants nothing: `AKIA…` is AWS's access-key-id
- * *shape*, and this one spells out what it is. Never put a working credential
+ * The values are synthetic and grant nothing: `AKIA…` and `ghp_…` are the AWS
+ * and GitHub credential *shapes*, and each of these spells out what it is in the
+ * characters that would otherwise be the secret. Never put a working credential
  * here — a canary is not a place to test whether revocation worked.
  *
  * Usage: node scripts/scanner-canary.mjs <path-to-gitleaks>
@@ -43,11 +44,20 @@ import { join } from 'node:path'
  * The synthetic findings the scanner has to produce, and the gitleaks rule that
  * has to produce each one.
  *
- * Two rules rather than one, because they fail independently: `aws-access-token`
- * is a fixed pattern, `generic-api-key` is keyword-plus-entropy. A regression
- * that disables pattern rules and a regression that disables entropy scoring
- * are different regressions, and a canary that only covers one would pass
- * through the other.
+ * Three rules rather than one, because they fail independently:
+ *
+ *  - `aws-access-token` is a fixed pattern with no keyword and no entropy floor;
+ *  - `generic-api-key` is keyword-plus-entropy, and is the only one of the three
+ *    that would notice entropy scoring having stopped working;
+ *  - `github-pat` is a provider pattern for the credential this repository is
+ *    most exposed to. A token that can push to it, or read whatever else its
+ *    owner can read, is the leak with the shortest path to consequences here —
+ *    and it is the one a contributor is most likely to paste into a workflow
+ *    file or a debugging note by accident.
+ *
+ * A regression that disables pattern rules, one that disables entropy scoring,
+ * and one that drops a provider's rules while keeping the rest are different
+ * regressions, and a canary that only covered one would pass through the others.
  */
 export const CANARIES = [
   {
@@ -64,6 +74,29 @@ export const CANARIES = [
     // which is why this is a run of mixed-case alphanumerics rather than
     // something more obviously labelled.
     build: () => `api_key = "${['canary', '8Xq2Vt7Zm', '4Nb9Pw1Ry', '6Kd3Fs0Lh'].join('')}"\n`,
+  },
+  {
+    rule: 'github-pat',
+    file: 'github.txt',
+    /*
+     * `ghp_` and exactly 36 more characters, which is the classic personal
+     * access token shape. Split across fragments for the same reason as the
+     * others — and here the reason is not theoretical: GitHub's own push
+     * protection recognises this format, so a source file containing the
+     * complete string would block the push that added it.
+     *
+     * Thirteen of the 36 characters say what this is; the remaining 23 are a
+     * mixed-case run that keeps the finding's entropy near 4.9, well clear of
+     * any threshold a future rule revision is likely to add. The rule needs no
+     * surrounding keyword — verified against the pinned 8.30.1 binary, which
+     * reports this literal on its own — so the assignment below is for the
+     * human reading a failure, not for the scanner.
+     *
+     * It authenticates nothing. Real tokens carry a checksum in their last six
+     * characters and this one does not, so it cannot be a token that was ever
+     * issued, let alone one that still works.
+     */
+    build: () => `github_token = ${['gh', 'p_', 'CANARY', 'EXAMPLE', '7Zm4Nb9Pw1Ry6Kd3Fs0Lh5J'].join('')}\n`,
   },
 ]
 
