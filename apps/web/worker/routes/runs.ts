@@ -243,10 +243,17 @@ runRoutes.post(
       // runs_owner_run_code_unique: this owner already has this run. Two drops on one day are two
       // run codes (260811a, 260811b), so a collision means the same experiment is being created
       // twice, not that the suffix convention needs relaxing.
+      //
+      // `deleted_at IS NULL` matches the index's own predicate (migration 0004), and the agreement
+      // is load-bearing rather than tidy: this lookup explains a constraint violation, so a row the
+      // constraint no longer covers is not an explanation for it. Without the filter this reported
+      // a *tombstoned* run as the conflict and handed back its id, which `sync.ts` then attached a
+      // revision to — and `requireRun` answered 404 for it. Reporting a run the caller cannot
+      // reach is worse than reporting nothing.
       const [existing] = await db
         .select({ id: runs.id })
         .from(runs)
-        .where(and(eq(runs.ownerUserId, actor.userId), eq(runs.runCode, runCode)))
+        .where(and(eq(runs.ownerUserId, actor.userId), eq(runs.runCode, runCode), isNull(runs.deletedAt)))
         .limit(1)
       if (existing) {
         throw new ApiError('INVALID_ANALYSIS_CONFIG', {

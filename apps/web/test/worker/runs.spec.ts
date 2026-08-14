@@ -322,6 +322,57 @@ describe('a deleted run takes its revisions with it', () => {
     expect(response.status).toBe(404)
   })
 
+  it('frees the run code, so the same experiment can be synced again', async () => {
+    // The regression this pins is a dead end, not a hiccup: `deleted_at` is stamped and the row
+    // kept, the unique index used to cover tombstones too, and no endpoint anywhere clears
+    // `deleted_at`. Deleting 260815a therefore made 260815a permanently unsyncable for that owner
+    // — and the failure surfaced two calls later as a 404 for a run the user could not see.
+    const user = await createUser()
+    const runId = await createRun(user, '260815a_data.csv')
+    await createRevision(user, runId)
+    await apiFetch(`/api/v1/runs/${runId}`, { method: 'DELETE', cookie: user.cookie })
+
+    const resynced = await apiFetch('/api/v1/runs', {
+      method: 'POST',
+      cookie: user.cookie,
+      body: JSON.stringify({ originalFilename: '260815a_data.csv' }),
+    })
+    expect(resynced.status).toBe(201)
+
+    // A NEW run, not the tombstone brought back to life: the original's bytes were hard-deleted,
+    // so resurrecting the row would present revisions pointing at objects that no longer exist.
+    const body = (await resynced.json()) as { run: { id: string; runCode: string } }
+    expect(body.run.runCode).toBe('260815a')
+    expect(body.run.id).not.toBe(runId)
+
+    // And the rest of the sync flow works against it, which is the half that used to 404.
+    await expect(createRevision(user, body.run.id)).resolves.toBeTruthy()
+
+    // The gallery shows the live run and not the tombstone.
+    const listed = (await (await apiFetch('/api/v1/runs', { cookie: user.cookie })).json()) as {
+      runs: { id: string }[]
+    }
+    expect(listed.runs.map((row) => row.id)).toEqual([body.run.id])
+  })
+
+  it('does not stop a LIVE duplicate from still being refused', async () => {
+    // The predicate must not be read as "uniqueness is optional now". Two analyses of one drop are
+    // two revisions of one run, and that rule is what makes the run code an identity at all.
+    const user = await createUser()
+    const runId = await createRun(user, '260816a_data.csv')
+
+    const duplicate = await apiFetch('/api/v1/runs', {
+      method: 'POST',
+      cookie: user.cookie,
+      body: JSON.stringify({ originalFilename: '260816a_data.csv' }),
+    })
+    expect(duplicate.status).toBe(400)
+    const body = (await duplicate.json()) as { error: { details: { reason: string; runId: string } } }
+    expect(body.error.details.reason).toBe('run_code_already_exists')
+    // Still names the live run, so `sync.ts` can attach the second analysis to it as a revision.
+    expect(body.error.details.runId).toBe(runId)
+  })
+
   it('still refuses it to a colleague who could otherwise have read it', async () => {
     const { revisionId } = await deletedRunWithRevision()
     const colleague = await createUser()
