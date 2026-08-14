@@ -347,3 +347,39 @@ test('no rule is shadowed by an earlier one that routes differently', () => {
     assert.deepEqual(classify([path]).categories, [expected[path]], path)
   }
 })
+
+// ---------------------------------------------------------------------------
+// The automatic-deploy gate (.github/workflows/deploy.yml)
+// ---------------------------------------------------------------------------
+
+test('a lockfile-and-manifest change is dependency-only', () => {
+  assert.equal(classify(['pnpm-lock.yaml']).depsOnly, true)
+  assert.equal(classify(['pnpm-lock.yaml', 'apps/web/package.json']).depsOnly, true)
+  assert.equal(classify(['package.json', 'packages/shared/package.json']).depsOnly, true)
+})
+
+test('one source file is enough to stop an automatic deploy', () => {
+  // The gate is all-or-nothing on purpose: a dependency bump that also edits
+  // code is a code change wearing a dependency bump's clothes.
+  assert.equal(classify(['pnpm-lock.yaml', 'apps/web/src/app/App.tsx']).depsOnly, false)
+  assert.equal(classify(['apps/web/src/app/App.tsx']).depsOnly, false)
+  assert.equal(classify(['.github/workflows/deploy.yml']).depsOnly, false)
+  assert.equal(classify(['docs/deployment.md']).depsOnly, false)
+})
+
+test('the visual contract and the supply-chain policy never deploy themselves', () => {
+  // Renovate never auto-merges poster-renderer updates, and pnpm-workspace.yaml
+  // carries the install-time gates. Neither belongs in an unattended deploy.
+  assert.equal(classify(['poster-renderer/requirements.txt']).depsOnly, false)
+  assert.equal(classify(['poster-renderer/Dockerfile']).depsOnly, false)
+  assert.equal(classify(['reference/python/requirements.txt']).depsOnly, false)
+  assert.equal(classify(['pnpm-workspace.yaml']).depsOnly, false)
+})
+
+test('a change nobody can see does not deploy', () => {
+  // An empty list means the diff could not be determined, not that nothing
+  // happened. Fail towards not deploying.
+  assert.equal(classify([]).depsOnly, false)
+  assert.equal(classify(['', '  ']).depsOnly, false)
+  assert.equal(everything('diff-unavailable').depsOnly, false)
+})

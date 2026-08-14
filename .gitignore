@@ -22,3 +22,6 @@ apps/web/pages/wrangler.jsonc
 # Generated at deploy time beside the committed config, so its relative paths
 # (main, migrations_dir) resolve the way the committed file's do.
 apps/web/wrangler.deploy.jsonc
+
+# An operator generates this to run one-off D1 commands; it names the account.
+apps/web/wrangler.local.jsonc

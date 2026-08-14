@@ -209,6 +209,24 @@ const DEPENDENCY_MANIFESTS = [
 ]
 
 /**
+ * What a dependency update — and nothing else — looks like.
+ *
+ * `.github/workflows/deploy.yml` deploys automatically only when every changed
+ * path matches one of these. The gate is a property of the CHANGE, not of who
+ * made it: checking for `renovate[bot]` would trust an author name that appears
+ * in a commit anyone can write, and a branch-name check trusts even less. A diff
+ * that touches nothing but the lockfile and manifests cannot alter behaviour
+ * except through a dependency, which is exactly the class of change intended to
+ * ship unattended.
+ *
+ * Deliberately narrow. `pnpm-workspace.yaml` is absent because it holds the
+ * supply-chain policy, and the Python requirement files and the Dockerfile are
+ * absent because they are the poster renderer's visual contract — Renovate never
+ * auto-merges those, and neither should a deploy.
+ */
+const DEPENDENCY_ONLY = [/^pnpm-lock\.yaml$/, /(^|\/)package\.json$/]
+
+/**
  * Route a list of repository-relative paths to the jobs that must run.
  *
  * Pure: no filesystem, no git, no environment. That is what makes
@@ -239,7 +257,18 @@ export function classify(files) {
     for (const job of rule.jobs) jobs.add(job)
   }
 
+  /*
+   * Empty is NOT dependency-only. A push with no files reaching this function is
+   * something unexpected — an empty commit, a merge whose diff resolved to
+   * nothing, a caller that failed to produce a list — and answering "yes, deploy"
+   * to a change nobody can see is the wrong direction to fail in.
+   */
+  const changed = files.map((file) => file.trim()).filter((file) => file !== '')
+  const depsOnly =
+    changed.length > 0 && changed.every((file) => DEPENDENCY_ONLY.some((manifest) => manifest.test(file)))
+
   return {
+    depsOnly,
     web: jobs.has('web'),
     numerical: jobs.has('numerical'),
     poster: jobs.has('poster'),
@@ -253,6 +282,9 @@ export function classify(files) {
 /** Everything on. Used for pushes to main, for `--all`, and whenever the diff cannot be trusted. */
 export function everything(reason) {
   return {
+    // `--all` means "we could not tell what changed", which is never a reason to
+    // deploy on its own.
+    depsOnly: false,
     web: true,
     numerical: true,
     poster: true,
@@ -366,6 +398,7 @@ function main() {
     e2e: String(result.e2e && e2eSuitePresent),
     e2e_suite_present: String(e2eSuitePresent),
     deps: String(result.deps),
+    deps_only: String(result.depsOnly),
   }
 
   console.log(`changed files: ${files.length}`)

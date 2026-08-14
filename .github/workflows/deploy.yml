@@ -26,22 +26,32 @@ name: Deploy
 # Worker secrets, so the marginal exposure is small — and `renovate.json5` holds
 # it (and the pinned actions) to a 30-day release age for exactly this reason.
 
-# Manual-only until the production infrastructure exists.
+# When this runs by itself, and when it does not
 #
-# The Cloudflare account, D1 and R2 bindings, the Doppler `aat-web/prd` config
-# and the `production` environment secret DOPPLER_IDENTITY_ID have not been
-# provisioned yet, so an automatic push trigger would fail on every commit to
-# main — training everyone to ignore a red Deploy badge, which is exactly how a
-# genuine deployment failure gets missed later.
+# `workflow_dispatch` always deploys: someone decided.
 #
-# The fail-closed secret check below means nothing is ever deployed half
-# configured; this trigger change only stops the pointless attempt.
+# A push to main deploys only if every changed path is `pnpm-lock.yaml` or a
+# `package.json`. That is the shape a Renovate minor or patch update has after
+# it auto-merges on green CI, and it is the only change class that ships here
+# unattended.
 #
-# Restore the automatic trigger once the infrastructure is in place, by adding:
-#   push:
-#     branches: ["main"]
-# See docs/deployment.md.
+# The gate reads the diff rather than the author. Checking for `renovate[bot]`
+# would trust a name any commit can carry, and a branch-name check trusts less
+# still; a diff that touches nothing but dependency manifests cannot change
+# behaviour except through a dependency, which is the property actually wanted.
+# `scripts/detect-changes.mjs` decides it and is unit-tested, because a gate that
+# is wrong in the permissive direction deploys something nobody looked at.
+#
+# Majors never arrive this way: renovate.json5 refuses to auto-merge them, and
+# deployment-path dependencies wait 30 days first. The poster renderer's Python
+# pins and Dockerfile are excluded outright — they are the visual contract, and
+# Renovate never auto-merges those either.
 on:
+  # A push to main deploys ONLY when the change is a dependency update and
+  # nothing else — see the `gate` job. Anything touching source, configuration,
+  # the visual contract or this workflow needs a deliberate `workflow_dispatch`.
+  push:
+    branches: ["main"]
   workflow_dispatch:
 
 permissions: {}
@@ -51,8 +61,60 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  gate:
+    name: Should this push deploy?
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    outputs:
+      deploy: ${{ steps.decide.outputs.deploy }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # The push range is walked, so the history has to be there.
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+
+      - name: Decide
+        id: decide
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BEFORE: ${{ github.event.before }}
+          AFTER: ${{ github.sha }}
+        run: |
+          if [ "$EVENT_NAME" != "push" ]; then
+            echo "Dispatched by hand; deploying."
+            echo "deploy=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          # A new branch or a force push leaves no usable before-SHA, so there is
+          # no diff to judge. Refuse rather than guess: the cost of not deploying
+          # is one manual dispatch.
+          if [ -z "$BEFORE" ] || [ "$BEFORE" = "0000000000000000000000000000000000000000" ] \
+             || ! git cat-file -e "$BEFORE^{commit}" 2>/dev/null; then
+            echo "::notice::No usable before-SHA; not deploying automatically. Dispatch by hand if intended."
+            echo "deploy=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          node scripts/detect-changes.mjs --base "$BEFORE" --head "$AFTER" > "$RUNNER_TEMP/changes.txt"
+          cat "$RUNNER_TEMP/changes.txt"
+          if grep -qx 'deps_only=true' "$RUNNER_TEMP/changes.txt"; then
+            echo "::notice::Dependency-only change; deploying automatically."
+            echo "deploy=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::notice::Not a dependency-only change; skipping the automatic deploy. Dispatch by hand to ship it."
+            echo "deploy=false" >> "$GITHUB_OUTPUT"
+          fi
+
   verify:
     name: Verify and build (no credentials)
+    needs: gate
+    if: needs.gate.outputs.deploy == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:

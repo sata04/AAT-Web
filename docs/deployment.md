@@ -200,9 +200,30 @@ echo "token: $TOKEN"
 Insert the invitation. `id` is any ULID; timestamps are epoch milliseconds; give it a short expiry
 and redeem it immediately.
 
+> **Every `wrangler d1 execute` below needs a resolved configuration.** The
+> committed `apps/web/wrangler.jsonc` carries a deliberately invalid
+> `database_id`, so running these commands against it fails with
+> `The database 00000000-0000-0000-0000-000000000000 could not be found`. That
+> placeholder is the point — it stops a stray local deploy writing into somebody
+> else's account — but it means an operator has to generate the real
+> configuration first, the same way the deploy job does:
+>
+> ```bash
+> cd apps/web
+> export CLOUDFLARE_API_TOKEN=$(doppler secrets get CF_DEPLOY_TOKEN_VALUE --project aat-web --config prd --plain)
+> export CLOUDFLARE_ACCOUNT_ID=$(doppler secrets get CLOUDFLARE_ACCOUNT_ID --project aat-web --config prd --plain)
+> AAT_D1_DATABASE_ID=$(doppler secrets get AAT_D1_DATABASE_ID --project aat-web --config prd --plain) \
+> POSTER_RENDERER_IMAGE=unused \
+>   node scripts/resolve-wrangler-config.mjs wrangler.local.jsonc
+> ```
+>
+> Then pass `--config wrangler.local.jsonc` to every command in this section, and
+> delete the file afterwards — it is gitignored, but it names the account.
+
+
 ```bash
 cd apps/web
-pnpm exec wrangler d1 execute aat-db --remote --command "
+pnpm exec wrangler d1 execute aat-db --remote --config wrangler.local.jsonc --command "
   INSERT INTO registration_invites
     (id, token_hash, kind, role, display_name, created_by_user_id,
      created_at, expires_at, status)
@@ -223,7 +244,7 @@ Verify the result before going further — a deployment whose only administrator
 administrator is worth catching now:
 
 ```bash
-pnpm exec wrangler d1 execute aat-db --remote \
+pnpm exec wrangler d1 execute aat-db --remote --config wrangler.local.jsonc \
   --command "SELECT id, name, role, banned FROM user;"
 ```
 
