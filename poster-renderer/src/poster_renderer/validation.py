@@ -28,6 +28,7 @@ from typing import Any, Mapping
 
 import numpy as np
 
+from . import preset
 from .errors import SpecValidationError
 from .limits import (
     ANALYSIS_REVISION_ID_MAX_LENGTH,
@@ -371,8 +372,24 @@ def validate_spec(value: Any) -> PosterPlotSpec:
     # Optional in the Zod sense: absent, never present-and-null (`exactOptionalPropertyTypes`).
     y_min = _number(document["yMin"], "yMin") if "yMin" in document else None
     y_max = _number(document["yMax"], "yMax") if "yMax" in document else None
-    if y_min is not None and y_max is not None and y_min >= y_max:
-        raise SpecValidationError("yMin must be less than yMax", field="yMin")
+    # Checked on the *resolved* pair, because an omitted bound is drawn at the preset's rather than
+    # autoscaled (see `render.build_figure`). Checking only the both-present case — which is what a
+    # literal reading of the Zod schema used to be — would accept `yMin: 1.5` with no `yMax`, whose
+    # resolved range is `(1.5, 1.0)`; Matplotlib accepts an inverted `set_ylim` silently and draws
+    # the gravity axis upside down. `spec.ts` carries the same rule.
+    #
+    # `preset` rather than `limits` because these are the frozen figure's bounds, not a defensive
+    # cap. Only one preset version exists, so there is nothing to look up by name yet; when there
+    # is, this resolves through the spec's `posterPresetVersion` the way the TypeScript does.
+    resolved_y_min = preset.DEFAULT_Y_MIN if y_min is None else y_min
+    resolved_y_max = preset.DEFAULT_Y_MAX if y_max is None else y_max
+    if resolved_y_min >= resolved_y_max:
+        if y_min is not None and y_max is not None:
+            raise SpecValidationError("yMin must be less than yMax", field="yMin")
+        raise SpecValidationError(
+            "yMin must be less than yMax once the omitted bound takes the preset's",
+            field="yMin" if y_min is not None else "yMax",
+        )
 
     series = _enum(document["series"], SERIES_SELECTIONS, "series")
     show_legend = _bool(document["showLegend"], "showLegend")

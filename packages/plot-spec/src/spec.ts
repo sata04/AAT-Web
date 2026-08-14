@@ -13,7 +13,7 @@
 
 import { z } from 'zod'
 import { canonicalStringify, sha256Hex } from './codec.ts'
-import { POSTER_PRESET_VERSIONS, type PosterPresetVersion } from './presets.ts'
+import { getPosterPreset, POSTER_PRESET_VERSIONS, type PosterPresetVersion } from './presets.ts'
 import { decodeSeries, type EncodedFloat64Series, isWellFormedEncodedSeries } from './wire.ts'
 
 // ---------------------------------------------------------------------------------------------
@@ -249,8 +249,24 @@ export const PosterPlotSpecSchema = PosterPlotSpecShape.superRefine((value, ctx)
   if (value.xMin >= value.xMax) {
     ctx.addIssue({ code: 'custom', message: 'xMin must be less than xMax', path: ['xMin'] })
   }
-  if (value.yMin !== undefined && value.yMax !== undefined && value.yMin >= value.yMax) {
-    ctx.addIssue({ code: 'custom', message: 'yMin must be less than yMax', path: ['yMin'] })
+  // The *resolved* pair, not the supplied one. An omitted bound is drawn at the preset's (see
+  // `presets.ts`), so checking only the both-present case would accept `yMin: 1.5` with no `yMax`
+  // — which resolves to `(1.5, 1)` and makes Matplotlib silently draw the axis upside down.
+  // Half-specifying a range is legitimate; half-specifying it into an inverted one is not, and
+  // the rule has to be about the numbers that reach `set_ylim`.
+  const { yMin: presetYMin, yMax: presetYMax } = getPosterPreset(value.posterPresetVersion).defaults
+  const resolvedYMin = value.yMin ?? presetYMin
+  const resolvedYMax = value.yMax ?? presetYMax
+  if (resolvedYMin >= resolvedYMax) {
+    ctx.addIssue({
+      code: 'custom',
+      message:
+        value.yMin !== undefined && value.yMax !== undefined
+          ? 'yMin must be less than yMax'
+          : `yMin must be less than yMax once the omitted bound takes the preset's ` +
+            `(${presetYMin} .. ${presetYMax}); this resolves to ${resolvedYMin} .. ${resolvedYMax}`,
+      path: [value.yMin !== undefined ? 'yMin' : 'yMax'],
+    })
   }
 
   const requiresInner = value.series === 'inner' || value.series === 'both'
