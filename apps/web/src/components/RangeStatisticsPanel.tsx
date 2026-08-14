@@ -14,6 +14,7 @@ import { useEffect, useState } from 'react'
 import { formatCount, formatFixed } from '../app/format.ts'
 import type { RangeStatisticsResult } from '../app/range-statistics.ts'
 import { MIN_SELECTION_SECONDS, type SelectionRange } from '../graph/selection.ts'
+import { TABLE_SCROLL_PROPS } from './table-scroll.ts'
 
 export interface RangeStatisticsPanelProps {
   selection: SelectionRange | null
@@ -131,7 +132,7 @@ export function RangeStatisticsPanel(props: RangeStatisticsPanelProps): React.JS
               <span className="notice__body">選択範囲にデータがありません。</span>
             </p>
           ) : (
-            <div className="table-scroll">
+            <div {...TABLE_SCROLL_PROPS}>
               <table className="data-table">
                 <thead>
                   <tr>

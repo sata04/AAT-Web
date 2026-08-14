@@ -89,7 +89,7 @@ export function SessionControls(): React.JSX.Element | null {
 
   if (session.status === 'signed-out') {
     return (
-      <div className="command-bar__group">
+      <div className="command-bar__group command-bar__session">
         <Link to="/sign-in" className="button button--flat">
           サインイン
         </Link>
@@ -98,7 +98,7 @@ export function SessionControls(): React.JSX.Element | null {
   }
 
   return (
-    <div className="command-bar__group">
+    <div className="command-bar__group command-bar__session">
       <span className="command-bar__identity">
         {session.user?.displayName ?? ''}
         <span className="panel__hint"> {session.user?.role ?? ''}</span>

@@ -12,6 +12,7 @@ import type { Dataset } from '../app/dataset.ts'
 import { formatFixed, formatSeconds } from '../app/format.ts'
 import type { ViewMode } from '../graph/view-mode.ts'
 import { isGQuality } from '../graph/view-mode.ts'
+import { TABLE_SCROLL_PROPS } from './table-scroll.ts'
 
 const STANDARD_HEADERS = [
   { short: 'ファイル名', full: 'File Name', numeric: false },
@@ -54,7 +55,7 @@ export function StatisticsPanel(props: StatisticsPanelProps): React.JSX.Element 
           {showGQuality ? 'ウィンドウ幅ごとの最小標準偏差' : `解析ウィンドウ内の最小標準偏差`}
         </span>
       </div>
-      <div className="table-scroll">
+      <div {...TABLE_SCROLL_PROPS}>
         <table className="data-table">
           <thead>
             <tr>

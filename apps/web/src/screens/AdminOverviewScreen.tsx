@@ -44,6 +44,7 @@ import {
 import { AdminCapabilityNotice, AdminFrame } from '../components/AdminFrame.tsx'
 import { AdminQuotaMeter } from '../components/AdminQuotaMeter.tsx'
 import { AdminResourceNotice } from '../components/AdminResourceNotice.tsx'
+import { TABLE_SCROLL_PROPS } from '../components/table-scroll.ts'
 import { Link } from '../router/Router.tsx'
 import { useSession } from '../session/SessionProvider.tsx'
 
@@ -325,7 +326,7 @@ export function AdminOverviewScreen(): React.JSX.Element {
           onRetry={audit.reload}
         />
         {audit.resource.kind === 'ready' ? (
-          <div className="table-scroll">
+          <div {...TABLE_SCROLL_PROPS}>
             <table className="data-table">
               <caption className="visually-hidden">
                 権限・停止・削除・招待・容量など、デプロイの状態を変える操作の直近の記録

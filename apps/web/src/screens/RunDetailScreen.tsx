@@ -43,6 +43,7 @@ import { RunPosterImage } from '../components/RunPosterImage.tsx'
 import { RunReplayPanel } from '../components/RunReplayPanel.tsx'
 import { RunTagEditor } from '../components/RunTagEditor.tsx'
 import { ScreenFrame } from '../components/ScreenFrame.tsx'
+import { TABLE_SCROLL_PROPS } from '../components/table-scroll.ts'
 import { saveBlob } from '../exporting/client.ts'
 import { generateAutoPoster, type PosterContext, retryAutoPoster } from '../poster/requests.ts'
 import { Link, useNavigate, useRoute } from '../router/Router.tsx'
@@ -384,7 +385,7 @@ export function RunDetailScreen(): React.JSX.Element {
               : 'ファイル名は命名規則外です'}
           </span>
         </div>
-        <div className="table-scroll">
+        <div {...TABLE_SCROLL_PROPS}>
           <table className="data-table">
             <tbody>
               <tr>
@@ -473,7 +474,7 @@ export function RunDetailScreen(): React.JSX.Element {
             この実験にはまだ解析リビジョンがありません。解析画面でこのファイルを解析すると記録されます。
           </p>
         ) : (
-          <div className="table-scroll">
+          <div {...TABLE_SCROLL_PROPS}>
             <table className="data-table">
               <thead>
                 <tr>
@@ -530,7 +531,7 @@ export function RunDetailScreen(): React.JSX.Element {
               {metrics === null ? '読み込み中' : `警告 ${metrics.warningCount} 件`}
             </span>
           </div>
-          <div className="table-scroll">
+          <div {...TABLE_SCROLL_PROPS}>
             <table className="data-table">
               <caption className="visually-hidden">最小標準偏差ウィンドウの統計</caption>
               <thead>
@@ -574,7 +575,7 @@ export function RunDetailScreen(): React.JSX.Element {
               ? 'G-quality: 未計算'
               : `G-quality: ${gQuality.windowCount} 窓 (${formatSeconds(gQuality.smallestWindow)}–${formatSeconds(gQuality.largestWindow)} s)`}
           </p>
-          <div className="table-scroll">
+          <div {...TABLE_SCROLL_PROPS}>
             <table className="data-table">
               <caption className="visually-hidden">来歴</caption>
               <tbody>

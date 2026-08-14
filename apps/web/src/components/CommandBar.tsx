@@ -19,6 +19,7 @@
  * user on `/sign-in`, who has no navigation at all by design.
  */
 
+import { useId, useState } from 'react'
 import { APP_VERSION } from '../app/version.ts'
 import { Link } from '../router/Router.tsx'
 import { AppNav, SessionControls } from './AppNav.tsx'
@@ -29,8 +30,13 @@ export interface CommandBarProps {
 }
 
 export function CommandBar(props: CommandBarProps): React.JSX.Element {
+  const [toolsOpen, setToolsOpen] = useState(false)
+  const primaryToolsId = useId()
+  const trailingToolsId = useId()
+  const hasTools = props.children !== undefined || props.trailing !== undefined
+
   return (
-    <header className="command-bar">
+    <header className={`command-bar${toolsOpen ? ' command-bar--tools-open' : ''}`}>
       <div className="command-bar__brand">
         <Link to="/" className="command-bar__title" label="AAT 解析画面へ">
           AAT
@@ -40,11 +46,27 @@ export function CommandBar(props: CommandBarProps): React.JSX.Element {
 
       <AppNav />
 
-      {props.children}
+      <div className="command-bar__tools command-bar__tools--primary" id={primaryToolsId}>
+        {props.children}
+      </div>
 
       <div className="command-bar__spacer" />
 
-      {props.trailing}
+      <div className="command-bar__tools command-bar__tools--trailing" id={trailingToolsId}>
+        {props.trailing}
+      </div>
+
+      {hasTools ? (
+        <button
+          type="button"
+          className="button command-bar__tools-toggle"
+          aria-expanded={toolsOpen}
+          aria-controls={`${primaryToolsId} ${trailingToolsId}`}
+          onClick={() => setToolsOpen((open) => !open)}
+        >
+          {toolsOpen ? '操作を閉じる' : '操作'}
+        </button>
+      ) : null}
 
       <SessionControls />
     </header>

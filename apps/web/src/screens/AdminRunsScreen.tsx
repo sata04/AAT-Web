@@ -58,6 +58,7 @@ import { recordIdLabel } from '../admin/users.ts'
 import { fetchStorageReport } from '../cloud/gateway.ts'
 import { AdminCapabilityNotice, AdminFrame } from '../components/AdminFrame.tsx'
 import { AdminResourceNotice } from '../components/AdminResourceNotice.tsx'
+import { TABLE_SCROLL_PROPS } from '../components/table-scroll.ts'
 import { Link } from '../router/Router.tsx'
 import { useSession } from '../session/SessionProvider.tsx'
 
@@ -236,7 +237,7 @@ export function AdminRunsScreen(): React.JSX.Element {
         </p>
         {report === null ? null : (
           <>
-            <div className="table-scroll">
+            <div {...TABLE_SCROLL_PROPS}>
               <table className="data-table">
                 <caption className="visually-hidden">
                   利用者ごとの使用量、予約量、上限、オブジェクト数
@@ -481,7 +482,7 @@ export function AdminRunsScreen(): React.JSX.Element {
           </p>
         ) : null}
 
-        <div className="table-scroll">
+        <div {...TABLE_SCROLL_PROPS}>
           <table className="data-table">
             <caption className="visually-hidden">
               実験、所有者、リビジョン数、スナップショットとポスターの状態
