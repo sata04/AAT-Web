@@ -22,10 +22,33 @@
  * If the container is not available the test is skipped loudly rather than passing against nothing.
  */
 
+import { readFileSync } from 'node:fs'
+import path from 'node:path'
 import { openCsv, RUN_FIXTURE, registerWithInvitation, statusLane, waitForAnalysis } from '../harness/app.ts'
 import { expect, rendererAvailable, test } from '../harness/fixtures.ts'
+import { REPO_ROOT } from '../harness/stack.ts'
 
 const PNG_MAGIC = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])
+
+/**
+ * `RENDERER_VERSION`, read from the renderer's own source rather than restated here.
+ *
+ * The property under test is "the stored record and the PNG both name the build that drew them",
+ * not "the renderer is currently at version X". Pinning the literal tests the second thing, and
+ * `RENDERER_VERSION` is a constant *designed to move* — it is bumped on every dependency update
+ * that can shift a byte (`poster-renderer/README.md`, "Why the versions are pinned"). A pinned
+ * literal therefore turns a correct bump into a red E2E run, and the obvious way to make that run
+ * green again is to edit the literal without checking whether the two values still agree — which
+ * is exactly the check being deleted.
+ */
+const RENDERER_VERSION = (() => {
+  const source = readFileSync(path.join(REPO_ROOT, 'poster-renderer/src/poster_renderer/version.py'), 'utf8')
+  const match = /^RENDERER_VERSION = "(.+?)"$/m.exec(source)
+  if (match === null) {
+    throw new Error('could not read RENDERER_VERSION from poster_renderer/version.py')
+  }
+  return match[1]
+})()
 
 /** The preset: 10.6 × 3.4 in at 300 dpi. */
 const EXPECTED_WIDTH = Math.round(10.6 * 300)
@@ -102,7 +125,9 @@ test.describe('real poster renderer', () => {
       ['260815a'],
     )
     expect(figure?.preset_version).toBe('aat-poster-v1')
-    expect(figure?.renderer_version).toBe('aat-poster-renderer/1.0.0')
+    // The record names the build that drew it: the container reported this through
+    // `X-Poster-Renderer-Version`, and it has to be the version the image was actually built from.
+    expect(figure?.renderer_version).toBe(RENDERER_VERSION)
 
     const image = await page.request.get(`/api/v1/posters/${figure?.id}/image`)
     expect(image.status()).toBe(200)
@@ -112,7 +137,7 @@ test.describe('real poster renderer', () => {
     expect(pngSize(bytes)).toEqual({ width: EXPECTED_WIDTH, height: EXPECTED_HEIGHT })
     // Matplotlib writes the metadata the renderer asked it to. This is the byte-level fingerprint
     // of the pinned image: no stub in this repository produces it.
-    expect(bytes.toString('latin1')).toContain('AAT poster-renderer aat-poster-renderer/1.0.0')
+    expect(bytes.toString('latin1')).toContain(`AAT poster-renderer ${RENDERER_VERSION}`)
     expect(bytes.toString('latin1')).toContain('(aat-poster-v1)')
     // Several hundred kilobytes of line plot, not a placeholder.
     expect(bytes.byteLength).toBeGreaterThan(20_000)
