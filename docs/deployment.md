@@ -122,19 +122,24 @@ workflow's fail-closed check before anything is deployed:
 ```
 CF_DEPLOY_TOKEN_VALUE     Cloudflare API token (see scopes below)
 CLOUDFLARE_ACCOUNT_ID
-CLOUDFLARE_ZONE_ID        zone owning the production hostname
 DEPLOY_HOSTNAME           the production hostname
+AAT_PAGES_PROJECT         the Pages project; its name is also its hostname
 BETTER_AUTH_SECRET
 BETTER_AUTH_URL
 AAT_RP_ID
-AAT_RP_NAME
 AAT_TRUSTED_ORIGINS
 AAT_D1_DATABASE_ID        id of the D1 database; substituted into wrangler.jsonc at deploy time
 ```
 
-The Cloudflare API token needs: Workers Scripts edit, D1 edit, R2 edit, Containers/Cloudchamber
-edit, and Workers Domains edit on the zone. Scope it to the one account; do not use a global API
-key.
+`AAT_RP_NAME` is read as well but is not required; the deploy omits it from the Worker's secrets
+rather than failing. There is no `CLOUDFLARE_ZONE_ID`: the public origin is the Pages project's own
+hostname, which is not in a zone this account controls, so there is no zone to name — and, as
+`docs/security-scanning.md` records, no zone-scoped WAF or rate limiting either.
+
+The Cloudflare API token needs: Workers Scripts edit, D1 edit, R2 edit, and Containers/Cloudchamber
+edit. Scope it to the one account; do not use a global API key. It does **not** need Workers Domains
+— the deploy stopped touching the Workers Domains API when the public origin moved to Pages, and
+granting a scope nothing uses only widens what a leaked token could do.
 
 On the Doppler side, constrain the OIDC identity with claim rules on `aud`, `sub`, `ref` and
 `job_workflow_ref` so that only this job, on `main`, in this repository qualifies. Without those
@@ -146,21 +151,29 @@ the human gate on deployment. The workflow fails with a pointer to this document
 unset, and `deploy` additionally refuses to run when `github.ref` is not `refs/heads/main`, so a
 `workflow_dispatch` from a topic branch cannot reach the credentials.
 
-## Why the automatic trigger is off
+## When a deploy happens by itself, and when it does not
 
-`deploy.yml` is `workflow_dispatch`-only, and that is intentional rather than unfinished. None of
-the infrastructure above exists yet, so a `push` trigger on `main` would fail on every commit —
-training everyone to ignore a red Deploy badge, which is exactly how a genuine deployment failure
-gets missed later.
+`deploy.yml` runs on `workflow_dispatch` and on a push to `main`. The push trigger does not mean
+every merge ships: a `gate` job runs first, and only a **dependency version update and nothing
+else** gets past it. Everything else — source, configuration, migrations, the visual contract, this
+workflow — reaches the gate, is refused, and waits for someone to dispatch it deliberately.
 
-Restore the automatic trigger once the resources and secrets are provisioned, by adding:
+"Dependency version update and nothing else" is decided by `scripts/detect-changes.mjs` from the
+diff, never from the author or the branch name, and it means both of:
 
-```yaml
-  push:
-    branches: ["main"]
-```
+- every changed path is `pnpm-lock.yaml` or a `package.json`; and
+- every changed `package.json`, read at both ends of the diff, moved nothing but dependency
+  versions — nothing outside `dependencies` / `devDependencies` / `optionalDependencies` /
+  `peerDependencies`, no dependency added or removed, and no constraint that stopped being a plain
+  registry range.
 
-Leave it off until then. **Do not turn it on as part of an unrelated change.**
+So a `scripts.build` edit, a `packageManager` bump, an `engines` bump, or a version replaced by a
+`git+https:` URL all fail the gate even though the only file they touch is `package.json`. A
+manifest the gate cannot read or parse fails it too. `scripts/detect-changes.test.mjs` asserts both
+directions; `docs/ci.md` has the longer account.
+
+An automatic deploy is not a shortcut through anything. The `verify` job still runs in full, on the
+merge commit, without credentials, before `deploy` sees a secret.
 
 ## Order of operations for a first deployment
 

@@ -35,6 +35,14 @@
  *  - pushes to `main` ignore this file entirely and run the full matrix, so a
  *    rule that is wrong is caught at the merge rather than never.
  *
+ * ## The other output
+ *
+ * `deps_only` is not a routing decision — `.github/workflows/deploy.yml` reads it
+ * to decide whether a push to main ships without anyone asking. It is answered by
+ * the path rules *and* by `inspectPackageJson`, because "only package.json
+ * changed" is the same sentence for a version bump and for a rewritten build
+ * script.
+ *
  * ## Usage
  *
  *   node scripts/detect-changes.mjs --base <sha> --head <sha>
@@ -47,6 +55,7 @@
 
 import { execFileSync } from 'node:child_process'
 import { appendFileSync, existsSync, readFileSync } from 'node:fs'
+import { isDeepStrictEqual } from 'node:util'
 
 /** The expensive jobs in .github/workflows/ci.yml, in the order they are reported. */
 export const JOBS = ['web', 'numerical', 'poster', 'e2e']
@@ -218,30 +227,178 @@ const DEPENDENCY_MANIFESTS = [
 ]
 
 /**
- * What a dependency update — and nothing else — looks like.
+ * What a dependency update — and nothing else — looks like, by path.
  *
  * `.github/workflows/deploy.yml` deploys automatically only when every changed
  * path matches one of these. The gate is a property of the CHANGE, not of who
  * made it: checking for `renovate[bot]` would trust an author name that appears
- * in a commit anyone can write, and a branch-name check trusts even less. A diff
- * that touches nothing but the lockfile and manifests cannot alter behaviour
- * except through a dependency, which is exactly the class of change intended to
- * ship unattended.
+ * in a commit anyone can write, and a branch-name check trusts even less.
  *
  * Deliberately narrow. `pnpm-workspace.yaml` is absent because it holds the
  * supply-chain policy, and the Python requirement files and the Dockerfile are
  * absent because they are the poster renderer's visual contract — Renovate never
  * auto-merges those, and neither should a deploy.
+ *
+ * The path is necessary and NOT sufficient for a `package.json`: see
+ * `inspectPackageJson` below, which is the other half of the gate.
  */
 const DEPENDENCY_ONLY = [/^pnpm-lock\.yaml$/, /(^|\/)package\.json$/]
+
+/** Is this path one of the manifests that has to be read as well as matched? */
+const PACKAGE_JSON = /(^|\/)package\.json$/
+
+/**
+ * The `package.json` fields that hold nothing but dependency version constraints.
+ *
+ * Everything a package.json can carry that is NOT in this list changes what runs
+ * rather than what is installed, so it is judged by the fall-through rule in
+ * `inspectPackageJson` — which refuses. That includes `overrides`, `resolutions`
+ * and `pnpm.*`: they are dependency-shaped, but they redirect resolution for the
+ * whole graph, which is a supply-chain policy decision and not a version bump.
+ */
+export const DEPENDENCY_FIELDS = [
+  'dependencies',
+  'devDependencies',
+  'optionalDependencies',
+  'peerDependencies',
+]
+
+/**
+ * A version constraint that resolves against the registry, and nothing else.
+ *
+ * A semantic diff that only asked "did just the dependency fields move?" would
+ * accept `"papaparse": "5.5.4"` becoming `"papaparse": "git+https://…"`,
+ * `"npm:something-else@1.0.0"`, `"file:../elsewhere"` or `"github:owner/repo"`.
+ * Every one of those is a value change inside `dependencies` and every one of
+ * them installs code from somewhere nobody reviewed — which is a worse outcome
+ * than the `scripts` edit this gate was tightened to catch.
+ *
+ * So a *changed* constraint has to look like a plain range on both sides: the
+ * semver alphabet, at least one digit, and none of the `:` `/` `@` `#` that
+ * every alternative protocol needs to say where else to fetch from. Constraints
+ * that do not change are never examined, which is what keeps the `workspace:*`
+ * entries in `apps/web/package.json` out of it.
+ */
+const REGISTRY_RANGE = /^[0-9A-Za-z.+*\-|^~<>= ]*[0-9][0-9A-Za-z.+*\-|^~<>= ]*$/
+
+const isPlainObject = (value) => typeof value === 'object' && value !== null && !Array.isArray(value)
+
+/** A copy of a parsed manifest with the dependency fields removed. */
+function withoutDependencyFields(manifest) {
+  const rest = { ...manifest }
+  for (const field of DEPENDENCY_FIELDS) delete rest[field]
+  return rest
+}
+
+/**
+ * Decide whether one `package.json` diff is a dependency version bump and nothing else.
+ *
+ * ## Why the path is not enough
+ *
+ * "Only `package.json` and `pnpm-lock.yaml` changed" reads like a safe
+ * description of a Renovate update, and it is not one. `package.json` is also
+ * where every command CI and the deploy run is defined — `build`, `test`,
+ * `check:bundle` — plus `packageManager`, which decides which pnpm executes them,
+ * and `engines`. A diff that edits `scripts.build` and touches nothing else has
+ * the exact path signature of a dependency bump and arbitrary effect on what
+ * ships, unreviewed, straight to production.
+ *
+ * So the paths select which files to read, and this decides what the read says:
+ *
+ *  - everything outside {@link DEPENDENCY_FIELDS} must be deeply unchanged;
+ *  - inside them, the set of dependency names must be unchanged — an addition or
+ *    a removal is a supply-chain change, not a version update;
+ *  - a constraint that moved must be a plain registry range on both sides.
+ *
+ * Returns `dependency-update` only when all three hold. `unreadable` covers a
+ * manifest that was added, deleted, or cannot be parsed; `behavioural` covers
+ * everything else. Both refuse the deploy — the cost of being wrong here is one
+ * manual dispatch, and the cost of being wrong the other way is shipping an
+ * unreviewed build step.
+ *
+ * @param {string|null} before file contents at the base revision, null if absent
+ * @param {string|null} after  file contents at the head revision, null if absent
+ */
+export function inspectPackageJson(before, after) {
+  if (before === null || after === null) {
+    return { verdict: 'unreadable', reason: 'added, deleted, or unreadable at one end of the diff' }
+  }
+
+  let base
+  let head
+  try {
+    base = JSON.parse(before)
+    head = JSON.parse(after)
+  } catch (error) {
+    return { verdict: 'unreadable', reason: `not parseable as JSON (${error.message})` }
+  }
+  if (!isPlainObject(base) || !isPlainObject(head)) {
+    return { verdict: 'unreadable', reason: 'not a JSON object' }
+  }
+
+  const outsideBase = withoutDependencyFields(base)
+  const outsideHead = withoutDependencyFields(head)
+  if (!isDeepStrictEqual(outsideBase, outsideHead)) {
+    const names = [...new Set([...Object.keys(outsideBase), ...Object.keys(outsideHead)])]
+      .filter((key) => !isDeepStrictEqual(outsideBase[key], outsideHead[key]))
+      .sort()
+    return {
+      verdict: 'behavioural',
+      reason: `changes outside the dependency fields: ${names.join(', ')}`,
+    }
+  }
+
+  for (const field of DEPENDENCY_FIELDS) {
+    const baseField = base[field] ?? {}
+    const headField = head[field] ?? {}
+    if (!isPlainObject(baseField) || !isPlainObject(headField)) {
+      return { verdict: 'unreadable', reason: `${field} is not an object` }
+    }
+
+    const added = Object.keys(headField).filter((name) => !(name in baseField))
+    const removed = Object.keys(baseField).filter((name) => !(name in headField))
+    if (added.length > 0 || removed.length > 0) {
+      const parts = []
+      if (added.length > 0) parts.push(`added ${added.sort().join(', ')}`)
+      if (removed.length > 0) parts.push(`removed ${removed.sort().join(', ')}`)
+      return { verdict: 'behavioural', reason: `${field}: ${parts.join('; ')}` }
+    }
+
+    for (const [name, headRange] of Object.entries(headField)) {
+      const baseRange = baseField[name]
+      if (baseRange === headRange) continue
+      if (typeof baseRange !== 'string' || typeof headRange !== 'string') {
+        return { verdict: 'behavioural', reason: `${field}.${name} is not a version string` }
+      }
+      if (!REGISTRY_RANGE.test(baseRange) || !REGISTRY_RANGE.test(headRange)) {
+        return {
+          verdict: 'behavioural',
+          reason: `${field}.${name} is not a plain registry range on both sides (${baseRange} -> ${headRange})`,
+        }
+      }
+    }
+  }
+
+  return { verdict: 'dependency-update', reason: 'dependency versions only' }
+}
 
 /**
  * Route a list of repository-relative paths to the jobs that must run.
  *
  * Pure: no filesystem, no git, no environment. That is what makes
  * `scripts/detect-changes.test.mjs` able to assert the policy directly.
+ *
+ * The one thing paths alone cannot answer is whether a `package.json` diff is a
+ * dependency bump, so `readManifest` is injected rather than opened here: the
+ * command line below supplies a `git show` reader, and the tests supply literal
+ * contents. Absent a reader, any `package.json` in the diff refuses the deploy
+ * rather than assuming — a caller that cannot show the file cannot vouch for it.
+ *
+ * @param {string[]} files
+ * @param {{ readManifest?: (path: string) => { before: string|null, after: string|null } }} [options]
  */
-export function classify(files) {
+export function classify(files, options = {}) {
+  const readManifest = options.readManifest ?? null
   const jobs = new Set()
   const categories = new Set()
   const unclassified = []
@@ -273,11 +430,32 @@ export function classify(files) {
    * to a change nobody can see is the wrong direction to fail in.
    */
   const changed = files.map((file) => file.trim()).filter((file) => file !== '')
-  const depsOnly =
+  const depsOnlyByPath =
     changed.length > 0 && changed.every((file) => DEPENDENCY_ONLY.some((manifest) => manifest.test(file)))
+
+  /*
+   * The second half of the gate: what the manifests actually say.
+   *
+   * Only reached when the paths already qualify, because reading a manifest that
+   * arrived alongside a source file would answer a question nobody asked.
+   */
+  const depsOnlyRefusals = []
+  if (depsOnlyByPath) {
+    for (const path of changed.filter((file) => PACKAGE_JSON.test(file))) {
+      if (readManifest === null) {
+        depsOnlyRefusals.push(`${path}: no manifest reader, so the diff could not be inspected`)
+        continue
+      }
+      const { before = null, after = null } = readManifest(path) ?? {}
+      const { verdict, reason } = inspectPackageJson(before, after)
+      if (verdict !== 'dependency-update') depsOnlyRefusals.push(`${path}: ${reason}`)
+    }
+  }
+  const depsOnly = depsOnlyByPath && depsOnlyRefusals.length === 0
 
   return {
     depsOnly,
+    depsOnlyRefusals,
     web: jobs.has('web'),
     numerical: jobs.has('numerical'),
     poster: jobs.has('poster'),
@@ -294,6 +472,7 @@ export function everything(reason) {
     // `--all` means "we could not tell what changed", which is never a reason to
     // deploy on its own.
     depsOnly: false,
+    depsOnlyRefusals: [`${reason}: the diff was not classified, so nothing vouches for it`],
     web: true,
     numerical: true,
     poster: true,
@@ -367,6 +546,47 @@ function diffRange(base, head) {
   }
 }
 
+/**
+ * One file's contents at a revision, or null when it is not there.
+ *
+ * Null is a legitimate answer — the manifest was added or deleted — and so is
+ * null for a revision that cannot be resolved. Both refuse the deploy, which is
+ * the direction to fail in.
+ */
+function showFile(revision, path) {
+  try {
+    return execFileSync('git', ['show', `${revision}:${path}`], {
+      encoding: 'utf8',
+      maxBuffer: 16 * 1024 * 1024,
+      stdio: ['ignore', 'pipe', 'ignore'],
+    })
+  } catch {
+    return null
+  }
+}
+
+/**
+ * Read both ends of a manifest diff.
+ *
+ * The base side is the MERGE BASE, not `base` itself, so that what is inspected
+ * is the same three-dot range `diffRange` reported. Taking it from `base`
+ * directly would compare against commits the change never saw, and a package.json
+ * that main edited meanwhile would read as an unexplained behavioural change.
+ */
+function manifestReader(base, head) {
+  let mergeBase = base
+  try {
+    mergeBase = execFileSync('git', ['merge-base', base, head], {
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'ignore'],
+    }).trim()
+  } catch {
+    // Unrelated histories or a missing commit. `base` is the honest fallback,
+    // and a manifest it cannot resolve reads as null, which refuses.
+  }
+  return (path) => ({ before: showFile(mergeBase, path), after: showFile(head, path) })
+}
+
 function main() {
   const options = parseArguments(process.argv.slice(2))
 
@@ -376,6 +596,8 @@ function main() {
     result = everything('forced')
   } else if (options.filesFrom !== null) {
     files = readFileList(options.filesFrom)
+    // No revisions, so no manifest can be read: a package.json in the list is
+    // reported as unvouched-for rather than assumed to be a version bump.
     result = classify(files)
   } else if (options.base !== null && options.head !== null) {
     const diff = diffRange(options.base, options.head)
@@ -383,7 +605,7 @@ function main() {
       result = everything('diff-unavailable')
     } else {
       files = diff.filter((path) => path.trim() !== '')
-      result = classify(files)
+      result = classify(files, { readManifest: manifestReader(options.base, options.head) })
     }
   } else {
     console.error('usage: detect-changes.mjs [--all | --base <sha> --head <sha> | --files-from <path|->]')
@@ -420,6 +642,11 @@ function main() {
     console.log('Paths that matched no rule — every job was enabled because of them.')
     console.log('Add a rule to scripts/detect-changes.mjs so the next change is routed properly:')
     for (const path of result.unclassified.slice(0, 50)) console.log(`  ${path}`)
+  }
+  if (result.depsOnlyRefusals.length > 0 && files.length > 0) {
+    console.log('')
+    console.log('Not eligible for an automatic deploy — a manifest in this diff says more than a version:')
+    for (const refusal of result.depsOnlyRefusals) console.log(`  ${refusal}`)
   }
   console.log('')
   for (const [name, value] of Object.entries(outputs)) console.log(`${name}=${value}`)

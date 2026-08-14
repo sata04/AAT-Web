@@ -31,25 +31,37 @@ name: Deploy
 # `workflow_dispatch` always deploys: someone decided.
 #
 # A push to main deploys only if every changed path is `pnpm-lock.yaml` or a
-# `package.json`. That is the shape a Renovate minor or patch update has after
-# it auto-merges on green CI, and it is the only change class that ships here
+# `package.json` AND every changed `package.json` moved nothing but dependency
+# versions. That is the shape a Renovate minor or patch update has after it
+# auto-merges on green CI, and it is the only change class that ships here
 # unattended.
+#
+# Both halves are load-bearing. The path rule on its own would have accepted a
+# diff that edits `scripts.build` — the command the verify job below runs — or
+# `packageManager`, which decides which pnpm runs it, or `engines`. Each of those
+# has the exact path signature of a dependency bump and arbitrary effect on what
+# ships. So `scripts/detect-changes.mjs` also reads both ends of every changed
+# manifest: everything outside dependencies/devDependencies/optionalDependencies/
+# peerDependencies has to be deeply unchanged, the set of dependency names has to
+# be unchanged, and a constraint that moved has to be a plain registry range on
+# both sides — no `git+https:`, `npm:`, `file:` or `github:` redirect wearing a
+# version bump's clothes. Anything it cannot read refuses.
 #
 # The gate reads the diff rather than the author. Checking for `renovate[bot]`
 # would trust a name any commit can carry, and a branch-name check trusts less
-# still; a diff that touches nothing but dependency manifests cannot change
-# behaviour except through a dependency, which is the property actually wanted.
-# `scripts/detect-changes.mjs` decides it and is unit-tested, because a gate that
-# is wrong in the permissive direction deploys something nobody looked at.
+# still. `scripts/detect-changes.mjs` decides it and is unit-tested, because a
+# gate that is wrong in the permissive direction deploys something nobody looked
+# at.
 #
 # Majors never arrive this way: renovate.json5 refuses to auto-merge them, and
 # deployment-path dependencies wait 30 days first. The poster renderer's Python
 # pins and Dockerfile are excluded outright — they are the visual contract, and
 # Renovate never auto-merges those either.
 on:
-  # A push to main deploys ONLY when the change is a dependency update and
-  # nothing else — see the `gate` job. Anything touching source, configuration,
-  # the visual contract or this workflow needs a deliberate `workflow_dispatch`.
+  # A push to main deploys ONLY when the change is a dependency version update
+  # and nothing else — see the `gate` job. Anything touching source, build
+  # scripts, configuration, the visual contract or this workflow needs a
+  # deliberate `workflow_dispatch`.
   push:
     branches: ["main"]
   workflow_dispatch:
@@ -72,7 +84,8 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          # The push range is walked, so the history has to be there.
+          # The push range is walked and both ends of every changed manifest are
+          # read out of it, so the history — and its blobs — have to be there.
           fetch-depth: 0
           persist-credentials: false
 

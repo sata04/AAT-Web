@@ -59,7 +59,8 @@ node scripts/check-commit-identity.mjs --all            # identity audit
 node scripts/detect-changes.mjs --base main --head HEAD # which CI jobs this needs
 ```
 
-CI is three workflows — validation, security scanning, and a manual deploy —
+CI is three workflows — validation, security scanning, and a deploy that is
+manual except for a dependency-only push to `main` —
 and which jobs a change runs is decided by `scripts/detect-changes.mjs`, whose
 rules are unit-tested rather than written in YAML. See `docs/ci.md` and
 `docs/security-scanning.md`. A path no rule matches runs everything; that is the

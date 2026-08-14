@@ -6,7 +6,7 @@ Three workflows, each with one job to do.
 | --- | --- | --- |
 | `ci.yml` | pull request, push to `main` | Does this change work? |
 | `security.yml` | pull request, push to `main`, daily, weekly | Is anything here known-bad *today*? |
-| `deploy.yml` | manual only | Ship what has already been verified. |
+| `deploy.yml` | manual, plus a dependency-only push to `main` | Ship what has already been verified. |
 
 Nothing else runs anything. There is no Travis, no CircleCI, no self-hosted
 runner, and no plan for one: GitHub-hosted runners are free for public
@@ -177,10 +177,40 @@ The build costs a couple of minutes and runs in parallel with everything else.
 
 ## Deployment
 
-`deploy.yml` is manual-only and unchanged by any of this. Its `verify` job
+`deploy.yml` runs on `workflow_dispatch`, and on a push to `main` that its
+`gate` job judges to be a dependency version update and nothing else. Every
+other push to `main` reaches the gate, is refused, and skips both remaining
+jobs.
+
+The gate calls the same `scripts/detect-changes.mjs` this document is about, but
+it reads a different output — `deps_only`, not the four job flags — and it holds
+that output to a stricter standard than the job routing does. Job routing asks
+which jobs a path *could* break and errs towards running more of them. The
+deploy gate asks whether a human needs to look at this at all, and errs towards
+saying yes:
+
+- every changed path must be `pnpm-lock.yaml` or a `package.json`; and
+- every changed `package.json` must, on inspection of both ends of the diff,
+  have moved nothing but dependency versions.
+
+The second condition is not a formality. `package.json` is where `build`, `test`
+and `check:bundle` are defined, alongside `packageManager` and `engines` — a diff
+that rewrites `scripts.build` has the same paths as a Renovate patch bump and
+none of its harmlessness. `scripts/detect-changes.mjs` therefore requires
+everything outside the four dependency fields to be deeply unchanged, requires
+the set of dependency names to be unchanged, and requires a constraint that moved
+to be a plain registry range on both sides so a version cannot quietly become a
+`git+https:` or `file:` redirect. A manifest it cannot read or parse refuses.
+`scripts/detect-changes.test.mjs` asserts each of those, in both directions.
+
+Everything else about the workflow is unchanged by any of this. Its `verify` job
 repeats work `ci.yml` already did, deliberately: it runs at the exact commit
 being deployed, produces the artefacts the credential-bearing job consumes, and
 must not depend on a run that happened on a different tree. See the design note
 at the top of that file — the split between "runs repository code" and "holds
 production credentials" is the thing it exists to protect, and nothing in this
 document may erode it.
+
+A dependency-only push that deploys automatically still goes through `verify`
+first, on the merge commit, with no credentials. Automatic means nobody presses
+the button; it does not mean anything is skipped.
