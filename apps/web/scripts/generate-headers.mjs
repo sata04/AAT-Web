@@ -66,7 +66,27 @@ const csp = [
   "font-src 'self'",
   // Same-origin only. This application has no third-party endpoint, so anything else is exfiltration.
   "connect-src 'self'",
-  "worker-src 'self'",
+  /*
+   * `blob:` is required, and it is the application's own export path that
+   * requires it.
+   *
+   * An XLSX file is a zip, and `write-excel-file` compresses through fflate,
+   * which spawns its worker the way bundled libraries do: it builds the worker's
+   * source as a string, wraps it in a Blob, and passes the object URL to
+   * `new Worker`. With `worker-src 'self'` alone the browser refuses, and
+   * "export to Excel" fails in production — one of the things a signed-out
+   * visitor is promised.
+   *
+   * The concession is narrower than it looks. A blob worker can only run code
+   * the page itself just constructed, and `script-src` here has no
+   * `'unsafe-eval'` and no `'unsafe-inline'` — an attacker able to construct
+   * that blob would already be executing script on the page, so this does not
+   * hand them a capability they lacked.
+   *
+   * The application's own two workers (analysis, export) are ordinary module
+   * workers loaded from `/assets/`, and are covered by `'self'`.
+   */
+  "worker-src 'self' blob:",
   "manifest-src 'self'",
   "object-src 'none'",
   "base-uri 'self'",
