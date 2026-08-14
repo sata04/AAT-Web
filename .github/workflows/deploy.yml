@@ -402,7 +402,16 @@ jobs:
           CLOUDFLARE_ACCOUNT_ID: ${{ steps.doppler.outputs.CLOUDFLARE_ACCOUNT_ID }}
           AAT_PAGES_PROJECT: ${{ steps.doppler.outputs.AAT_PAGES_PROJECT }}
         run: |
-          pnpm exec wrangler pages deploy \
+          # pipefail, because `| tee` otherwise reports ITS exit status and the
+          # step goes green while wrangler has failed. That is exactly what
+          # happened on the first attempt: "Command wrangler not found", step
+          # success, nothing deployed. Only the assertion below caught it.
+          set -euo pipefail
+          # By path, not `pnpm exec`. This directory is not a workspace package,
+          # so pnpm has no project from which to resolve the binary — and the
+          # working directory has to be this one, because `wrangler pages deploy`
+          # discovers `functions/` relative to the process CWD.
+          node ../node_modules/wrangler/bin/wrangler.js pages deploy \
             --project-name "$AAT_PAGES_PROJECT" \
             --branch main \
             --commit-dirty=true \
