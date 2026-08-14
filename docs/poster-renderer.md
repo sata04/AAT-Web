@@ -150,10 +150,10 @@ moved. `render.PNG_METADATA` writes one constant `Software` value, and no `Creat
 | Pinned thing | Where | Why it moves pixels |
 | --- | --- | --- |
 | Base image | `Dockerfile`, by **digest** | Ships zlib and libpng; a rebuild can change PNG bytes |
-| Python 3.12 | base image | Float formatting feeds tick labels |
+| Python 3.14 | base image | Float formatting feeds tick labels |
 | matplotlib 3.11.1 | `requirements.txt`, by hash | The layout engine and the whole drawing stack |
 | numpy 2.5.1 | `requirements.txt`, by hash | Tick locators, and the arrays being drawn |
-| Pillow 11.3.0 | `requirements.txt`, by hash | Since Matplotlib 3.3, the PNG encoder itself |
+| Pillow 12.3.0 | `requirements.txt`, by hash | Since Matplotlib 3.3, the PNG encoder itself |
 | FreeType | *inside the Matplotlib wheel* | Glyph rasterisation and hinting |
 | DejaVu Sans | *inside the Matplotlib wheel* | The glyphs |
 | `DESKTOP_BASELINE_VERSION = "11.1.0"` | `version.py` | Drawn into the watermark |
@@ -163,7 +163,7 @@ Python ≥ 3.12. That equality is the entire point.
 
 Three mechanisms hold the pins:
 
-- **The base image is referenced by digest, not tag.** `python:3.12-slim-bookworm` is republished
+- **The base image is referenced by digest, not tag.** `python:3.14-slim-bookworm` is republished
   whenever Debian or CPython gets a patch, and a rebuilt FreeType or zlib can change rendered
   bytes. The tag is kept beside the digest for human readability only.
 - **`pip install --require-hashes`** makes pip refuse the entire file unless every requirement —
