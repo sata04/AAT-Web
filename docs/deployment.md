@@ -213,9 +213,16 @@ and redeem it immediately.
 > export CLOUDFLARE_API_TOKEN=$(doppler secrets get CF_DEPLOY_TOKEN_VALUE --project aat-web --config prd --plain)
 > export CLOUDFLARE_ACCOUNT_ID=$(doppler secrets get CLOUDFLARE_ACCOUNT_ID --project aat-web --config prd --plain)
 > AAT_D1_DATABASE_ID=$(doppler secrets get AAT_D1_DATABASE_ID --project aat-web --config prd --plain) \
-> POSTER_RENDERER_IMAGE=unused \
+> POSTER_RENDERER_IMAGE="registry.cloudflare.com/${CLOUDFLARE_ACCOUNT_ID}/aat-poster-renderer:latest" \
 >   node scripts/resolve-wrangler-config.mjs wrangler.local.jsonc
 > ```
+>
+> `POSTER_RENDERER_IMAGE` is never read by a `d1 execute`, but wrangler validates
+> the whole configuration before running any command. A placeholder such as
+> `unused` is rejected — "does not appear to be a valid path to a Dockerfile, or a
+> valid image registry path" — and one naming another account is refused too. The
+> value above is syntactically valid and belongs to this account, which is all the
+> validator asks of it.
 >
 > Then pass `--config wrangler.local.jsonc` to every command in this section, and
 > delete the file afterwards — it is gitignored, but it names the account.
