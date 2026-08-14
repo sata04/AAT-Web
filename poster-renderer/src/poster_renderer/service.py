@@ -43,7 +43,7 @@ from .errors import (
     UnsupportedMediaTypeError,
 )
 from .validation import parse_request_json, validate_spec
-from .version import APP_VERSION, RENDERER_VERSION
+from .version import DESKTOP_BASELINE_VERSION, RENDERER_VERSION
 from .worker import RenderExecutor
 
 logger = logging.getLogger("poster_renderer.service")
@@ -232,7 +232,10 @@ class PosterRequestHandler(BaseHTTPRequestHandler):
             {
                 "status": "ok",
                 "rendererVersion": RENDERER_VERSION,
-                "appVersion": APP_VERSION,
+                # Not "appVersion": this is the AAT release the figures conform to, not the
+                # version of anything running in this container. That distinction is the whole
+                # subject of docs/versioning.md, and the old key taught the opposite.
+                "desktopBaselineVersion": DESKTOP_BASELINE_VERSION,
                 "presetVersion": preset.PRESET_VERSION,
                 "workerReady": self._executor.is_ready(),
                 "maxQueued": self._executor.max_queued,

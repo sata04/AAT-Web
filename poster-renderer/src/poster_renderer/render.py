@@ -20,7 +20,7 @@ from matplotlib.figure import Figure
 
 from . import preset
 from .validation import PosterPlotSpec, SeriesArrays
-from .version import APP_VERSION, RENDERER_VERSION
+from .version import DESKTOP_BASELINE_VERSION, RENDERER_VERSION
 
 # Applied once, process-wide, at import. The client cannot reach rcParams — the spec has no field
 # that maps to one — so this is the only place Matplotlib's global configuration is ever touched.
@@ -62,7 +62,7 @@ def _add_version_watermark(axes) -> None:
     axes.text(
         preset.WATERMARK_X,
         preset.WATERMARK_Y,
-        preset.WATERMARK_TEMPLATE.format(version=APP_VERSION),
+        preset.WATERMARK_TEMPLATE.format(version=DESKTOP_BASELINE_VERSION),
         transform=axes.transAxes,
         fontsize=preset.WATERMARK_FONT_SIZE,
         verticalalignment=preset.WATERMARK_VERTICAL_ALIGNMENT,

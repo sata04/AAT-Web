@@ -160,7 +160,8 @@ accepts the literals `NaN`/`Infinity` (rejected here), and Python's `\d` matches
 
 ### `GET /health`
 
-Readiness plus build identity: renderer version, app version (the watermark's), preset version,
+Readiness plus build identity: renderer version, desktop baseline version (the watermark's),
+preset version,
 and whether the render worker is warm. Used by the Docker `HEALTHCHECK`.
 
 ### Concurrency and backpressure

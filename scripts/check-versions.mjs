@@ -1,7 +1,14 @@
 #!/usr/bin/env node
 
 /**
- * The desktop-baseline version audit.
+ * The version audit: two groups of restated version strings, checked independently.
+ *
+ * They are deliberately *not* reconciled with each other. AAT Web 1.0.0 renders AAT 11.1.0's
+ * figure, so a poster's watermark reading `AAT v11.1.0` while the application is `1.0.0` is the
+ * designed state — `docs/versioning.md` §2. What this checker enforces is that each number agrees
+ * with *its own* copies.
+ *
+ * ## Group 1: the desktop baseline
  *
  * AAT Web restates the desktop application's release version in several places, and one of those
  * places is **drawn into every poster figure**: `poster-renderer` stamps `AAT v11.1.0` into the
@@ -25,6 +32,13 @@
  * every future poster (see `docs/versioning.md`). A value with that consequence should be a diff
  * someone approved, not a number that appears during a build. This checker's job is only to make
  * a *partial* update impossible.
+ *
+ * ## Group 2: AAT Web's own version
+ *
+ * Written down twice, with no vendored source of truth, and the second copy is load-bearing:
+ * `POST /revisions` stores `body.appVersion ?? APP_VERSION`, so a drift makes a revision's
+ * recorded provenance depend on whether the client happened to send one. See
+ * {@link WEB_VERSION_SITES}.
  *
  * Run with `pnpm test` (via `scripts/check-versions.test.mjs`) or directly:
  *   node scripts/check-versions.mjs
@@ -55,13 +69,40 @@ const SEMVER = /^\d+\.\d+\.\d+$/
 export const DESKTOP_VERSION_SITES = [
   {
     file: 'poster-renderer/src/poster_renderer/version.py',
-    pattern: /^APP_VERSION = "(.+?)"$/m,
+    pattern: /^DESKTOP_BASELINE_VERSION = "(.+?)"$/m,
     note: 'drawn into the poster watermark — moving it changes the pixels of every future figure',
   },
   {
     file: 'apps/web/src/app/version.ts',
     pattern: /^export const DESKTOP_BASELINE_VERSION = '(.+?)'$/m,
     note: 'shown in the about/provenance line',
+  },
+]
+
+/**
+ * AAT Web's *own* release version — a different number answering a different question, and one
+ * that is also written down twice.
+ *
+ * `worker/config.ts`'s copy is the fallback in `POST /revisions`: a snapshot records
+ * `body.appVersion ?? APP_VERSION`. So if the two drift, the version stored against a revision
+ * depends on whether the client happened to send one — the same class of silent, plausible-looking
+ * inconsistency the desktop baseline had, on the field `docs/cloud-data-model.md` describes as
+ * "what produced it".
+ *
+ * There is no third file to make the source of truth here: unlike the desktop baseline, this
+ * number is not vendored from anywhere. The browser's copy is treated as authoritative because it
+ * is the one a client actually sends; the Worker's only ever stands in for it.
+ */
+export const WEB_VERSION_SITES = [
+  {
+    file: 'apps/web/src/app/version.ts',
+    pattern: /^export const APP_VERSION = '(.+?)'$/m,
+    note: 'the version the browser records in every snapshot it stores',
+  },
+  {
+    file: 'apps/web/worker/config.ts',
+    pattern: /^export const APP_VERSION = '(.+?)'$/m,
+    note: "the Worker's fallback when a client sends no appVersion — must agree, or provenance depends on the caller",
   },
 ]
 
@@ -74,59 +115,97 @@ function read(root, file) {
 }
 
 /**
- * Audit the repository at `root`. Returns `{ version, problems }`; `problems` is empty when every
- * copy agrees. Never throws for a content problem — the caller decides how to report.
+ * Read the version a site declares, or push the reason it could not be read.
+ *
+ * A file that no longer matches its pattern is a *problem*, never a skip. That is the failure the
+ * obvious implementation gets wrong: deleting the constant makes "no mismatch found" trivially
+ * true, and the audit reports success for a repository that has stopped declaring the thing it
+ * was auditing.
+ */
+function declaredVersion(root, site, label, problems) {
+  const contents = read(root, site.file)
+  if (contents === null) {
+    problems.push(`${site.file} is missing, but it is expected to declare the ${label}.`)
+    return null
+  }
+  const match = site.pattern.exec(contents)
+  if (match === null) {
+    problems.push(
+      `${site.file} no longer declares the ${label} in the expected form. ` +
+        `Either restore the declaration or update scripts/check-versions.mjs.`,
+    )
+    return null
+  }
+  return match[1]
+}
+
+/**
+ * Audit the repository at `root`.
+ *
+ * Returns `{ desktopBaseline, webVersion, problems }`; `problems` is empty when every copy of
+ * every version agrees. Never throws for a content problem — the caller decides how to report.
+ *
+ * The two version groups are checked independently and are *expected to differ from each other*:
+ * AAT Web 1.0.0 renders AAT 11.1.0's figure, and that is not a discrepancy to reconcile. See
+ * `docs/versioning.md`.
  */
 export function checkVersions(root = REPO_ROOT) {
   const problems = []
 
+  // --- the desktop baseline, against its vendored source of truth ---------------------------
+  let desktopBaseline = null
   const raw = read(root, REFERENCE_VERSION_FILE)
   if (raw === null) {
     problems.push(`${REFERENCE_VERSION_FILE} is missing; it is the source of truth for the desktop baseline.`)
-    return { version: null, problems }
-  }
-
-  const version = raw.trim()
-  if (!SEMVER.test(version)) {
-    problems.push(
-      `${REFERENCE_VERSION_FILE} must contain a bare MAJOR.MINOR.PATCH version, got "${version}".`,
-    )
-    return { version: null, problems }
-  }
-
-  for (const site of DESKTOP_VERSION_SITES) {
-    const contents = read(root, site.file)
-    if (contents === null) {
+  } else {
+    const version = raw.trim()
+    if (!SEMVER.test(version)) {
       problems.push(
-        `${site.file} is missing, but ${REFERENCE_VERSION_FILE} expects it to restate the version.`,
+        `${REFERENCE_VERSION_FILE} must contain a bare MAJOR.MINOR.PATCH version, got "${version}".`,
       )
+    } else {
+      desktopBaseline = version
+      for (const site of DESKTOP_VERSION_SITES) {
+        const declared = declaredVersion(root, site, 'desktop baseline', problems)
+        if (declared !== null && declared !== version) {
+          problems.push(
+            `${site.file} says ${declared}, but ${REFERENCE_VERSION_FILE} says ${version} (${site.note}).`,
+          )
+        }
+      }
+    }
+  }
+
+  // --- AAT Web's own version, against its first declaring site -------------------------------
+  // Nothing vendors this one, so the first site is the reference and the rest must match it.
+  let webVersion = null
+  for (const site of WEB_VERSION_SITES) {
+    const declared = declaredVersion(root, site, 'AAT Web version', problems)
+    if (declared === null) continue
+    if (webVersion === null) {
+      webVersion = declared
+      if (!SEMVER.test(declared)) {
+        problems.push(`${site.file} must declare a bare MAJOR.MINOR.PATCH version, got "${declared}".`)
+      }
       continue
     }
-    const match = site.pattern.exec(contents)
-    if (match === null) {
+    if (declared !== webVersion) {
       problems.push(
-        `${site.file} no longer declares the desktop baseline in the expected form. ` +
-          `Either restore the declaration or update DESKTOP_VERSION_SITES in scripts/check-versions.mjs.`,
-      )
-      continue
-    }
-    if (match[1] !== version) {
-      problems.push(
-        `${site.file} says ${match[1]}, but ${REFERENCE_VERSION_FILE} says ${version} (${site.note}).`,
+        `${site.file} says ${declared}, but ${WEB_VERSION_SITES[0].file} says ${webVersion} (${site.note}).`,
       )
     }
   }
 
-  return { version, problems }
+  return { desktopBaseline, webVersion, problems }
 }
 
 if (import.meta.url === `file://${process.argv[1]}`) {
-  const { version, problems } = checkVersions()
+  const { desktopBaseline, webVersion, problems } = checkVersions()
   if (problems.length > 0) {
-    console.error('Desktop baseline version mismatch:\n')
+    console.error('Version mismatch:\n')
     for (const problem of problems) console.error(`  - ${problem}`)
     console.error('\nSee docs/versioning.md for which of these are visual-contract changes.')
     process.exit(1)
   }
-  console.log(`Desktop baseline ${version}: every copy agrees.`)
+  console.log(`AAT Web ${webVersion} rendering AAT ${desktopBaseline}'s figure: every copy of both agrees.`)
 }

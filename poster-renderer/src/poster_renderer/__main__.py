@@ -15,7 +15,7 @@ from types import FrameType
 
 from .config import ServiceConfig, from_environment
 from .service import create_server
-from .version import APP_VERSION, RENDERER_VERSION
+from .version import DESKTOP_BASELINE_VERSION, RENDERER_VERSION
 
 
 def configure_logging() -> None:
@@ -46,11 +46,11 @@ def main(config: ServiceConfig | None = None) -> int:
 
     server = create_server(resolved)
     logger.info(
-        "poster renderer listening on %s:%d renderer=%s app=%s",
+        "poster renderer listening on %s:%d renderer=%s desktop-baseline=%s",
         resolved.host,
         resolved.port,
         RENDERER_VERSION,
-        APP_VERSION,
+        DESKTOP_BASELINE_VERSION,
     )
 
     # Pre-warm off the serving thread: the port is already accepting connections, so a health

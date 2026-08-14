@@ -25,7 +25,7 @@ from PIL import Image
 from poster_renderer import preset
 from poster_renderer.render import build_figure, render_png
 from poster_renderer.validation import validate_spec
-from poster_renderer.version import APP_VERSION
+from poster_renderer.version import DESKTOP_BASELINE_VERSION
 
 from conftest import build_spec
 
@@ -213,7 +213,7 @@ def test_version_watermark(figure: Figure):
     watermarks = [text for text in axes.texts if text.get_text().startswith("AAT v")]
     assert len(watermarks) == 1, "the version watermark is missing"
     watermark = watermarks[0]
-    assert watermark.get_text() == f"AAT v{APP_VERSION}"
+    assert watermark.get_text() == f"AAT v{DESKTOP_BASELINE_VERSION}"
     assert watermark.get_position() == (0.98, 0.02)
     assert watermark.get_transform() is axes.transAxes
     assert watermark.get_horizontalalignment() == "right"

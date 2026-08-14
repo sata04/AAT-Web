@@ -156,7 +156,7 @@ moved. `render.PNG_METADATA` writes one constant `Software` value, and no `Creat
 | Pillow 11.3.0 | `requirements.txt`, by hash | Since Matplotlib 3.3, the PNG encoder itself |
 | FreeType | *inside the Matplotlib wheel* | Glyph rasterisation and hinting |
 | DejaVu Sans | *inside the Matplotlib wheel* | The glyphs |
-| `APP_VERSION = "11.1.0"` | `version.py` | Drawn into the watermark |
+| `DESKTOP_BASELINE_VERSION = "11.1.0"` | `version.py` | Drawn into the watermark |
 
 matplotlib 3.11.1 and numpy 2.5.1 are what the desktop application's `uv.lock` resolves for
 Python ≥ 3.12. That equality is the entire point.
@@ -280,11 +280,18 @@ sent; `poster_figures.renderer_version` records the container build that answere
 preset_version)` with its `spec_hash` and `renderer_version`, so a figure can always be explained
 by the preset that produced it even after the preset registry has moved on.
 
-Note that `RENDERER_VERSION` and `APP_VERSION` are deliberately different strings.
-`APP_VERSION` (`11.1.0`) is *drawn into the watermark*, so bumping it changes every pixel of that
-text and is a visual-contract change. `RENDERER_VERSION`
-(`aat-poster-renderer/1.0.0`) is build identity only: it appears in `GET /health`, in the response
-header and in the PNG's `Software` text chunk, and changing it moves no pixel.
+Note that `RENDERER_VERSION` and `DESKTOP_BASELINE_VERSION` are deliberately different strings,
+and that neither of them is AAT Web's own version (`1.0.0`). They answer three separate questions:
+
+| Constant | Value | Answers |
+| --- | --- | --- |
+| `DESKTOP_BASELINE_VERSION` | `11.1.0` | Which AAT release's figure is this? — *drawn into the watermark*, so bumping it is a visual-contract change |
+| `RENDERER_VERSION` | `aat-poster-renderer/1.1.0` | Which program drew it? — `GET /health`, the response header and the PNG's `Software` chunk; moves no pixel |
+| `APP_VERSION` (`apps/web`) | `1.0.0` | Which AAT Web build asked for it? — never reaches the container; recorded against the analysis revision |
+
+A figure therefore says `AAT v11.1.0` while the application that produced it is AAT Web 1.0.0.
+That is the designed state, not a drift: see `docs/versioning.md`, "Why the figure's version is
+not AAT Web's version".
 
 ## The container is short-lived on purpose
 
@@ -439,8 +446,10 @@ guarantee this container exists to provide, so there is no update size small eno
    version — in `presets.ts` and `preset.py` together — and register it. Stored posters must keep
    rendering the way they always have.
 
-A change to `version.py`'s `APP_VERSION` follows the same procedure, because it is drawn into the
-watermark. A change to `RENDERER_VERSION` does not, because it is not.
+A change to `version.py`'s `DESKTOP_BASELINE_VERSION` follows the same procedure, because it is
+drawn into the watermark. A change to `RENDERER_VERSION` does not move a pixel, but it does change
+the PNG's `Software` text chunk, so the reference still has to be regenerated — confirm the images
+are identical first.
 
 ## Outstanding
 

@@ -7,8 +7,10 @@ each one means, when to move it, and what breaks if it is moved carelessly — o
 
 The short version, if you read nothing else:
 
-- **`APP_VERSION` in `poster-renderer` is drawn into every poster.** It is a provenance claim, and
-  moving it changes pixels. It is checked mechanically; do not hand-edit one copy.
+- **A figure says `AAT v11.1.0` while AAT Web is `1.0.0`, and that is correct.** The watermark is a
+  statement about the *figure*, not about the program that drew it. §2 is the long answer.
+- **`DESKTOP_BASELINE_VERSION` in `poster-renderer` is drawn into every poster.** Moving it changes
+  pixels. It is checked mechanically; do not hand-edit one copy.
 - **A preset version is not a changelog.** Mint `aat-poster-v2` to change the *style*; fix
   `aat-poster-v1` in place when it was simply wrong about the desktop application.
 - **`RENDERER_VERSION` is the one that absorbs "same spec, different bytes."** That is its job.
@@ -20,13 +22,20 @@ The short version, if you read nothing else:
 | Version | Where | Answers | Moves when |
 | --- | --- | --- | --- |
 | Desktop baseline | `reference/python/REFERENCE_VERSION.txt` | Which AAT release is this a rewrite of? | The vendored reference tree is re-taken from a newer AAT |
-| ↳ watermark copy | `poster_renderer/version.py::APP_VERSION` | Which AAT release does this figure reproduce? | With the baseline — **visual contract** |
+| ↳ watermark copy | `poster_renderer/version.py::DESKTOP_BASELINE_VERSION` | Which AAT release does this figure reproduce? | With the baseline — **visual contract** |
 | ↳ about-line copy | `apps/web/src/app/version.ts::DESKTOP_BASELINE_VERSION` | Same, for the UI | With the baseline |
 | Reference commit | `reference/python/REFERENCE_COMMIT.txt` | Which AAT *commit* is `reference/python/core/**` a copy of? | The reference tree is re-vendored |
 | Preset version | `POSTER_PRESET_VERSIONS` / `preset.PRESET_VERSION` | What does this figure *look* like? | A deliberate style change — as a **new** version, never an edit |
 | Renderer version | `poster_renderer/version.py::RENDERER_VERSION` | Which code drew this figure? | Any build that can produce different bytes |
 | Analysis engine | `apps/web/src/app/version.ts::ANALYSIS_ENGINE_VERSION` | Which engine computed these numbers? | `@aat/analysis-core` changes a number — invalidates every local cache |
-| App shell | `apps/web/src/app/version.ts::APP_VERSION`, `worker/config.ts::APP_VERSION` | Which build served this? | A behavioural change worth recording in a snapshot or audit entry |
+| App shell | `apps/web/src/app/version.ts::APP_VERSION`, `worker/config.ts::APP_VERSION` | Which AAT Web build produced this? | A behavioural change worth recording in a snapshot or audit entry |
+
+Two of these are written down more than once, and both duplications are audited by
+`scripts/check-versions.mjs`. The desktop baseline has a vendored source of truth
+(`REFERENCE_VERSION.txt`); the app shell has none, so the browser's copy is treated as
+authoritative and the Worker's must match it. The Worker's is not decoration: `POST /revisions`
+stores `body.appVersion ?? APP_VERSION`, so if the two drift, the version recorded against a
+revision depends on whether the client happened to send one.
 
 ### Why the desktop baseline is vendored as data
 
@@ -48,7 +57,71 @@ human approved, not a number that materialises during a build. The checker's job
 
 ---
 
-## 2. Preset versions: when to mint `v2`, and when not to
+## 2. Why the figure's version is not AAT Web's version
+
+A poster rendered by AAT Web 1.0.0 carries the watermark `AAT v11.1.0`. That looks like a bug and
+is asked about roughly on first contact, so it is worth stating plainly what each number claims.
+
+**`DESKTOP_BASELINE_VERSION` is a conformance claim about the figure, not a build identity.** It
+says: *these are AAT 11.1.0's numbers, AAT 11.1.0's framing, AAT 11.1.0's style.* It is a
+specification version. Two implementations that satisfy that specification stamp the same string —
+which is exactly what makes a figure exported from the desktop and one rendered here
+interchangeable.
+
+The claim is verified rather than asserted. `tests/golden/**` holds `@aat/analysis-core`'s output
+to the vendored Python oracle bit-for-bit (`docs/numerical-compatibility.md`); the preset content
+hash and `test_reference_image.py` hold the pixels. If either ever stopped being true, CI would
+fail before a figure could carry the claim.
+
+**`APP_VERSION` in `apps/web` is the build identity** — which AAT Web produced this. It is
+recorded against the analysis revision, where it can be precise, and it never reaches the
+container at all.
+
+### Why not put AAT Web's version in the watermark
+
+Three reasons, in increasing order of importance.
+
+1. **It is an `aat-poster-v2`.** The watermark text is drawn into the image, so changing it changes
+   pixels — by this document's own §3, that is a new preset version, not an edit.
+
+2. **Nobody reading a poster benefits from two version numbers.** The watermark is eight-point grey
+   text in a corner. It has room for one fact, and the useful fact is which figure standard the
+   reader is looking at.
+
+3. **It would break the thing the renderer exists for.** A researcher who exported figures with the
+   desktop before the migration and renders them here afterwards would end up with two different
+   stamps on one poster, for figures whose numbers and pixels are verifiably identical. The reader
+   would infer that something changed between them. Nothing did — that is the whole point of the
+   bit-exact port and the frozen preset, and a version stamp that implied otherwise would be
+   *worse* misinformation than the current state, not better.
+
+### Where the build identity actually lives
+
+Nothing is lost by keeping it off the figure, because the artifact is already traceable:
+
+| Question | Answer, and where it is |
+| --- | --- |
+| Was this drawn by AAT Web or by the desktop? | The PNG's `Software` chunk. Desktop exports carry Matplotlib's own autogenerated string; ours reads `AAT poster-renderer aat-poster-renderer/1.1.0 (aat-poster-v1)` |
+| Which renderer build drew it? | Same chunk, and `PosterFigureRecord.rendererVersion` |
+| Which analysis, and which AAT Web build? | `sha256(png)` → `PosterFigureRecord.objectSha256` → `analysisRevisionId` → the snapshot's `appVersion` / `analysisEngineVersion` |
+| What was it asked to draw? | `PosterFigureRecord.specHash` |
+
+That chain is why the poster spec must **not** grow an `appVersion` field, tempting as it looks:
+the field would land in the PNG bytes, and a re-render after an unrelated web deploy would produce
+a different file for the same spec — quietly costing the idempotent poster endpoint its no-op
+retry and `objectSha256` its meaning. The join key is the PNG's hash; the version belongs on the
+row, not in the image.
+
+### The name was the actual defect
+
+Until this was written down, the constant was called `APP_VERSION`, `GET /health` reported it as
+`appVersion`, and the startup log said `app=11.1.0`. Every one of those reads as *this program's
+version*, so the natural conclusion was that AAT Web 1.0.0 was claiming to be 11.1.0. The values
+were right and the names were wrong; the names now say what the value means.
+
+---
+
+## 3. Preset versions: when to mint `v2`, and when not to
 
 `aat-poster-v1` is not "the first style we happened to ship". It is *defined* as the desktop
 application's export figure, transcribed constant by constant from `gui/plot_controller.py`. That
@@ -99,7 +172,7 @@ The thing that did move is `RENDERER_VERSION`, which is exactly what it is for.
 
 ---
 
-## 3. `RENDERER_VERSION` is the byte-level version
+## 4. `RENDERER_VERSION` is the byte-level version
 
 `PosterFigureRecord` stores `presetVersion` *and* `rendererVersion` for every figure. The two are
 not redundant:
@@ -116,7 +189,7 @@ the version that must be free to move should not be one that moves pixels.
 
 ---
 
-## 4. Checklist: adopting a new desktop release
+## 5. Checklist: adopting a new desktop release
 
 1. Re-vendor `reference/python/core/**` from the new AAT commit.
 2. Update `reference/python/REFERENCE_COMMIT.txt` and `reference/python/REFERENCE_VERSION.txt`.
