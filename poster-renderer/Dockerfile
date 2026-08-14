@@ -29,7 +29,7 @@
 #
 # Renovate keeps this digest fresh, but poster-renderer updates never auto-merge: a base-image
 # bump is a visual-contract change and needs the review in README.md.
-FROM python:3.12-slim-bookworm@sha256:4766d8b510c428e595d74b9cc5bbb2fae8e26316fffb4adc89908d79aacd58a2 AS base
+FROM python:3.14-slim-bookworm@sha256:23c59390fc717bf09f9336908199a0ae75d9c4264bf296123f94ad772fea3b52 AS base
 
 # ---------------------------------------------------------------------------------------------
 # Build stage: install dependencies into an isolated prefix
