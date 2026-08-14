@@ -18,5 +18,12 @@ export const ANALYSIS_ENGINE_VERSION = '1.0.0'
 /** Version of the web application shell. */
 export const APP_VERSION = '1.0.0'
 
-/** The desktop release this rewrite tracks; shown in the about/provenance line. */
+/**
+ * The desktop release this rewrite tracks; shown in the about/provenance line.
+ *
+ * Must equal `reference/python/REFERENCE_VERSION.txt` — the version of the AAT commit the vendored
+ * reference tree was taken from — and `scripts/check-versions.mjs` fails `pnpm test` if it does
+ * not. The poster watermark restates the same number, which is why a partial bump is worth a
+ * checker: see `docs/versioning.md`.
+ */
 export const DESKTOP_BASELINE_VERSION = '11.1.0'

@@ -91,7 +91,8 @@ stack.
 | `packages/analysis-core/**` | ● | ● | | ● |
 | `packages/plot-spec/**` | ● | | ● | ● |
 | `packages/shared/**` | ● | | | ● |
-| `reference/python/**` | | ● | | |
+| `reference/python/REFERENCE_VERSION.txt` | ● | ● | ● | ● |
+| `reference/python/**` (everything else) | | ● | | |
 | `tests/golden/**` | ● | ● | | |
 | `tests/fixtures/**` | ● | ● | | ● |
 | `poster-renderer/**` (incl. `Dockerfile`, `requirements.txt`) | | | ● | ● |

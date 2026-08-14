@@ -175,3 +175,4 @@ offline.
 - `docs/supply-chain.md` — dependency policy
 - `docs/deployment.md` — the verify/deploy trust boundary
 - `docs/migration-from-desktop.md` — what happens to existing config and output
+- `docs/versioning.md` — the eight version strings, and which of them move pixels
