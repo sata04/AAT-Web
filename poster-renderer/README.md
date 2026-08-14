@@ -83,10 +83,10 @@ it with the Worker is a one-line change.
 | Pinned thing | Where | Why it moves pixels |
 | --- | --- | --- |
 | Base image | `Dockerfile`, by **digest** | Ships zlib and libpng; a rebuild can change PNG bytes |
-| Python 3.12 | base image | Float formatting and stdlib behaviour feed tick labels |
+| Python 3.14 | base image | Float formatting and stdlib behaviour feed tick labels |
 | matplotlib 3.11.1 | `requirements.txt` | The layout engine and the entire drawing stack |
 | numpy 2.5.1 | `requirements.txt` | Tick locators, and the arrays being drawn |
-| Pillow 11.3.0 | `requirements.txt` | Since Matplotlib 3.3 the PNG encoder itself |
+| Pillow 12.3.0 | `requirements.txt` | Since Matplotlib 3.3 the PNG encoder itself |
 | FreeType | inside the Matplotlib wheel | Glyph rasterisation and hinting |
 | DejaVu Sans | inside the Matplotlib wheel | The glyphs |
 

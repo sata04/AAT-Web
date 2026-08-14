@@ -48,14 +48,29 @@ Every run first proves the scanner still works.
 the scanner is broken — a truncated download, a rule set that failed to load, an
 allowlist that grew a `.*`. `scripts/scanner-canary.mjs` writes a synthetic
 credential to a temporary directory, scans it, and fails the job unless gitleaks
-reports it under both an exact-pattern rule (`aws-access-token`) and an
-entropy rule (`generic-api-key`) — two rules, because they can break
-independently.
+reports all three of:
+
+| rule | kind | what its absence would mean |
+| --- | --- | --- |
+| `aws-access-token` | exact pattern, no keyword, no entropy floor | pattern rules are not running |
+| `generic-api-key` | keyword plus entropy | entropy scoring is not running |
+| `github-pat` | provider pattern | a provider's rules were dropped while the rest kept working |
+
+Three rules, because they break independently and a canary covering one would
+pass straight through the others. `github-pat` is there for the credential this
+repository is most exposed to: a token that can push here, or read whatever else
+its owner can read, is the leak with the shortest path to consequences — and the
+one most likely to be pasted into a workflow file or a debugging note by
+accident.
 
 The fixture is generated, never committed. A committed credential-shaped string
 would be a permanent finding in every full-history scan whose usual fix — an
 allowlist for the path — is the exact hole the canary exists to catch, and
-GitHub push protection would refuse the push that added it anyway.
+GitHub push protection would refuse the push that added it anyway. That last
+point is literal for the PAT: push protection recognises the `ghp_` format, so
+the value is assembled from fragments and the complete string exists only in the
+temporary file. None of the three authenticates anything — the PAT carries no
+valid checksum, so it cannot be a token that was ever issued.
 
 The canary runs against gitleaks' **default** rules, not `.gitleaks.toml`. What
 is under test is the scanner, not this repository's policy; running it through
@@ -137,10 +152,28 @@ one — full test suite, full E2E, both scanners — with nothing in scope worth
 stealing. No verification is weakened for forks, and none needs a maintainer's
 approval to be meaningful.
 
-`deploy.yml` is the other side of that boundary and is manual-only
-(`workflow_dispatch`), gated on `github.ref == 'refs/heads/main'`, split into a
-credential-free `verify` job and a `deploy` job that runs almost nothing. Fork
-code has no path into it.
+`deploy.yml` is the other side of that boundary. It runs on `workflow_dispatch`
+and on a push to `main`, is gated on `github.ref == 'refs/heads/main'`, and is
+split into a credential-free `verify` job and a `deploy` job that runs almost
+nothing. Fork code has no path into it: a fork's pull request produces neither
+event, and a push to `main` is by definition already merged.
+
+The `push` trigger does not mean every merge deploys. A `gate` job runs first and
+allows the deploy only when the change is a dependency version update and nothing
+else — every changed path is `pnpm-lock.yaml` or a `package.json`, *and* every
+changed `package.json` moved nothing but dependency versions when both ends of
+the diff are compared. `scripts`, `packageManager`, `engines`, an added or
+removed dependency, or a version that turns into a `git+https:` / `npm:` /
+`file:` redirect all refuse, as does a manifest that cannot be read. That is the
+shape a Renovate minor or patch update has after it auto-merges on green CI, and
+it is the only change class that ships unattended; anything else waits for a
+deliberate `workflow_dispatch`. Majors never arrive this way — `renovate.json5`
+refuses to auto-merge them — and the poster renderer's Python pins and Dockerfile
+are excluded outright as the visual contract.
+
+The gate reads the diff, not the author: a `renovate[bot]` check would trust a
+name any commit can carry. `docs/ci.md` describes the rule, and
+`scripts/detect-changes.test.mjs` is what keeps it honest.
 
 ## GitHub-native features worth enabling
 
@@ -186,3 +219,32 @@ Renovate auto-merges minor and patch updates on green, so these checks are also
 the entire review for those pull requests. That is intentional and is why
 `Known vulnerabilities` is on the list: a lockfile change that introduces a known
 advisory should not be able to merge itself.
+
+### Nobody bypasses them, administrators included
+
+A required check an administrator can click past is a required check for
+everyone who was not going to break it anyway. Turn on **"Do not allow bypassing
+the above settings"** in classic branch protection on `main` — or, if `main` is
+governed by a ruleset instead, leave the ruleset's **bypass list empty** and its
+enforcement **Active**.
+
+This matters more here than it would in most repositories, because of what is
+downstream of a merge to `main`:
+
+- these eight checks are the *entire* review for a Renovate minor or patch
+  update, which merges itself on green; and
+- a dependency-only merge to `main` then deploys to production without anyone
+  pressing a button (`docs/ci.md`).
+
+So the checks are not advisory — they are the last gate before a live
+deployment, and an administrator merging past a red tick ships it. Requiring
+them of everyone costs nothing: it forbids no workflow this project uses.
+Renovate's auto-merge waits for the same checks and is unaffected, the deploy
+job pushes nothing to `main`, and a maintainer working alone can still merge
+their own pull requests — this setting is about checks, not about approvals.
+
+**This is not configurable from the repository.** Branch protection and rulesets
+live in repository settings; nothing in this tree can set them, and nothing in
+this tree should be trusted to describe what they currently are. The list above
+is the intended configuration, recorded here so it can be reviewed and compared
+against Settings — not evidence that it is in force.

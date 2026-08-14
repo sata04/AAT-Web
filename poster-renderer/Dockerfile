@@ -11,21 +11,23 @@
 # ---------------------------------------------------------------------------------------------
 # Base image
 # ---------------------------------------------------------------------------------------------
-# Pinned by digest, not by tag: `python:3.12-slim-bookworm` is a moving target that is
+# Pinned by digest, not by tag: `python:3.14-slim-bookworm` is a moving target that is
 # re-published whenever Debian or CPython gets a patch, and a rebuilt FreeType or zlib can change
 # rendered bytes. The tag is kept alongside the digest for human readability only — the digest is
 # what Docker resolves.
 #
-# Resolved 2026-08-12 from the Docker Hub registry API:
+# Verify a digest against the Docker Hub registry API:
 #   TOKEN=$(curl -s "https://auth.docker.io/token?service=registry.docker.io&scope=repository:library/python:pull" | jq -r .token)
 #   curl -sI -H "Authorization: Bearer $TOKEN" \
 #        -H "Accept: application/vnd.oci.image.index.v1+json" \
-#        https://registry-1.docker.io/v2/library/python/manifests/3.12-slim-bookworm \
+#        https://registry-1.docker.io/v2/library/python/manifests/3.14-slim-bookworm \
 #     | grep -i docker-content-digest
 #
-# The index it names was built 2026-08-05 from debian:bookworm-slim
-# (org.opencontainers.image.base.digest
-#  sha256:362e64223cc0da95422b3b13c045186fc0a81250e765d31c025fbddf257f6143).
+# This digest was raised by Renovate and checked that way on 2026-08-14: it is what the tag
+# resolves to, and its linux/amd64 child is CPython 3.14.7 built 2026-08-05 from
+# debian:bookworm-slim (org.opencontainers.image.base.digest
+#  sha256:362e64223cc0da95422b3b13c045186fc0a81250e765d31c025fbddf257f6143) — the same Debian layer
+# the 3.12 pin named, which is part of why the interpreter bump moved no pixels.
 #
 # Renovate keeps this digest fresh, but poster-renderer updates never auto-merge: a base-image
 # bump is a visual-contract change and needs the review in README.md.
@@ -60,7 +62,15 @@ RUN python -m pip install \
 # fonts to save a few hundred kilobytes would put the font manager one upgrade away from resolving
 # a different face; deleting `__pycache__` would make every worker respawn recompile Matplotlib,
 # which is exactly the path a render timeout takes.
-RUN rm -rf /install/lib/python3.12/site-packages/matplotlib/mpl-data/sample_data
+#
+# The interpreter version is globbed and the directory is asserted to exist, because this line used
+# to name `python3.12` outright: the 3.12 -> 3.14 base bump moved the path, `rm -rf` on a path that
+# is not there succeeds, and the prune silently stopped happening. A build step that quietly does
+# nothing is worse than one that fails, so the next base bump fails here instead.
+RUN set -eu; \
+    target=$(echo /install/lib/python3.*/site-packages/matplotlib/mpl-data/sample_data); \
+    test -d "$target"; \
+    rm -rf "$target"
 
 # ---------------------------------------------------------------------------------------------
 # Runtime stage
