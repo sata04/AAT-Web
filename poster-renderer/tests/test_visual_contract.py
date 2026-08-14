@@ -45,6 +45,18 @@ def to_hex(color) -> str:
     return matplotlib.colors.to_hex(color).upper()
 
 
+def spec_without(*keys: str) -> dict:
+    """The standard spec with `keys` deleted — absent, not present-and-null.
+
+    The schema this mirrors treats the two as different documents (`exactOptionalPropertyTypes`),
+    and only "absent" is a spec a real client can send.
+    """
+    spec = build_spec()
+    for key in keys:
+        del spec[key]
+    return spec
+
+
 @pytest.fixture
 def figure(validated_spec):
     built = build_figure(validated_spec)
@@ -106,6 +118,36 @@ def test_axes_limits_title_and_labels(figure: Figure):
     assert to_hex(axes.title.get_color()) == EXPORT_TEXT_PRIMARY
     assert to_hex(axes.xaxis.label.get_color()) == EXPORT_TEXT_PRIMARY
     assert to_hex(axes.yaxis.label.get_color()) == EXPORT_TEXT_PRIMARY
+
+
+def test_omitted_y_bounds_take_the_desktop_frame_rather_than_autoscaling():
+    """A spec with no y-range must still be framed, and framed the way the desktop frames it.
+
+    `spec.ts` allows `yMin`/`yMax` to be absent, so specs stored before the builder began resolving
+    them still reach this renderer that way. Matplotlib's autoscaling is not an acceptable reading
+    of "absent": `plot_gravity_level` has no branch that autoscales a gravity-level figure, and an
+    autoscaled poster frames every drop to its own noise — a 5 mG plateau and a 400 mG plateau come
+    out looking alike, differing only in the tick labels.
+    """
+    spec = validate_spec(spec_without("yMin", "yMax"))
+    assert (spec.y_min, spec.y_max) == (None, None)
+
+    figure = build_figure(spec)
+    try:
+        (axes,) = figure.axes
+        assert axes.get_ylim() == (preset.DEFAULT_Y_MIN, preset.DEFAULT_Y_MAX)
+        assert axes.get_ylim() == (-1.0, 1.0)
+    finally:
+        figure.clear()
+
+
+def test_one_omitted_y_bound_takes_the_preset_for_that_side_only():
+    figure = build_figure(validate_spec(spec_without("yMax")))
+    try:
+        (axes,) = figure.axes
+        assert axes.get_ylim() == (-0.02, preset.DEFAULT_Y_MAX)
+    finally:
+        figure.clear()
 
 
 def test_series_lines(figure: Figure):

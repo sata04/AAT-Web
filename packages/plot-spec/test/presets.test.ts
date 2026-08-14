@@ -70,6 +70,10 @@ describe('aat-poster-v1: frozen desktop-compatible constants', () => {
     expect(AAT_POSTER_V1_PRESET.defaults).toEqual({
       xMin: 0,
       xMax: 1.45,
+      // config.default.json's ylim_min / ylim_max. `plot_gravity_level` applies these
+      // unconditionally, so the preset carries them for the same reason it carries the x-range.
+      yMin: -1,
+      yMax: 1,
       figureWidth: 10.6,
       figureHeight: 3.4,
       dpi: 300,
@@ -111,10 +115,21 @@ describe('posterPresetContentHash', () => {
   })
 
   it('pins the current aat-poster-v1 content hash so an accidental edit is caught', async () => {
-    // If this assertion ever fails, a frozen constant in AAT_POSTER_V1_PRESET was changed. That
-    // is only acceptable as a NEW preset version (see presets.ts's module doc) — update this
-    // pinned value only when deliberately introducing e.g. 'aat-poster-v2'.
+    // If this assertion ever fails, a frozen constant in AAT_POSTER_V1_PRESET was changed. A
+    // change of *style* is only acceptable as a NEW preset version (see presets.ts's module doc)
+    // — update this pinned value only when the preset was wrong about the desktop application, or
+    // when deliberately introducing e.g. 'aat-poster-v2'.
+    //
+    // Changed once so far:
+    //   25a77e8c… -> 941e962d…  added defaults.yMin / defaults.yMax (-1 .. 1 G).
+    //     `aat-poster-v1` is *defined* as the desktop export's figure, and the desktop sets the
+    //     y-limits on every gravity-level figure it draws. Omitting them from the preset did not
+    //     make v1 a different valid style, it made v1 an inaccurate transcription: posters built
+    //     without explicit bounds were autoscaled to their own data. Minting a v2 for it would
+    //     have left the name that means "the desktop figure" permanently meaning "not quite the
+    //     desktop figure", and left the autoscaled framing selectable in the dialog's preset menu
+    //     forever. Already-rendered PNGs are stored, not re-rendered, so none of them moved.
     const hash = await posterPresetContentHash(AAT_POSTER_V1_PRESET)
-    expect(hash).toBe('25a77e8c61b5aea9594d5234f4fa95ed749fb2448fa6cacc5e6ae64d240481b7')
+    expect(hash).toBe('941e962d72bbeebda0fda659c0ab597967101de8497a1ebb2ff25106c801ec72')
   })
 })

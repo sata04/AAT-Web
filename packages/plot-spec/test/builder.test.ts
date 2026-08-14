@@ -109,11 +109,39 @@ describe('buildPosterPlotSpec: the happy path', () => {
     expect(spec.title).toBe('Drop 3')
   })
 
-  it('omits yMin/yMax entirely when they are not requested, and includes them when they are', () => {
-    expect('yMin' in buildPosterPlotSpec(request())).toBe(false)
-    const bounded = buildPosterPlotSpec(request({ yMin: -1, yMax: 1 }))
-    expect(bounded.yMin).toBe(-1)
-    expect(bounded.yMax).toBe(1)
+  it('always states a y-range, defaulting to the preset rather than to autoscaling', () => {
+    // The regression this pins: an omitted y-range used to be omitted from the document too, and
+    // Matplotlib then framed the figure to the data. The desktop application has no such mode —
+    // `plot_gravity_level` always calls `set_ylim(ylim_min, ylim_max)` — so a poster built without
+    // explicit bounds must still carry the desktop's default frame.
+    const { defaults } = AAT_POSTER_V1_PRESET
+    const plain = buildPosterPlotSpec(request())
+    expect(plain.yMin).toBe(defaults.yMin)
+    expect(plain.yMax).toBe(defaults.yMax)
+    expect(plain.yMin).toBe(-1)
+    expect(plain.yMax).toBe(1)
+
+    const bounded = buildPosterPlotSpec(request({ yMin: -0.02, yMax: 0.02 }))
+    expect(bounded.yMin).toBe(-0.02)
+    expect(bounded.yMax).toBe(0.02)
+  })
+
+  it('fills in only the y-bound that was not requested', () => {
+    const { defaults } = AAT_POSTER_V1_PRESET
+    const lowerOnly = buildPosterPlotSpec(request({ yMin: -0.5 }))
+    expect(lowerOnly.yMin).toBe(-0.5)
+    expect(lowerOnly.yMax).toBe(defaults.yMax)
+
+    const upperOnly = buildPosterPlotSpec(request({ yMax: 0.5 }))
+    expect(upperOnly.yMin).toBe(defaults.yMin)
+    expect(upperOnly.yMax).toBe(0.5)
+  })
+
+  it('refuses a resolved y-range that is not ordered, naming which half was requested', () => {
+    // Half-specified and inverted against the preset's other half: yMin 2 against the default
+    // yMax 1. The refusal has to be about the y-axis, not the x-axis the researcher did not touch.
+    const error = expectRefusal(() => buildPosterPlotSpec(request({ yMin: 2 })), 'POSTER_Y_RANGE_INVALID')
+    expect(error.details).toMatchObject({ yMin: 2, yMax: 1, requestedYMin: 2, requestedYMax: null })
   })
 
   it('does not alias the source arrays, so a later mutation cannot rewrite a built spec', () => {
@@ -395,10 +423,11 @@ describe('buildAutoPosterPlotSpec', () => {
     expect(spec.series).toBe('both')
   })
 
-  it('leaves the y-axis to autoscale, as the preset intends', () => {
+  it('frames the y-axis with the preset range, never leaving it to autoscale', () => {
+    const { defaults } = AAT_POSTER_V1_PRESET
     const spec = buildAutoPosterPlotSpec(auto)
-    expect('yMin' in spec).toBe(false)
-    expect('yMax' in spec).toBe(false)
+    expect(spec.yMin).toBe(defaults.yMin)
+    expect(spec.yMax).toBe(defaults.yMax)
   })
 
   it('is deterministic: equal inputs hash identically', async () => {

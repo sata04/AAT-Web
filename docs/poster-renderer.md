@@ -73,7 +73,7 @@ expressible there, it does not reach the renderer at all.
 | `posterKind` | enum | `auto` \| `custom` |
 | `posterPresetVersion` | enum | `aat-poster-v1` |
 | `xMin`, `xMax` | finite number | `xMin < xMax` |
-| `yMin`, `yMax` | finite number, optional | `yMin < yMax` when both present |
+| `yMin`, `yMax` | finite number, optional on the wire | `yMin < yMax` when both present; an absent bound is drawn at the preset's, never autoscaled |
 | `series` | enum | `inner` \| `drag` \| `both` |
 | `title` | string | ≤ 120 characters, no control characters |
 | `showLegend` | boolean | |
@@ -233,9 +233,22 @@ a revision may carry one automatic poster and as many custom ones as its owner r
 to the same rate limit, the same concurrency cap and the same circuit breaker as everything else.
 
 The natural custom poster is the user's selected range: `xMin`/`xMax` set from the selection
-rather than from the preset's `0 .. 1.45 s` default, optionally with explicit `yMin`/`yMax`. An
-absent y bound leaves Matplotlib's autoscaling in charge of that side, which is why the frozen
-preset has defaults for the figure geometry and the x-range but none for y.
+rather than from the preset's `0 .. 1.45 s` default, optionally with a `yMin`/`yMax` of the
+researcher's own — the dialog prefills those two fields from the local `ylim_min`/`ylim_max`, so
+the figure starts out framed the way the graph on screen is framed, as it is on the desktop.
+
+**The y-range is never absent from the figure.** It is optional on the *wire* — `spec.ts` has
+always allowed it to be omitted, and specs stored before the builder began resolving it still
+are — but both the builder and the renderer fall back to the preset's `-1 .. 1 G`
+(`config.default.json`'s `ylim_min`/`ylim_max`), never to Matplotlib's autoscaling.
+`plot_gravity_level` calls `set_ylim(config["ylim_min"], config["ylim_max"])` unconditionally on
+both the screen axes and the export axes; the desktop has no autoscaling branch for a
+gravity-level figure, so neither does this. An autoscaled poster is the failure mode worth
+naming: it renders beautifully, and it frames a clean 5 mG drop and a spoiled 400 mG drop into
+identical-looking plateaus that differ only in their tick labels — defeating the comparison a
+reader of a poster is most likely to make by eye. This was a real defect, fixed in
+`aat-poster-v1` rather than deferred to a `v2`; the reasoning is in `packages/plot-spec/test/presets.test.ts`
+next to the pinned preset hash.
 
 `title` is the one place the container interprets rather than transcribes. The desktop draws its
 CSV basename — which for this project *is* the run code — into the title and both legend labels,

@@ -320,6 +320,7 @@ export function RunReplayPanel(props: RunReplayPanelProps): React.JSX.Element {
         <PosterDialog
           context={{ revisionId: analysisRevisionId, runCode, dataset }}
           selection={selection}
+          yRange={{ min: config.ylim_min, max: config.ylim_max }}
           onClose={() => setPosterOpen(false)}
           onCreated={(poster) => props.onPosterRendered(poster)}
         />

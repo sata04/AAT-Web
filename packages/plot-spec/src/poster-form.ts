@@ -258,6 +258,15 @@ export interface PosterFormDefaults {
   readonly figureWidth: number
   readonly figureHeight: number
   readonly dpi: number
+  /**
+   * The gravity-level frame the form starts on, in G — the preset's, i.e. the desktop's default
+   * `ylim_min` / `ylim_max`.
+   *
+   * Present so a form has something to *show* in its two y-fields. A blank y-field would be read
+   * as "automatic", which is a mode neither the desktop application nor this renderer has.
+   */
+  readonly yMin: number
+  readonly yMax: number
 }
 
 /**
@@ -282,5 +291,7 @@ export function posterFormDefaults(
     figureWidth: defaults.figureWidth,
     figureHeight: defaults.figureHeight,
     dpi: defaults.dpi,
+    yMin: defaults.yMin,
+    yMax: defaults.yMax,
   }
 }
