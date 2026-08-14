@@ -40,6 +40,6 @@ try:
 except OSError:  # pragma: no cover - read-only filesystem; Matplotlib falls back on its own
     pass
 
-from .version import APP_VERSION, RENDERER_VERSION  # noqa: E402  (must follow the env pinning)
+from .version import DESKTOP_BASELINE_VERSION, RENDERER_VERSION  # noqa: E402  (must follow the env pinning)
 
-__all__ = ["APP_VERSION", "RENDERER_VERSION"]
+__all__ = ["DESKTOP_BASELINE_VERSION", "RENDERER_VERSION"]

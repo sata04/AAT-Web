@@ -760,6 +760,7 @@ export function AnalyzerScreen(): React.JSX.Element {
               status={posterContext === null ? { kind: 'unavailable' } : statuses.poster}
               selection={selectionEnabled ? selection : null}
               selectionEnabled={selectionEnabled}
+              yRange={{ min: config.ylim_min, max: config.ylim_max }}
               onRetryAuto={retryPoster}
               customPosters={activeCustomPosters}
               onCustomCreated={(poster) => {

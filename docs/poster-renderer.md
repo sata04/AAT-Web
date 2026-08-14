@@ -73,7 +73,7 @@ expressible there, it does not reach the renderer at all.
 | `posterKind` | enum | `auto` \| `custom` |
 | `posterPresetVersion` | enum | `aat-poster-v1` |
 | `xMin`, `xMax` | finite number | `xMin < xMax` |
-| `yMin`, `yMax` | finite number, optional | `yMin < yMax` when both present |
+| `yMin`, `yMax` | finite number, optional on the wire | `yMin < yMax` when both present; an absent bound is drawn at the preset's, never autoscaled |
 | `series` | enum | `inner` \| `drag` \| `both` |
 | `title` | string | ≤ 120 characters, no control characters |
 | `showLegend` | boolean | |
@@ -156,7 +156,7 @@ moved. `render.PNG_METADATA` writes one constant `Software` value, and no `Creat
 | Pillow 11.3.0 | `requirements.txt`, by hash | Since Matplotlib 3.3, the PNG encoder itself |
 | FreeType | *inside the Matplotlib wheel* | Glyph rasterisation and hinting |
 | DejaVu Sans | *inside the Matplotlib wheel* | The glyphs |
-| `APP_VERSION = "11.1.0"` | `version.py` | Drawn into the watermark |
+| `DESKTOP_BASELINE_VERSION = "11.1.0"` | `version.py` | Drawn into the watermark |
 
 matplotlib 3.11.1 and numpy 2.5.1 are what the desktop application's `uv.lock` resolves for
 Python ≥ 3.12. That equality is the entire point.
@@ -233,9 +233,22 @@ a revision may carry one automatic poster and as many custom ones as its owner r
 to the same rate limit, the same concurrency cap and the same circuit breaker as everything else.
 
 The natural custom poster is the user's selected range: `xMin`/`xMax` set from the selection
-rather than from the preset's `0 .. 1.45 s` default, optionally with explicit `yMin`/`yMax`. An
-absent y bound leaves Matplotlib's autoscaling in charge of that side, which is why the frozen
-preset has defaults for the figure geometry and the x-range but none for y.
+rather than from the preset's `0 .. 1.45 s` default, optionally with a `yMin`/`yMax` of the
+researcher's own — the dialog prefills those two fields from the local `ylim_min`/`ylim_max`, so
+the figure starts out framed the way the graph on screen is framed, as it is on the desktop.
+
+**The y-range is never absent from the figure.** It is optional on the *wire* — `spec.ts` has
+always allowed it to be omitted, and specs stored before the builder began resolving it still
+are — but both the builder and the renderer fall back to the preset's `-1 .. 1 G`
+(`config.default.json`'s `ylim_min`/`ylim_max`), never to Matplotlib's autoscaling.
+`plot_gravity_level` calls `set_ylim(config["ylim_min"], config["ylim_max"])` unconditionally on
+both the screen axes and the export axes; the desktop has no autoscaling branch for a
+gravity-level figure, so neither does this. An autoscaled poster is the failure mode worth
+naming: it renders beautifully, and it frames a clean 5 mG drop and a spoiled 400 mG drop into
+identical-looking plateaus that differ only in their tick labels — defeating the comparison a
+reader of a poster is most likely to make by eye. This was a real defect, fixed in
+`aat-poster-v1` rather than deferred to a `v2`; the reasoning is in `packages/plot-spec/test/presets.test.ts`
+next to the pinned preset hash.
 
 `title` is the one place the container interprets rather than transcribes. The desktop draws its
 CSV basename — which for this project *is* the run code — into the title and both legend labels,
@@ -267,11 +280,18 @@ sent; `poster_figures.renderer_version` records the container build that answere
 preset_version)` with its `spec_hash` and `renderer_version`, so a figure can always be explained
 by the preset that produced it even after the preset registry has moved on.
 
-Note that `RENDERER_VERSION` and `APP_VERSION` are deliberately different strings.
-`APP_VERSION` (`11.1.0`) is *drawn into the watermark*, so bumping it changes every pixel of that
-text and is a visual-contract change. `RENDERER_VERSION`
-(`aat-poster-renderer/1.0.0`) is build identity only: it appears in `GET /health`, in the response
-header and in the PNG's `Software` text chunk, and changing it moves no pixel.
+Note that `RENDERER_VERSION` and `DESKTOP_BASELINE_VERSION` are deliberately different strings,
+and that neither of them is AAT Web's own version (`1.0.0`). They answer three separate questions:
+
+| Constant | Value | Answers |
+| --- | --- | --- |
+| `DESKTOP_BASELINE_VERSION` | `11.1.0` | Which AAT release's figure is this? — *drawn into the watermark*, so bumping it is a visual-contract change |
+| `RENDERER_VERSION` | `aat-poster-renderer/1.1.0` | Which program drew it? — `GET /health`, the response header and the PNG's `Software` chunk; moves no pixel |
+| `APP_VERSION` (`apps/web`) | `1.0.0` | Which AAT Web build asked for it? — never reaches the container; recorded against the analysis revision |
+
+A figure therefore says `AAT v11.1.0` while the application that produced it is AAT Web 1.0.0.
+That is the designed state, not a drift: see `docs/versioning.md`, "Why the figure's version is
+not AAT Web's version".
 
 ## The container is short-lived on purpose
 
@@ -426,8 +446,10 @@ guarantee this container exists to provide, so there is no update size small eno
    version — in `presets.ts` and `preset.py` together — and register it. Stored posters must keep
    rendering the way they always have.
 
-A change to `version.py`'s `APP_VERSION` follows the same procedure, because it is drawn into the
-watermark. A change to `RENDERER_VERSION` does not, because it is not.
+A change to `version.py`'s `DESKTOP_BASELINE_VERSION` follows the same procedure, because it is
+drawn into the watermark. A change to `RENDERER_VERSION` does not move a pixel, but it does change
+the PNG's `Software` text chunk, so the reference still has to be regenerated — confirm the images
+are identical first.
 
 ## Outstanding
 

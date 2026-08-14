@@ -260,6 +260,35 @@ def test_absent_y_bounds_are_allowed():
     assert validated.y_min is None and validated.y_max is None
 
 
+def test_half_specified_y_range_that_inverts_against_the_preset_is_rejected():
+    """The pair that reaches `set_ylim` is what must be ordered, not the pair that was sent.
+
+    An omitted bound is drawn at the preset's `-1 .. 1` G rather than autoscaled, so a spec
+    carrying only `yMin: 1.5` resolves to `(1.5, 1.0)`. Matplotlib accepts an inverted `set_ylim`
+    without a word and draws the gravity axis upside down — a figure that is wrong in the one
+    direction a reader would never think to check. The Worker validates first, but this container
+    does not trust its caller, and a spec stored before the resolution existed can still arrive
+    this way.
+    """
+    lower_only = build_spec(yMin=1.5)
+    del lower_only["yMax"]
+    expect_rejected(lower_only, field="yMin")
+
+    upper_only = build_spec(yMax=-1.5)
+    del upper_only["yMin"]
+    expect_rejected(upper_only, field="yMax")
+
+
+def test_half_specified_y_range_that_stays_ordered_is_allowed():
+    lower_only = build_spec(yMin=-0.5)
+    del lower_only["yMax"]
+    assert validate_spec(lower_only).y_max is None
+
+    upper_only = build_spec(yMax=0.5)
+    del upper_only["yMin"]
+    assert validate_spec(upper_only).y_min is None
+
+
 # ---------------------------------------------------------------------------------------------
 # series <-> data agreement
 # ---------------------------------------------------------------------------------------------

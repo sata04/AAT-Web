@@ -120,7 +120,13 @@ The review procedure:
    same commit, so the pixel change and its cause are inseparable in the history.
 5. If the *contract itself* is meant to change — a new colour, a new layout — that is not an
    edit to `aat-poster-v1`. It is a new preset version, so posters already stored keep rendering
-   the way they always have.
+   the way they always have. The exception is a preset that was **wrong about the desktop**: that
+   is a defect in `v1`, not an alternative style, and it is fixed in place.
+   `docs/versioning.md` sets out the distinction and the one case where it has been applied.
+
+Note that bumping `RENDERER_VERSION` alone also fails `test_reference_is_byte_identical`, because
+the version is written into the PNG's `Software` text chunk. That is a metadata change, not a
+pixel change: confirm the images are identical, then regenerate the reference in the same commit.
 
 Regenerating a reference image to make a test pass, without looking at it, defeats every other
 safeguard in this directory.
@@ -154,7 +160,8 @@ accepts the literals `NaN`/`Infinity` (rejected here), and Python's `\d` matches
 
 ### `GET /health`
 
-Readiness plus build identity: renderer version, app version (the watermark's), preset version,
+Readiness plus build identity: renderer version, desktop baseline version (the watermark's),
+preset version,
 and whether the render worker is warm. Used by the Docker `HEALTHCHECK`.
 
 ### Concurrency and backpressure

@@ -63,6 +63,15 @@ export interface PosterDialogProps {
   context: PosterContext
   /** The range selected on the graph, used to prefill the bounds. Null when nothing is selected. */
   selection: SelectionRange | null
+  /**
+   * The y-range the on-screen graph is drawn with — the analysis config's `ylim_min` / `ylim_max`.
+   *
+   * Prefilled rather than left blank so the poster starts out framed the way the graph the
+   * researcher is looking at is framed, which is what the desktop application does: it draws the
+   * screen axes and the export axes from the same two config values. Omitted, the frozen preset's
+   * own `-1 .. 1` G is offered instead.
+   */
+  yRange?: { min: number; max: number }
   onClose: () => void
   /** Called for every figure that reaches `ready`, so the panel can keep the history. */
   onCreated: (poster: PosterFigure) => void
@@ -105,8 +114,8 @@ export function PosterDialog(props: PosterDialogProps): React.JSX.Element {
   const [bounds, setBounds] = useState<Bounds>(() => ({
     xMin: selection === null ? '' : String(selection.xMin),
     xMax: selection === null ? '' : String(selection.xMax),
-    yMin: '',
-    yMax: '',
+    yMin: String(props.yRange?.min ?? defaults.yMin),
+    yMax: String(props.yRange?.max ?? defaults.yMax),
   }))
 
   const [submitting, setSubmitting] = useState(false)
@@ -148,8 +157,8 @@ export function PosterDialog(props: PosterDialogProps): React.JSX.Element {
       figureHeight: size?.heightInches ?? defaults.figureHeight,
       dpi,
       // Assigned conditionally: the builder's request type is exact, so "absent" and "present and
-      // undefined" are different requests — and an absent y bound is what leaves Matplotlib's
-      // autoscaling in charge, which is the preset's deliberate position.
+      // undefined" are different requests. An absent bound takes the frozen preset's `-1 .. 1` G —
+      // never Matplotlib's autoscaling, which is a framing the desktop application cannot produce.
       ...(yMin === null ? {} : { yMin }),
       ...(yMax === null ? {} : { yMax }),
     }
@@ -253,8 +262,12 @@ export function PosterDialog(props: PosterDialogProps): React.JSX.Element {
       </section>
 
       <section className="dialog__section">
-        <h3 className="panel__title">Y軸の範囲（任意）</h3>
-        <p className="panel__hint">空欄のままにすると、デスクトップ版と同じく自動で目盛りが決まります。</p>
+        <h3 className="panel__title">Y軸の範囲 (G)</h3>
+        <p className="panel__hint">
+          初期値は画面のグラフと同じ範囲です。空欄にすると既定値（
+          {defaults.yMin} 〜 {defaults.yMax} G）が使われます。デスクトップ版と同じく、
+          データに合わせて自動で決まることはありません。
+        </p>
         <div className="dialog__grid">
           <label className="field">
             <span className="field__label">下限 (G)</span>

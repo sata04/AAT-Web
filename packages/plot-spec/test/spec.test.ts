@@ -168,6 +168,23 @@ describe('PosterPlotSpecSchema: rejection rules', () => {
     expect(safeParsePosterPlotSpec(input).success).toBe(false)
   })
 
+  it('rejects a half-specified y range that inverts against the preset bound', () => {
+    // The hole a both-present-only rule leaves: an omitted bound is *drawn* at the preset's
+    // (-1 .. 1 G), so `yMin: 1.5` alone reaches `set_ylim(1.5, 1.0)` — which Matplotlib accepts in
+    // silence and draws upside down. A schema that only compares two supplied numbers never sees
+    // the pair that is actually rendered.
+    const inverted = safeParsePosterPlotSpec(validSpecInput({ yMin: 1.5 }))
+    expect(inverted.success).toBe(false)
+    if (!inverted.success) {
+      expect(inverted.error.issues[0]?.message).toMatch(/preset/)
+    }
+    expect(safeParsePosterPlotSpec(validSpecInput({ yMax: -1.5 })).success).toBe(false)
+
+    // A half-specified range that stays ordered is legitimate and must still pass.
+    expect(safeParsePosterPlotSpec(validSpecInput({ yMin: -0.5 })).success).toBe(true)
+    expect(safeParsePosterPlotSpec(validSpecInput({ yMax: 0.5 })).success).toBe(true)
+  })
+
   it('rejects an oversized title', () => {
     const input = validSpecInput({ title: 'x'.repeat(121) })
     expect(safeParsePosterPlotSpec(input).success).toBe(false)

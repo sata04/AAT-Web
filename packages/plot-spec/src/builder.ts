@@ -73,7 +73,15 @@ export interface PosterPlotSpecBuildRequest {
   /** Seconds. The x-axis limits of the figure, and the window the samples are taken from. */
   readonly xMin: number
   readonly xMax: number
-  /** Gravity level (G). Omit both to let Matplotlib autoscale the y-axis, as the preset intends. */
+  /**
+   * Gravity level (G). Each falls back to the frozen preset's `yMin` / `yMax` — the desktop's
+   * `ylim_min` / `ylim_max`, `-1 .. 1` G — when omitted.
+   *
+   * Omitting these does *not* mean "autoscale". The desktop application has no autoscaling branch
+   * for a gravity-level figure: `plot_gravity_level` sets the y-limits unconditionally, so a
+   * poster with no y-range would be a figure the desktop cannot produce. One may be overridden
+   * without the other; the resolved pair still has to satisfy `yMin < yMax`.
+   */
   readonly yMin?: number
   readonly yMax?: number
   /**
@@ -252,6 +260,28 @@ function buildSpec(
     })
   }
   const preset = getPosterPreset(request.posterPresetVersion)
+
+  // Resolved, never dropped. An omitted bound takes the preset's — the desktop's `ylim_min` /
+  // `ylim_max` — so the document that leaves here always states the frame it was drawn in, and the
+  // stored spec is a complete description of the figure rather than one that has to be read
+  // together with whichever renderer build happened to serve it.
+  const yMin = request.yMin ?? preset.defaults.yMin
+  const yMax = request.yMax ?? preset.defaults.yMax
+  if (!Number.isFinite(yMin) || !Number.isFinite(yMax) || yMin >= yMax) {
+    throw new PosterSpecError('POSTER_Y_RANGE_INVALID', {
+      details: {
+        yMin,
+        yMax,
+        // Which half the caller chose, so a UI can say "下限だけ指定されています" rather than
+        // reporting a preset default back as though the researcher had typed it.
+        requestedYMin: request.yMin ?? null,
+        requestedYMax: request.yMax ?? null,
+        presetYMin: preset.defaults.yMin,
+        presetYMax: preset.defaults.yMax,
+      },
+    })
+  }
+
   const sensors = sensorsFor(request.series)
 
   const windows = new Map<SensorKey, SelectedWindow>()
@@ -299,6 +329,8 @@ function buildSpec(
     posterPresetVersion: request.posterPresetVersion,
     xMin,
     xMax,
+    yMin,
+    yMax,
     series: request.series,
     title: request.title ?? '',
     showLegend: request.showLegend ?? true,
@@ -307,10 +339,6 @@ function buildSpec(
     dpi: request.dpi ?? preset.defaults.dpi,
     data,
   }
-  // Assigned conditionally rather than as `undefined`: the schema is `.strict()` with
-  // `exactOptionalPropertyTypes`, so "absent" and "present and undefined" are different documents.
-  if (request.yMin !== undefined) candidate.yMin = request.yMin
-  if (request.yMax !== undefined) candidate.yMax = request.yMax
 
   // The builder validates its own output rather than trusting it. Nothing invalid can leave here,
   // and if the assembly above ever drifts from the schema, the failure surfaces as a typed error
@@ -364,11 +392,17 @@ export function buildPosterPlotSpec(request: PosterPlotSpecBuildRequest): Poster
  * therefore gets a single-sensor poster instead of a refusal, and neither sensor having anything
  * in the window is a `POSTER_RANGE_EMPTY` refusal rather than an empty figure.
  *
- * The y-axis is left unbounded, which is the preset's deliberate position: `presets.ts` defines
- * defaults for the figure geometry and the x-range but none for y, and the renderer documents
- * that an absent bound leaves Matplotlib's autoscaling in charge. A y-limit is a *local display
- * setting* in this application, so baking one in would make the automatic poster depend on whose
- * browser asked for it first.
+ * The y-axis comes from the preset (`-1 .. 1` G, the desktop's `ylim_min` / `ylim_max` defaults)
+ * and deliberately *not* from the local `ylim_min` / `ylim_max` setting, even though the on-screen
+ * graph uses that setting. The two are not in conflict: the automatic poster's identity is
+ * `(analysisRevisionId, posterPresetVersion)`, so it has to be derivable from the revision alone,
+ * and reading a per-browser display setting into it would make "the" automatic poster depend on
+ * whose tab asked for it first. A researcher who wants their own frame asks for a custom poster,
+ * where the y-range is theirs to state and is recorded in the stored spec.
+ *
+ * What it must never be is *absent*: an omitted y-range used to leave Matplotlib autoscaling to
+ * the data, which produced a figure the desktop application cannot produce — every drop framed to
+ * its own noise instead of to a common scale.
  */
 export function buildAutoPosterPlotSpec(request: AutoPosterPlotSpecBuildRequest): PosterPlotSpec {
   const posterPresetVersion = request.posterPresetVersion ?? DEFAULT_POSTER_PRESET_VERSION
@@ -399,6 +433,8 @@ export function buildAutoPosterPlotSpec(request: AutoPosterPlotSpecBuildRequest)
     posterPresetVersion,
     // Spelled out rather than left to `buildSpec`'s fallbacks, because the automatic poster's
     // determinism is the point: it is the frozen preset's figure, stated as such at the call site.
+    yMin: preset.defaults.yMin,
+    yMax: preset.defaults.yMax,
     title: '',
     showLegend: true,
     figureWidth: preset.defaults.figureWidth,

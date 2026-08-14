@@ -33,6 +33,15 @@ export const POSTER_SPEC_ERROR_CODES = [
   'POSTER_SERIES_MISSING',
   /** `xMin`/`xMax` are not two finite numbers with `xMin < xMax`. */
   'POSTER_RANGE_INVALID',
+  /**
+   * The *resolved* `yMin`/`yMax` are not two finite numbers with `yMin < yMax`.
+   *
+   * Separate from `POSTER_RANGE_INVALID` because either bound may be left to the frozen preset, so
+   * the pair that fails can be one the caller supplied and one it did not — "下限 (G) を 2 にした
+   * が上限は既定の 1 のまま" is a sentence about the y-axis, and answering it with the x-axis's
+   * message would send the researcher to the wrong two fields.
+   */
+  'POSTER_Y_RANGE_INVALID',
   /** The requested x-range contains no samples at all for a requested sensor. */
   'POSTER_RANGE_EMPTY',
   /** Every requested sensor has samples in range, but every one of those samples is a NaN gap. */
@@ -101,6 +110,13 @@ const POSTER_SPEC_ERROR_SPECS: Record<PosterSpecErrorCode, PosterSpecErrorSpec> 
     message: {
       ja: '表示範囲の指定が正しくありません。開始時刻は終了時刻より小さい有限の値にしてください。',
       en: 'The requested range is invalid: xMin and xMax must be finite with xMin < xMax.',
+    },
+  },
+  POSTER_Y_RANGE_INVALID: {
+    apiErrorCode: 'INVALID_ANALYSIS_CONFIG',
+    message: {
+      ja: 'Y軸の範囲の指定が正しくありません。下限は上限より小さい有限の値にしてください。',
+      en: 'The requested y-range is invalid: yMin and yMax must be finite with yMin < yMax.',
     },
   },
   POSTER_RANGE_EMPTY: {

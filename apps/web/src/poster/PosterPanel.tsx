@@ -34,6 +34,13 @@ export interface PosterPanelProps {
   status: PosterStatus
   selection: SelectionRange | null
   selectionEnabled: boolean
+  /**
+   * The analysis config's `ylim_min` / `ylim_max`, so the custom-poster dialog opens on the same
+   * gravity-level frame the graph above it is drawn in. Only the *custom* dialog reads it — the
+   * automatic poster is derived from the revision alone and takes the frozen preset's range, or it
+   * would stop being derivable from the revision alone.
+   */
+  yRange: { min: number; max: number }
   onRetryAuto: () => void
   /** Custom figures created in this session, newest first. History lives on the server too. */
   customPosters: readonly PosterFigure[]
@@ -134,6 +141,7 @@ export function PosterPanel(props: PosterPanelProps): React.JSX.Element {
         <PosterDialog
           context={context}
           selection={props.selection}
+          yRange={props.yRange}
           onClose={() => setDialogOpen(false)}
           onCreated={props.onCustomCreated}
         />

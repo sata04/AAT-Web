@@ -20,7 +20,7 @@ from matplotlib.figure import Figure
 
 from . import preset
 from .validation import PosterPlotSpec, SeriesArrays
-from .version import APP_VERSION, RENDERER_VERSION
+from .version import DESKTOP_BASELINE_VERSION, RENDERER_VERSION
 
 # Applied once, process-wide, at import. The client cannot reach rcParams — the spec has no field
 # that maps to one — so this is the only place Matplotlib's global configuration is ever touched.
@@ -62,7 +62,7 @@ def _add_version_watermark(axes) -> None:
     axes.text(
         preset.WATERMARK_X,
         preset.WATERMARK_Y,
-        preset.WATERMARK_TEMPLATE.format(version=APP_VERSION),
+        preset.WATERMARK_TEMPLATE.format(version=DESKTOP_BASELINE_VERSION),
         transform=axes.transAxes,
         fontsize=preset.WATERMARK_FONT_SIZE,
         verticalalignment=preset.WATERMARK_VERTICAL_ALIGNMENT,
@@ -98,11 +98,17 @@ def build_figure(spec: PosterPlotSpec) -> Figure:
     if spec.drag is not None:
         _plot_series(axes, spec.drag, preset.DRAG_LEGEND_TEMPLATE.format(name=name), preset.DRAG_LINE_COLOR)
 
-    # The desktop always has a configured y-range (`ylim_min`/`ylim_max`), and the spec's bounds
-    # are optional; an absent bound leaves Matplotlib's autoscaling in charge of that side, which
-    # is why the frozen preset has defaults for the figure geometry and the x-range but none for y.
-    if spec.y_min is not None or spec.y_max is not None:
-        axes.set_ylim(spec.y_min, spec.y_max)
+    # Both axes are always bounded, exactly as the desktop's export branch bounds them. The spec's
+    # y-bounds are *optional on the wire* — `spec.ts` has always allowed them to be absent, and
+    # specs stored before the builder started resolving them still are — so an absent bound falls
+    # back to the preset's `ylim_min`/`ylim_max` rather than to Matplotlib's autoscaling. There is
+    # no branch in `plot_gravity_level` that autoscales a gravity-level figure, so there must be
+    # none here: an autoscaled poster frames every drop to its own noise, which makes two figures
+    # side by side uncomparable while looking perfectly correct on its own.
+    axes.set_ylim(
+        preset.DEFAULT_Y_MIN if spec.y_min is None else spec.y_min,
+        preset.DEFAULT_Y_MAX if spec.y_max is None else spec.y_max,
+    )
     axes.set_xlim(spec.x_min, spec.x_max)
 
     axes.set_title(preset.TITLE_TEMPLATE.format(name=name))

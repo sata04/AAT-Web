@@ -67,12 +67,20 @@ WATERMARK_COLOR: Final = TEXT_SECONDARY_COLOR
 
 # --- Geometry / output -------------------------------------------------------------------------
 # config/config.default.json: export_figure_width / export_figure_height / export_dpi /
-# export_bbox_inches, and default_graph_duration for the x-range.
+# export_bbox_inches, default_graph_duration for the x-range, and ylim_min / ylim_max for the
+# y-range.
 DEFAULT_FIGURE_WIDTH_INCHES: Final = 10.6
 DEFAULT_FIGURE_HEIGHT_INCHES: Final = 3.4
 DEFAULT_DPI: Final = 300
 DEFAULT_X_MIN: Final = 0.0
 DEFAULT_X_MAX: Final = 1.45
+
+# The gravity-level frame, in G. `plot_gravity_level` calls
+# `set_ylim(config["ylim_min"], config["ylim_max"])` unconditionally — there is no path through the
+# desktop application where the y-axis of a gravity-level figure autoscales, so a spec that omits
+# its bounds gets these rather than Matplotlib's view of the data. See `render.build_figure`.
+DEFAULT_Y_MIN: Final = -1.0
+DEFAULT_Y_MAX: Final = 1.0
 BBOX_INCHES: Final = None  # export_bbox_inches is null; "tight" would change the image geometry
 TIGHT_LAYOUT: Final = True
 

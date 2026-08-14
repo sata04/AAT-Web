@@ -25,7 +25,7 @@ from poster_renderer.errors import BusyError
 from poster_renderer.render import render_png
 from poster_renderer.service import PosterRenderServer, create_server
 from poster_renderer.validation import validate_spec
-from poster_renderer.version import APP_VERSION, RENDERER_VERSION
+from poster_renderer.version import DESKTOP_BASELINE_VERSION, RENDERER_VERSION
 from poster_renderer.worker import RenderExecutor
 
 from conftest import build_spec
@@ -158,7 +158,11 @@ def test_health_reports_versions(live_server: ServerHandle):
     payload = json.loads(body)
     assert payload["status"] == "ok"
     assert payload["rendererVersion"] == RENDERER_VERSION
-    assert payload["appVersion"] == APP_VERSION
+    assert payload["desktopBaselineVersion"] == DESKTOP_BASELINE_VERSION
+    # The renderer's own build identity is a separate field, and the two are separate questions:
+    # "which AAT release do these figures conform to?" and "which program drew them?".
+    assert payload["rendererVersion"] != payload["desktopBaselineVersion"]
+    assert "appVersion" not in payload
     assert payload["presetVersion"] == preset.PRESET_VERSION
     assert payload["workerReady"] is True
 

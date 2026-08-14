@@ -157,6 +157,17 @@ test('the Python reference runs the golden job and nothing else', () => {
   expectJobs(['reference/python/requirements.txt'], ['numerical'])
 })
 
+test('the vendored desktop version reaches every job that restates it', () => {
+  // REFERENCE_VERSION.txt is the exception to the rule above, and the exception is the point: the
+  // number in it is copied into the web app's about line and into the poster watermark, and the
+  // checker that catches a half-finished bump (`scripts/check-versions.mjs`) runs inside the web
+  // job. Routed as plain `reference/python/**` it would run `numerical` only, and the one failure
+  // it exists to catch would go green.
+  expectJobs(['reference/python/REFERENCE_VERSION.txt'], ['web', 'numerical', 'poster', 'e2e'])
+  // The neighbouring commit pin is not restated anywhere, so it keeps the narrower routing.
+  expectJobs(['reference/python/REFERENCE_COMMIT.txt'], ['numerical'])
+})
+
 test('a golden fixture is compared from both sides', () => {
   expectJobs(['tests/golden/index.json'], ['web', 'numerical'])
   expectJobs(['tests/golden/arrays/abc.f64'], ['web', 'numerical'])

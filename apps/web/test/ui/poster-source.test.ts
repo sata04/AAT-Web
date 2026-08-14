@@ -213,8 +213,11 @@ describe('the automatic poster', () => {
     expect(spec.xMax).toBe(1.45)
     expect(spec.series).toBe('both')
     expect(spec.title).toBe('')
-    expect(spec.yMin).toBeUndefined()
-    expect(spec.yMax).toBeUndefined()
+    // The preset's gravity-level frame, not the local ylim setting and not autoscaling: the
+    // automatic poster has to be derivable from the revision alone, and it has to be a figure the
+    // desktop application could have produced.
+    expect(spec.yMin).toBe(-1)
+    expect(spec.yMax).toBe(1)
   })
 
   it('produces an identical document every time it is derived', () => {

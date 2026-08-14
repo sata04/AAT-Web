@@ -25,7 +25,7 @@ from PIL import Image
 from poster_renderer import preset
 from poster_renderer.render import build_figure, render_png
 from poster_renderer.validation import validate_spec
-from poster_renderer.version import APP_VERSION
+from poster_renderer.version import DESKTOP_BASELINE_VERSION
 
 from conftest import build_spec
 
@@ -43,6 +43,18 @@ LIGHT_GRAPH_DRAG_MEAN = "#CF222E"
 
 def to_hex(color) -> str:
     return matplotlib.colors.to_hex(color).upper()
+
+
+def spec_without(*keys: str) -> dict:
+    """The standard spec with `keys` deleted — absent, not present-and-null.
+
+    The schema this mirrors treats the two as different documents (`exactOptionalPropertyTypes`),
+    and only "absent" is a spec a real client can send.
+    """
+    spec = build_spec()
+    for key in keys:
+        del spec[key]
+    return spec
 
 
 @pytest.fixture
@@ -108,6 +120,36 @@ def test_axes_limits_title_and_labels(figure: Figure):
     assert to_hex(axes.yaxis.label.get_color()) == EXPORT_TEXT_PRIMARY
 
 
+def test_omitted_y_bounds_take_the_desktop_frame_rather_than_autoscaling():
+    """A spec with no y-range must still be framed, and framed the way the desktop frames it.
+
+    `spec.ts` allows `yMin`/`yMax` to be absent, so specs stored before the builder began resolving
+    them still reach this renderer that way. Matplotlib's autoscaling is not an acceptable reading
+    of "absent": `plot_gravity_level` has no branch that autoscales a gravity-level figure, and an
+    autoscaled poster frames every drop to its own noise — a 5 mG plateau and a 400 mG plateau come
+    out looking alike, differing only in the tick labels.
+    """
+    spec = validate_spec(spec_without("yMin", "yMax"))
+    assert (spec.y_min, spec.y_max) == (None, None)
+
+    figure = build_figure(spec)
+    try:
+        (axes,) = figure.axes
+        assert axes.get_ylim() == (preset.DEFAULT_Y_MIN, preset.DEFAULT_Y_MAX)
+        assert axes.get_ylim() == (-1.0, 1.0)
+    finally:
+        figure.clear()
+
+
+def test_one_omitted_y_bound_takes_the_preset_for_that_side_only():
+    figure = build_figure(validate_spec(spec_without("yMax")))
+    try:
+        (axes,) = figure.axes
+        assert axes.get_ylim() == (-0.02, preset.DEFAULT_Y_MAX)
+    finally:
+        figure.clear()
+
+
 def test_series_lines(figure: Figure):
     (axes,) = figure.axes
     lines = axes.get_lines()
@@ -171,7 +213,7 @@ def test_version_watermark(figure: Figure):
     watermarks = [text for text in axes.texts if text.get_text().startswith("AAT v")]
     assert len(watermarks) == 1, "the version watermark is missing"
     watermark = watermarks[0]
-    assert watermark.get_text() == f"AAT v{APP_VERSION}"
+    assert watermark.get_text() == f"AAT v{DESKTOP_BASELINE_VERSION}"
     assert watermark.get_position() == (0.98, 0.02)
     assert watermark.get_transform() is axes.transAxes
     assert watermark.get_horizontalalignment() == "right"

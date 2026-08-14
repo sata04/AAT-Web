@@ -13,7 +13,7 @@
  *   - /home/user/AAT/gui/plot_controller.py (line colours, widths, grid, watermark, layout, savefig kwargs)
  *   - /home/user/AAT/gui/styles.py (the `LIGHT_GRAPH_*` frozen colour constants)
  *   - /home/user/AAT/tests/gui/test_export_graph_invariance.py (the pinned regression values)
- *   - /home/user/AAT/config/config.default.json (default figure geometry / dpi / x-range)
+ *   - /home/user/AAT/config/config.default.json (default figure geometry / dpi / x-range / y-range)
  *
  * Changing any value here changes the pixels of every future poster — treat this file with the
  * same "frozen contract" weight `styles.py` gives `LIGHT_GRAPH_*`. If a change is ever needed, it
@@ -68,6 +68,22 @@ export interface PosterLabelsSpec {
 export interface PosterDefaultsSpec {
   xMin: number
   xMax: number
+  /**
+   * Gravity level (G). The desktop's `config.default.json` `ylim_min` / `ylim_max`.
+   *
+   * These are defaults in the same sense as {@link xMin} / {@link xMax}: a value the spec may
+   * override, never a value the spec may *drop*. `plot_gravity_level` calls
+   * `set_ylim(config["ylim_min"], config["ylim_max"])` unconditionally on both the screen axes and
+   * the export axes — there is no branch in the desktop application where Matplotlib autoscales
+   * the y-axis of a gravity-level figure, so there is none here either.
+   *
+   * A fixed frame is what makes these figures comparable, which is the entire reason a poster is
+   * rendered from a frozen preset rather than screenshotted. Autoscaling to the data would give a
+   * clean 5 mG drop and a spoiled 400 mG drop the same-looking plateau, differing only in the tick
+   * labels — the one visual comparison a reader of a poster is most likely to make by eye.
+   */
+  yMin: number
+  yMax: number
   figureWidth: number
   figureHeight: number
   dpi: number
@@ -156,6 +172,8 @@ export const AAT_POSTER_V1_PRESET: DeepReadonly<PosterPreset> = deepFreeze({
   defaults: {
     xMin: 0,
     xMax: 1.45,
+    yMin: -1,
+    yMax: 1,
     figureWidth: 10.6,
     figureHeight: 3.4,
     dpi: 300,
