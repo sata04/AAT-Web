@@ -1,0 +1,144 @@
+/*
+ * Narrow-screen overrides.
+ *
+ * Loaded after app.css so this file is a single, explicit responsive layer rather than mobile
+ * exceptions scattered through the desktop instrument-panel rules. The 640px breakpoint is where
+ * the command bar stops being a useful toolbar and becomes a disclosure; the existing 900px
+ * workspace breakpoint remains in app.css because it changes the base two-pane layout itself.
+ */
+
+@media (max-width: 640px) {
+  :root {
+    --control-height: 44px;
+  }
+
+  .command-bar {
+    gap: var(--space-xs);
+    padding-top: max(var(--space-sm), env(safe-area-inset-top));
+    padding-right: max(var(--space-sm), env(safe-area-inset-right));
+    padding-left: max(var(--space-sm), env(safe-area-inset-left));
+  }
+
+  .command-bar__brand {
+    order: 1;
+    margin-right: 0;
+  }
+
+  .command-bar__title {
+    display: inline-flex;
+    align-items: center;
+    min-height: var(--control-height);
+  }
+
+  .command-bar__spacer {
+    order: 2;
+  }
+
+  .command-bar__tools-toggle,
+  .command-bar__session {
+    order: 3;
+  }
+
+  .command-bar__tools-toggle {
+    display: inline-flex;
+  }
+
+  .command-bar__session {
+    min-width: 0;
+    max-width: 100%;
+  }
+
+  .command-bar__identity {
+    max-width: 5rem;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .app-nav {
+    order: 4;
+    flex: 1 0 100%;
+    max-width: 100%;
+    overflow-x: auto;
+    overscroll-behavior-inline: contain;
+    scrollbar-width: thin;
+  }
+
+  .app-nav__link {
+    flex: 0 0 auto;
+  }
+
+  .command-bar__tools {
+    display: none;
+    flex: 1 0 100%;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--space-xs);
+    min-width: 0;
+    padding-top: var(--space-xs);
+    border-top: 1px solid var(--border);
+  }
+
+  .command-bar--tools-open .command-bar__tools {
+    display: flex;
+  }
+
+  .command-bar__tools--primary {
+    order: 5;
+  }
+
+  .command-bar__tools--trailing {
+    order: 6;
+  }
+
+  .command-bar__tools > .command-bar__group {
+    flex-wrap: wrap;
+    min-width: 0;
+  }
+
+  .screen {
+    padding: var(--space-lg) var(--space-sm);
+  }
+
+  .graph-area {
+    padding: var(--space-sm);
+  }
+
+  .dialog-backdrop {
+    place-items: end center;
+    padding: var(--space-sm);
+    padding-bottom: max(var(--space-sm), env(safe-area-inset-bottom));
+  }
+
+  .dialog {
+    gap: var(--space-md);
+    max-height: calc(100dvh - var(--space-lg));
+    padding: var(--space-lg);
+  }
+
+  .dialog__actions > .button {
+    flex: 1 1 auto;
+  }
+
+  .dropzone {
+    min-height: 12rem;
+    padding: var(--space-lg);
+  }
+
+  .run-tags__add,
+  .admin-actions__row {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .run-tags__add .field,
+  .run-tags__add .input,
+  .admin-actions__row .field,
+  .admin-actions__row .input,
+  .admin-actions__row .select {
+    width: 100%;
+  }
+
+  .run-replay__plot {
+    height: 16rem;
+  }
+}

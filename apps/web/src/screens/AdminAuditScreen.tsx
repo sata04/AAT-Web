@@ -57,6 +57,7 @@ import { type AdminResource, LOADING, resourceOf } from '../admin/resource.ts'
 import { recordIdLabel } from '../admin/users.ts'
 import { AdminCapabilityNotice, AdminFrame } from '../components/AdminFrame.tsx'
 import { AdminResourceNotice } from '../components/AdminResourceNotice.tsx'
+import { TABLE_SCROLL_PROPS } from '../components/table-scroll.ts'
 import { useSession } from '../session/SessionProvider.tsx'
 
 export function AdminAuditScreen(): React.JSX.Element {
@@ -208,7 +209,7 @@ export function AdminAuditScreen(): React.JSX.Element {
           onRetry={() => void load(filter, null)}
         />
 
-        <div className="table-scroll">
+        <div {...TABLE_SCROLL_PROPS}>
           <table className="data-table admin-audit">
             <caption className="visually-hidden">
               日時、操作、実行者、対象、対象の所有者、接続元、詳細

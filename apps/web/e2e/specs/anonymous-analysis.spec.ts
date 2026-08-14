@@ -118,6 +118,34 @@ test.describe('anonymous research flow', () => {
     ).toBeVisible({ timeout: 5_000 })
   })
 
+  test('keeps the analyzer usable at phone width', async ({ page }) => {
+    await page.setViewportSize({ width: 390, height: 844 })
+    await page.goto('/')
+
+    const tools = page.getByRole('button', { name: '操作' })
+    await expect(tools).toBeVisible()
+    expect((await tools.boundingBox())?.height).toBeGreaterThanOrEqual(44)
+    expect((await page.locator('.command-bar').boundingBox())?.height).toBeLessThanOrEqual(72)
+    expect(await page.evaluate(() => document.body.scrollWidth - document.body.clientWidth)).toBe(0)
+
+    await tools.click()
+    await expect(page.getByRole('button', { name: '操作を閉じる' })).toBeVisible()
+    await expect(page.getByText('Excelで書き出す')).toBeVisible()
+    expect(await page.evaluate(() => document.body.scrollWidth - document.body.clientWidth)).toBe(0)
+
+    await page.getByRole('button', { name: '操作を閉じる' }).click()
+    await openCsv(page, repoCsv('normal_two_sensor_utf8.csv'))
+    await waitForAnalysis(page)
+
+    await expect(page.getByRole('region', { name: /^The Gravity Level/ })).toBeVisible()
+    expect(await page.evaluate(() => document.body.scrollWidth - document.body.clientWidth)).toBe(0)
+    expect(
+      await page
+        .locator('.table-scroll')
+        .evaluateAll((regions) => regions.every((region) => region.tabIndex === 0)),
+    ).toBe(true)
+  })
+
   test('offers the analyzer, not a sign-in wall, on the cloud screens', async ({ page }) => {
     await page.goto('/runs')
     await expect(page.getByText('保存した実験を表示するにはサインインが必要です')).toBeVisible()

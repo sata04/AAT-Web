@@ -48,6 +48,7 @@ import { fetchRendererBreaker } from '../cloud/gateway.ts'
 import { AdminBreakerControl } from '../components/AdminBreakerControl.tsx'
 import { AdminCapabilityNotice, AdminFrame } from '../components/AdminFrame.tsx'
 import { AdminResourceNotice } from '../components/AdminResourceNotice.tsx'
+import { TABLE_SCROLL_PROPS } from '../components/table-scroll.ts'
 import { Link } from '../router/Router.tsx'
 import { useSession } from '../session/SessionProvider.tsx'
 
@@ -288,7 +289,7 @@ export function AdminRendererScreen(): React.JSX.Element {
                       最新リビジョンにポスター図はありません（未生成、またはリビジョン自体がありません）。
                     </p>
                   ) : (
-                    <div className="table-scroll">
+                    <div {...TABLE_SCROLL_PROPS}>
                       <table className="data-table">
                         <caption className="visually-hidden">
                           {run.runCode} の最新リビジョンのポスター図

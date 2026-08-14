@@ -26,53 +26,26 @@ import { defaultDialogMapping } from '../analysis/mapping.ts'
 import type { ColumnMapping, OpenedSource } from '../analysis/protocol.ts'
 import { type Dataset, datasetFromPayload, sensorModeFrom } from '../app/dataset.ts'
 import { rangeStatisticsFor } from '../app/range-statistics.ts'
-import { loadConfig, saveConfig } from '../app/settings.ts'
-import { clearCache } from '../cache/analysis-cache.ts'
+import { loadConfig } from '../app/settings.ts'
 import type { PosterFigure } from '../cloud/gateway.ts'
 import { type CloudStatuses, INITIAL_STATUSES, type PosterStatus } from '../cloud/status.ts'
 import { syncDataset } from '../cloud/sync.ts'
-import { CloudStatusBar } from '../components/CloudStatusBar.tsx'
-import { ColumnSelectorDialog } from '../components/ColumnSelectorDialog.tsx'
-import { CommandBar } from '../components/CommandBar.tsx'
-import { FileDropZone } from '../components/FileDropZone.tsx'
-import { RangeStatisticsPanel } from '../components/RangeStatisticsPanel.tsx'
-import { SettingsDialog } from '../components/SettingsDialog.tsx'
-import { StatisticsPanel } from '../components/StatisticsPanel.tsx'
+import type { NoticeItem } from '../components/NoticeStack.tsx'
 import { ExportClient, ExportTooLargeForWorksheet, saveBlob } from '../exporting/client.ts'
 import { workbookInputFor } from '../exporting/input.ts'
 import { canvasToPng, PNG_PARITY_NOTICE } from '../exporting/png.ts'
 import type { ChartGeometry } from '../graph/geometry.ts'
 import { buildPlotModel, modelDataRange } from '../graph/plot-model.ts'
-import { SelectionOverlay } from '../graph/SelectionOverlay.tsx'
 import type { SelectionRange } from '../graph/selection.ts'
 import { graphPalette, prefersDarkScheme, resolveTheme, themeSettingFrom } from '../graph/theme.ts'
-import { type ChartViewport, UPlotChart } from '../graph/UPlotChart.tsx'
-import {
-  canSelectRange,
-  isComparing,
-  isGQuality,
-  isShowingAll,
-  transition,
-  type ViewMode,
-} from '../graph/view-mode.ts'
-import { PosterPanel } from '../poster/PosterPanel.tsx'
+import type { ChartViewport } from '../graph/UPlotChart.tsx'
+import { canSelectRange, transition, type ViewMode } from '../graph/view-mode.ts'
 import { generateAutoPoster, type PosterContext, retryAutoPoster } from '../poster/requests.ts'
 import { useSession } from '../session/SessionProvider.tsx'
+import { AnalyzerView, type PendingColumnChoice } from './AnalyzerView.tsx'
 
 /** How many notices stay on screen at once; older ones drop off. */
 const MAX_NOTICES = 6
-
-interface Notice {
-  id: number
-  tone: 'info' | 'warning' | 'error'
-  text: string
-}
-
-interface PendingColumnChoice {
-  source: OpenedSource
-  initial: ColumnMapping
-  reason: string | undefined
-}
 
 export function AnalyzerScreen(): React.JSX.Element {
   const [config, setConfig] = useState<AnalysisConfig>(loadConfig)
@@ -86,7 +59,7 @@ export function AnalyzerScreen(): React.JSX.Element {
   const [statuses, setStatuses] = useState<CloudStatuses>(INITIAL_STATUSES)
   const [pendingColumns, setPendingColumns] = useState<PendingColumnChoice | null>(null)
   const [settingsOpen, setSettingsOpen] = useState(false)
-  const [notices, setNotices] = useState<Notice[]>([])
+  const [notices, setNotices] = useState<NoticeItem[]>([])
   // The revision the poster figures of the last synced dataset hang from. Null
   // until an analysis has been stored, which is most of the time: local-first.
   const [syncedPoster, setSyncedPoster] = useState<PosterContext | null>(null)
@@ -125,7 +98,7 @@ export function AnalyzerScreen(): React.JSX.Element {
     [],
   )
 
-  const notify = useCallback((tone: Notice['tone'], text: string) => {
+  const notify = useCallback((tone: NoticeItem['tone'], text: string) => {
     noticeId.current += 1
     const id = noticeId.current
     // Capped: a disturbed recording can raise a warning per stage per sensor,
@@ -502,370 +475,59 @@ export function AnalyzerScreen(): React.JSX.Element {
     }
   }
 
-  /* --------------------------------------------------------------- render */
-
-  const hasDatasets = datasets.length > 0
+  const addCustomPoster = (poster: PosterFigure) => {
+    setCustomPosters((current) => [poster, ...current])
+  }
 
   return (
-    <div className="app">
-      <CommandBar
-        trailing={
-          <div className="command-bar__group">
-            <button
-              type="button"
-              className="button"
-              disabled={active === null}
-              onClick={() => void doExport('xlsx')}
-            >
-              Excelで書き出す
-            </button>
-            <button
-              type="button"
-              className="button"
-              disabled={active === null}
-              onClick={() => void doExport('csv')}
-            >
-              CSVで書き出す
-            </button>
-            <button
-              type="button"
-              className="button"
-              disabled={canvas === null}
-              title={PNG_PARITY_NOTICE}
-              onClick={() => void doPngExport()}
-            >
-              PNGを保存
-            </button>
-            <button type="button" className="button button--flat" onClick={() => setSettingsOpen(true)}>
-              設定
-            </button>
-          </div>
-        }
-      >
-        <div className="command-bar__group">
-          <label className="button">
-            ファイルを開く
-            <input
-              className="visually-hidden"
-              type="file"
-              accept=".csv,text/csv"
-              multiple
-              onChange={(event) => {
-                const files = [...(event.target.files ?? [])]
-                if (files.length > 0) void openFiles(files)
-                event.target.value = ''
-              }}
-            />
-          </label>
-        </div>
-
-        <fieldset className="command-bar__group segmented">
-          <legend className="visually-hidden">表示モード</legend>
-          <button
-            type="button"
-            className="button"
-            aria-pressed={!isShowingAll(mode) && !isGQuality(mode)}
-            disabled={!hasDatasets}
-            onClick={() => applyEvent(isShowingAll(mode) ? 'SHOW_ALL_OFF' : 'G_QUALITY_OFF')}
-          >
-            通常
-          </button>
-          <button
-            type="button"
-            className="button"
-            aria-pressed={isShowingAll(mode)}
-            disabled={!hasDatasets || isGQuality(mode)}
-            onClick={() => applyEvent(isShowingAll(mode) ? 'SHOW_ALL_OFF' : 'SHOW_ALL_ON')}
-          >
-            全データ
-          </button>
-          <button
-            type="button"
-            className="button"
-            aria-pressed={isGQuality(mode)}
-            disabled={!hasDatasets}
-            onClick={() => applyEvent(isGQuality(mode) ? 'G_QUALITY_OFF' : 'G_QUALITY_ON')}
-          >
-            G-quality
-          </button>
-        </fieldset>
-
-        <div className="command-bar__group">
-          <button
-            type="button"
-            className="button"
-            aria-pressed={isComparing(mode)}
-            disabled={datasets.length < 2 && !isComparing(mode)}
-            onClick={() => (isComparing(mode) ? applyEvent('LEAVE_COMPARING') : startComparison())}
-          >
-            比較
-          </button>
-        </div>
-
-        <div className="command-bar__group">
-          <label className="field">
-            <span className="visually-hidden">表示するセンサー</span>
-            <select
-              className="select"
-              value={config.graph_sensor_mode}
-              onChange={(event) => {
-                const next = { ...config, graph_sensor_mode: sensorModeFrom(event.target.value) }
-                setConfig(next)
-                saveConfig(next)
-              }}
-            >
-              <option value="both">両方</option>
-              <option value="inner_only">Inner Capsule のみ</option>
-              <option value="drag_only">Drag Shield のみ</option>
-            </select>
-          </label>
-        </div>
-
-        <div className="command-bar__group">
-          <button type="button" className="button" onClick={() => setViewport(null)} disabled={!hasDatasets}>
-            全体表示
-          </button>
-          <button
-            type="button"
-            className="button"
-            disabled={!hasDatasets}
-            onClick={() => {
-              const span = effectiveViewport.max - effectiveViewport.min
-              const centre = (effectiveViewport.max + effectiveViewport.min) / 2
-              setViewport({ min: centre - span / 4, max: centre + span / 4 })
-            }}
-          >
-            拡大
-          </button>
-          <button
-            type="button"
-            className="button"
-            disabled={!hasDatasets}
-            onClick={() => {
-              const span = effectiveViewport.max - effectiveViewport.min
-              const centre = (effectiveViewport.max + effectiveViewport.min) / 2
-              setViewport({
-                min: Math.max(bounds.min, centre - span),
-                max: Math.min(bounds.max, centre + span),
-              })
-            }}
-          >
-            縮小
-          </button>
-        </div>
-      </CommandBar>
-
-      <div className={hasDatasets ? 'workspace' : 'workspace workspace--single'}>
-        <main className="graph-area">
-          {notices.length === 0 ? null : (
-            <div>
-              {notices.map((notice) => (
-                <div className={`notice notice--${notice.tone}`} key={notice.id} role="status">
-                  <span className="notice__body">{notice.text}</span>
-                  <button
-                    type="button"
-                    className="button button--flat"
-                    onClick={() => dismissNotice(notice.id)}
-                  >
-                    閉じる
-                  </button>
-                </div>
-              ))}
-            </div>
-          )}
-
-          {statuses.analysis.kind === 'running' ? (
-            <progress className="progress" max={100} value={statuses.analysis.percent}>
-              {statuses.analysis.percent}%
-            </progress>
-          ) : null}
-
-          {hasDatasets ? (
-            <UPlotChart
-              model={plotModel}
-              palette={palette}
-              viewport={effectiveViewport}
-              onViewportChange={setViewport}
-              bounds={bounds}
-              onGeometryChange={setGeometry}
-              onCanvasChange={setCanvas}
-              primaryDragReserved={selectionEnabled}
-            >
-              <SelectionOverlay
-                geometry={geometry}
-                selection={selection}
-                onSelectionChange={setSelection}
-                enabled={selectionEnabled}
-              />
-            </UPlotChart>
-          ) : (
-            <FileDropZone onFiles={(files) => void openFiles(files)} disabled={false} />
-          )}
-        </main>
-
-        {hasDatasets ? (
-          <aside className="side-panel">
-            <section className="panel" aria-label="データセット">
-              <div className="panel__header">
-                <h2 className="panel__title">データセット</h2>
-                <span className="panel__hint">{datasets.length} 件</span>
-              </div>
-              <ul className="dataset-list">
-                {datasets.map((dataset) => (
-                  // Two sibling buttons rather than one nested inside the other:
-                  // a button inside a button is invalid HTML, and assistive
-                  // technology cannot reach the inner one.
-                  <li className="dataset-list__item" key={dataset.name}>
-                    <button
-                      type="button"
-                      className="button button--flat dataset-list__name"
-                      aria-current={dataset.name === activeName}
-                      onClick={() => {
-                        setActiveName(dataset.name)
-                        setSelection(null)
-                        setViewport(null)
-                      }}
-                    >
-                      {dataset.name}
-                    </button>
-                    {dataset.fromCache ? <span className="panel__hint">キャッシュ</span> : null}
-                    <button
-                      type="button"
-                      className="button button--flat"
-                      aria-label={`${dataset.name} を閉じる`}
-                      onClick={() => closeDataset(dataset)}
-                    >
-                      閉じる
-                    </button>
-                  </li>
-                ))}
-              </ul>
-            </section>
-
-            <StatisticsPanel
-              datasets={isComparing(mode) ? datasets : active === null ? [] : [active]}
-              mode={mode}
-            />
-
-            <RangeStatisticsPanel
-              selection={selection}
-              result={rangeResult}
-              enabled={selectionEnabled}
-              onChange={setSelection}
-            />
-
-            <PosterPanel
-              context={posterContext}
-              unavailableReason={posterUnavailableReason}
-              status={posterContext === null ? { kind: 'unavailable' } : statuses.poster}
-              selection={selectionEnabled ? selection : null}
-              selectionEnabled={selectionEnabled}
-              yRange={{ min: config.ylim_min, max: config.ylim_max }}
-              onRetryAuto={retryPoster}
-              customPosters={activeCustomPosters}
-              onCustomCreated={(poster) => {
-                // Newest first, and never overwritten: a custom figure is a new
-                // variant, not a replacement for the one it was derived from.
-                setCustomPosters((current) => [poster, ...current])
-                notify('info', 'ポスター図を作成しました。')
-              }}
-            />
-
-            <section className="panel" aria-label="ファイル情報">
-              <div className="panel__header">
-                <h2 className="panel__title">ファイル情報</h2>
-              </div>
-              {active === null ? (
-                <p className="panel__hint">データセットを選択してください。</p>
-              ) : (
-                <div className="table-scroll">
-                  <table className="data-table">
-                    <tbody>
-                      <tr>
-                        <th scope="row">文字コード</th>
-                        <td>{active.encoding}</td>
-                      </tr>
-                      <tr>
-                        <th scope="row">行数</th>
-                        <td className="numeric">{active.sampleCount.toLocaleString()}</td>
-                      </tr>
-                      <tr>
-                        <th scope="row">時間列</th>
-                        <td>{active.mapping.timeColumn}</td>
-                      </tr>
-                      <tr>
-                        <th scope="row">Inner Capsule</th>
-                        <td>{active.mapping.useInner ? active.mapping.innerColumn : '未使用'}</td>
-                      </tr>
-                      <tr>
-                        <th scope="row">Drag Shield</th>
-                        <td>{active.mapping.useDrag ? active.mapping.dragColumn : '未使用'}</td>
-                      </tr>
-                    </tbody>
-                  </table>
-                </div>
-              )}
-              <button
-                type="button"
-                className="button"
-                disabled={active === null}
-                onClick={() => {
-                  if (active === null) return
-                  setPendingColumns({
-                    source: {
-                      sourceSha256: active.sourceSha256,
-                      filename: active.filename,
-                      encoding: active.encoding,
-                      columnNames: [...active.columnNames],
-                      detected: { time: [], acceleration: [] },
-                      rowCount: active.sampleCount,
-                      suggestedMapping: active.mapping,
-                      ambiguity: null,
-                    },
-                    initial: active.mapping,
-                    reason: undefined,
-                  })
-                }}
-              >
-                列を選び直す
-              </button>
-            </section>
-          </aside>
-        ) : null}
-      </div>
-
-      <CloudStatusBar statuses={statuses} onRetrySync={retrySync} onRetryPoster={retryPoster} />
-
-      {pendingColumns === null ? null : (
-        <ColumnSelectorDialog
-          source={pendingColumns.source}
-          initial={pendingColumns.initial}
-          reason={pendingColumns.reason}
-          onCancel={() => setPendingColumns(null)}
-          onConfirm={(mapping) => {
-            const source = pendingColumns.source
-            setPendingColumns(null)
-            void runAnalysis(source, mapping)
-          }}
-        />
-      )}
-
-      {settingsOpen ? (
-        <SettingsDialog
-          config={config}
-          onCancel={() => setSettingsOpen(false)}
-          onApply={(next) => {
-            setConfig(next)
-            if (!saveConfig(next)) {
-              notify('warning', '設定をブラウザに保存できませんでした。今回のセッションのみ有効です。')
-            }
-            setSettingsOpen(false)
-          }}
-          onClearCache={() => {
-            void clearCache().then(() => notify('info', 'ローカルキャッシュを削除しました。'))
-          }}
-        />
-      ) : null}
-    </div>
+    <AnalyzerView
+      state={{
+        config,
+        datasets,
+        active,
+        activeName,
+        mode,
+        selection,
+        rangeResult,
+        selectionEnabled,
+        statuses,
+        notices,
+        posterContext,
+        posterUnavailableReason,
+        activeCustomPosters,
+        pendingColumns,
+        settingsOpen,
+      }}
+      plot={{
+        model: plotModel,
+        palette,
+        viewport: effectiveViewport,
+        bounds,
+        geometry,
+        canvas,
+      }}
+      actions={{
+        openFiles,
+        applyModeEvent: applyEvent,
+        startComparison,
+        setConfig,
+        setViewport,
+        setGeometry,
+        setCanvas,
+        setSelection,
+        setActiveName,
+        closeDataset,
+        exportData: doExport,
+        exportPng: doPngExport,
+        dismissNotice,
+        retrySync,
+        retryPoster,
+        addCustomPoster,
+        notify,
+        setPendingColumns,
+        runAnalysis,
+        setSettingsOpen,
+      }}
+    />
   )
 }

@@ -43,6 +43,7 @@ import {
 import { shortMemo } from '../runs/memo.ts'
 import { summariseGQuality } from '../runs/metrics.ts'
 import { RunPosterImage } from './RunPosterImage.tsx'
+import { TABLE_SCROLL_PROPS } from './table-scroll.ts'
 
 export interface RunCardProps {
   run: RunSummary
@@ -179,7 +180,7 @@ export function RunCard(props: RunCardProps): React.JSX.Element {
             </ul>
           )}
 
-          <div className="table-scroll">
+          <div {...TABLE_SCROLL_PROPS}>
             <table className="data-table run-card__metrics">
               <caption className="visually-hidden">{run.runCode} の最小標準偏差ウィンドウの統計</caption>
               <thead>

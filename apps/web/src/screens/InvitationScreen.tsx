@@ -31,6 +31,7 @@ import { authClient } from '../auth/client.ts'
 import { type RegistrationContext, redeemInvitation, takeInvitationToken } from '../auth/invitation.ts'
 import { describePasskeyFailure, type PasskeyFailure, supportsWebAuthn } from '../auth/webauthn.ts'
 import { ScreenFrame } from '../components/ScreenFrame.tsx'
+import { TABLE_SCROLL_PROPS } from '../components/table-scroll.ts'
 import { Link, useNavigate } from '../router/Router.tsx'
 import { useSession } from '../session/SessionProvider.tsx'
 
@@ -155,7 +156,7 @@ export function InvitationScreen(props: InvitationScreenProps): React.JSX.Elemen
                 for. It is a courtesy — the flow completes without it — but it is
                 the user's one chance to notice they were sent the wrong link. */}
             {phase.context.displayName === undefined && phase.context.role === undefined ? null : (
-              <div className="table-scroll">
+              <div {...TABLE_SCROLL_PROPS}>
                 <table className="data-table">
                   <tbody>
                     {phase.context.displayName === undefined ? null : (

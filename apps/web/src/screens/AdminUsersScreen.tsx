@@ -70,6 +70,7 @@ import { AdminOneTimeSecret } from '../components/AdminOneTimeSecret.tsx'
 import { AdminQuotaMeter } from '../components/AdminQuotaMeter.tsx'
 import { AdminResourceNotice } from '../components/AdminResourceNotice.tsx'
 import { Dialog } from '../components/Dialog.tsx'
+import { TABLE_SCROLL_PROPS } from '../components/table-scroll.ts'
 import { useSession } from '../session/SessionProvider.tsx'
 
 interface Notice {
@@ -270,7 +271,7 @@ export function AdminUsersScreen(): React.JSX.Element {
         </search>
 
         {users.resource.kind === 'ready' ? (
-          <div className="table-scroll">
+          <div {...TABLE_SCROLL_PROPS}>
             <table className="data-table">
               <caption className="visually-hidden">利用者、権限、アカウントの状態、保存容量</caption>
               <thead>

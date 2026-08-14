@@ -12,6 +12,7 @@ import { createRoot } from 'react-dom/client'
 import { App } from './app/App.tsx'
 import { setupServiceWorker } from './pwa/update.ts'
 import './styles/app.css'
+import './styles/responsive.css'
 
 function Root(): React.JSX.Element {
   const [applyUpdate, setApplyUpdate] = useState<(() => void) | null>(null)
