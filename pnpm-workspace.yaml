@@ -40,3 +40,22 @@ allowBuilds:
   "@biomejs/biome": true
   esbuild: true
   workerd: true
+
+# Emergency security updates (see docs/supply-chain.md, "Emergency security
+# updates"): force a transitive dependency past a maintainer's own pin/range
+# because the pinned version has a known advisory. Each entry names the
+# advisory and is removed once the upstream package (postcss, miniflare)
+# picks up the fix itself.
+overrides:
+  # GHSA-2v37-7h3g-55p8 (high): nanoid custom generators loop indefinitely
+  # when size is zero. Reached through postcss (vite/vitest build tooling).
+  # Pinned to the exact fixed version, not a range: nanoid 4+ dropped its CJS
+  # export, which postcss's require('nanoid') needs, so anything past 3.3.x
+  # would break the build rather than just patch the advisory.
+  nanoid@<3.3.18: "3.3.18"
+  # GHSA-4cwx-7wf7-3272 (high) and four related moderate advisories: undici
+  # cache/cookie/CRLF handling. Reached through miniflare (wrangler /
+  # @cloudflare/vite-plugin / @cloudflare/vitest-pool-workers dev tooling).
+  # Pinned to the exact fixed version: miniflare pins an exact undici version
+  # itself (no range), and undici 8 is a breaking major.
+  undici@<7.29.0: "7.29.0"
