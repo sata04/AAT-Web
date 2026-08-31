@@ -46,8 +46,8 @@ importers:
         specifier: 4.13.4
         version: 4.13.4
       papaparse:
-        specifier: 5.6.0
-        version: 5.6.0
+        specifier: 5.7.0
+        version: 5.7.0
       react:
         specifier: 19.2.8
         version: 19.2.8
@@ -125,8 +125,8 @@ importers:
   packages/analysis-core:
     dependencies:
       papaparse:
-        specifier: 5.6.0
-        version: 5.6.0
+        specifier: 5.7.0
+        version: 5.7.0
     devDependencies:
       '@types/papaparse':
         specifier: 5.5.2
@@ -3125,8 +3125,8 @@ packages:
   package-json-from-dist@1.0.1:
     resolution: {integrity: sha512-UEZIS3/by4OC8vL3P2dTXRETpebLI2NiI5vIrjaD/5UtrkFX/tNbwjTSRAGC/+7CAo2pIcBaRgWmcBBHcsaCIw==}
 
-  papaparse@5.6.0:
-    resolution: {integrity: sha512-N2vuNQAYGK1/4vs6HJX86+VYU6OkiSTgdJz3JQfTk1y51cFCO/U8gnaeTF4iNE4r57Tt0sV47dUua1/19pxO6Q==}
+  papaparse@5.7.0:
+    resolution: {integrity: sha512-qBGxg/7Q3Kl9Wfhrz2Z74UnvnHTXLNG6jmKJFeBvP2+y4lV7So+7SR62+Zd47JvdrCkX+nDcnr0ObPzek/+6RA==}
 
   parse5@8.0.1:
     resolution: {integrity: sha512-z1e/HMG90obSGeidlli3hj7cbocou0/wa5HacvI3ASx34PecNjNQeaHNo5WIZpWofN9kgkqV1q5YvXe3F0FoPw==}
@@ -6442,7 +6442,7 @@ snapshots:
 
   package-json-from-dist@1.0.1: {}
 
-  papaparse@5.6.0: {}
+  papaparse@5.7.0: {}
 
   parse5@8.0.1:
     dependencies:
