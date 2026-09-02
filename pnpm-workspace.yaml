@@ -58,4 +58,4 @@ overrides:
   # @cloudflare/vite-plugin / @cloudflare/vitest-pool-workers dev tooling).
   # Pinned to the exact fixed version: miniflare pins an exact undici version
   # itself (no range), and undici 8 is a breaking major.
-  undici@<7.29.0: "7.29.0"
+  undici@<7.29.0: "8.10.0"
