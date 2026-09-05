@@ -281,15 +281,29 @@ export function aatPasskey({ db, config }: AatPasskeyOptions) {
         if (!spent) throw toApiError('INVITE_USED')
 
         if (resolved.kind === 'registration') {
-          await ctx.context.internalAdapter.createUser({
-            id: user.id,
-            name: resolved.displayName,
-            // Synthetic and non-routable — see ./identity.ts. No real address is ever collected.
-            email: syntheticEmail(user.id),
-            emailVerified: false,
-            role: resolved.role,
-            banned: false,
-          })
+          await ctx.context.internalAdapter.createUser(
+            {
+              id: user.id,
+              name: resolved.displayName,
+              // Synthetic and non-routable — see ./identity.ts. No real address is ever collected.
+              email: syntheticEmail(user.id),
+              emailVerified: false,
+              role: resolved.role,
+              banned: false,
+            },
+            /*
+             * The provisioning source, required since better-auth 1.7.2. `method` is an open
+             * union — the named members are Better Auth's own built-ins and none of them
+             * describes a passkey — so it carries the accurate `'passkey'` rather than one of
+             * the listed values that would misreport how this user was created.
+             *
+             * It reaches nothing but the `user.validateUserInfo` gate, which AAT does not
+             * configure: every account here is created by this plugin, from an invitation this
+             * function has already resolved and is about to spend, so the admission decision is
+             * made above rather than delegated to a library hook.
+             */
+            { method: 'passkey' },
+          )
         }
 
         await recordInvitationUser(db, resolved.invitationId, user.id)
