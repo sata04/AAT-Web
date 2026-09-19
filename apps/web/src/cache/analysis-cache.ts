@@ -174,6 +174,9 @@ export async function writeCache<T>(
     }
     const transaction = database.transaction(STORE_NAME, 'readwrite')
     const done = committed(transaction)
+    // A failed `put` jumps straight to `catch`, leaving `done` to reject unheard —
+    // silence that path; the request's own error is what becomes `false`.
+    void done.catch(() => {})
     await promisify(transaction.objectStore(STORE_NAME).put(record))
     await done
     return true

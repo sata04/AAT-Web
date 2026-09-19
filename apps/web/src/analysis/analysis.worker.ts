@@ -87,11 +87,14 @@ const retained = new Map<string, RetainedTable>()
 const releasedBeforeOpen = new Set<string>()
 
 /**
- * Cancellation bookkeeping. `cancelled` takes every id a `cancel` message names —
- * including a request whose message is still queued and so not yet running —
- * and each finished run clears its own flag, keeping the set from growing for
- * the lifetime of the worker.
+ * Cancellation bookkeeping. `inFlight` bounds `cancelled` to requests that are
+ * actually running so a stale cancel for a finished id is a no-op, and each
+ * finished run clears its own flag, keeping the set from growing for the
+ * lifetime of the worker. Worker messages are processed in post order, so a
+ * request's listener — and its `inFlight` entry — always exists before the
+ * `cancel` message naming it can be handled.
  */
+const inFlight = new Set<string>()
 const cancelled = new Set<string>()
 
 function throwIfCancelled(requestId: string): void {
@@ -466,15 +469,15 @@ scope.addEventListener('message', (event: MessageEvent<AnalysisWorkerRequest>) =
   const request = event.data
   if (request.type === 'cancel') {
     for (const requestId of request.requestIds) {
-      // Unconditional: a request whose message is still queued behind this one
-      // is not running yet, and the protocol promises it exits at its first
-      // checkpoint. Finished requests delete their own flag, and a stale id for
-      // a request that never ran sits harmlessly until the worker is torn down.
-      cancelled.add(requestId)
+      // A cancel for an id that already finished — its flag was cleared while its
+      // response was still in flight to the page — must not leave an entry that
+      // nothing will ever remove.
+      if (inFlight.has(requestId)) cancelled.add(requestId)
     }
     return
   }
 
+  inFlight.add(request.requestId)
   const run = async (): Promise<void> => {
     switch (request.type) {
       case 'open':
@@ -488,6 +491,7 @@ scope.addEventListener('message', (event: MessageEvent<AnalysisWorkerRequest>) =
   run()
     .catch((error: unknown) => reportError(request.requestId, error))
     .finally(() => {
+      inFlight.delete(request.requestId)
       cancelled.delete(request.requestId)
     })
 })
