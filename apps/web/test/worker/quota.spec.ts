@@ -13,7 +13,7 @@ import { and, eq, isNull } from 'drizzle-orm'
 import { describe, expect, it } from 'vitest'
 import { cloudObjects, quotaReservations, quotaUsage } from '../../worker/db/schema.ts'
 import { newId } from '../../worker/lib/ids.ts'
-import { sweepStaleReservations } from '../../worker/services/quota.ts'
+import { finaliseReservation, sweepStaleReservations } from '../../worker/services/quota.ts'
 import { apiFetch, createRevision, createRun, createUser, db, type TestUser } from './helpers/client.ts'
 import { buildSnapshot, encodeForUpload } from './helpers/snapshot.ts'
 
@@ -445,6 +445,68 @@ describe('quota enforcement', () => {
     const quota = await quotaOf(user)
     expect(quota.bytesUsed).toBe(size)
     expect(quota.bytesReserved).toBe(0)
+  })
+
+  it('lets a retried run delete finish cleaning up a tombstoned run', async () => {
+    const user = await createUser()
+    const runId = await createRun(user)
+    const revisionId = await createRevision(user, runId)
+    await uploadSnapshot(user, revisionId)
+
+    const first = await apiFetch(`/api/v1/runs/${runId}`, { method: 'DELETE', cookie: user.cookie })
+    expect(first.status).toBe(200)
+
+    // A delete that failed partway through its object walk lands here: the run is already
+    // tombstoned, and without admission the retry would 404 while its objects stay charged.
+    const retried = await apiFetch(`/api/v1/runs/${runId}`, { method: 'DELETE', cookie: user.cookie })
+    expect(retried.status).toBe(200)
+    const quota = await quotaOf(user)
+    expect(quota.bytesUsed).toBe(0)
+    expect(quota.objectCount).toBe(0)
+  })
+
+  it('uncharges a settlement whose reservation was already claimed', async () => {
+    const user = await createUser()
+    const runId = await createRun(user)
+    const revisionId = await createRevision(user, runId)
+    const { size } = await uploadSnapshot(user, revisionId)
+
+    // Settle a reservation the sweeper already claimed: the charge lands, the pending→finalised
+    // claim fails, and the unwind must restore the account exactly — reserved column included,
+    // because the sweeper subtracted it as well.
+    const reservationId = newId()
+    const key = `snapshots/${user.userId}/${runId}/${newId()}.json`
+    await db()
+      .insert(quotaReservations)
+      .values({
+        id: reservationId,
+        userId: user.userId,
+        bytes: 256,
+        purpose: 'snapshot',
+        r2Key: key,
+        status: 'pending',
+        createdAt: new Date(0),
+        expiresAt: new Date(0),
+      })
+    await db()
+      .update(quotaUsage)
+      .set({ bytesReserved: 256, updatedAt: new Date() })
+      .where(eq(quotaUsage.userId, user.userId))
+    await sweepStaleReservations(db(), env.AAT_OBJECTS)
+
+    const settled = await finaliseReservation(
+      db(),
+      { id: reservationId, bytes: 256, purpose: 'snapshot', r2Key: key },
+      256,
+      user.userId,
+      new Date(),
+    )
+    expect(settled).toBe(false)
+
+    const quota = await quotaOf(user)
+    expect(quota.bytesUsed).toBe(size)
+    expect(quota.bytesReserved).toBe(0)
+    expect(quota.objectCount).toBe(1)
   })
 
   it('never orphans a committed object when its run is deleted mid-upload', async () => {

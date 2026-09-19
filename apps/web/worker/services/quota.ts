@@ -147,9 +147,11 @@ export async function reserveQuota(
 /**
  * Convert a reservation into recorded usage, charging the ACTUAL byte count.
  *
- * Both the reservation release and the usage increment happen in one UPDATE, conditional on the
- * reservation still being pending — so a double finalise (a retry, a duplicate request) charges
- * once. Returns false if the reservation had already been settled.
+ * The charge is written before the reservation settles so a deletion never observes `finalised`
+ * ahead of the charge it implies. A lost claim uncharges exactly the bytes and object count it
+ * added; the reservation's hold on `bytesReserved` is released only after the claim is won, so a
+ * sweeper's or deleter's subtraction can never be subtracted twice. Returns false if the
+ * reservation had already been settled.
  */
 export async function finaliseReservation(
   db: Database,
@@ -158,25 +160,44 @@ export async function finaliseReservation(
   userId: string,
   now: Date = new Date(),
 ): Promise<boolean> {
-  const claimed = await db
-    .update(quotaReservations)
-    .set({ status: 'finalised' })
-    .where(and(eq(quotaReservations.id, reservation.id), eq(quotaReservations.status, 'pending')))
-  if (rowsAffected(claimed) !== 1) return false
-
   await db
     .update(quotaUsage)
     .set({
       bytesUsed: sql`${quotaUsage.bytesUsed} + ${actualBytes}`,
-      // Clamped at zero: a reservation swept by the stale-reservation sweeper has already been
-      // subtracted, and a negative reserved column would give away free quota forever.
-      bytesReserved: sql`MAX(${quotaUsage.bytesReserved} - ${reservation.bytes}, 0)`,
       objectCount: sql`${quotaUsage.objectCount} + 1`,
       updatedAt: now,
     })
     .where(eq(quotaUsage.userId, userId))
 
-  return true
+  const claimed = await db
+    .update(quotaReservations)
+    .set({ status: 'finalised' })
+    .where(and(eq(quotaReservations.id, reservation.id), eq(quotaReservations.status, 'pending')))
+  if (rowsAffected(claimed) === 1) {
+    // We own the settlement, so the hold is ours to release: nobody else subtracts it now.
+    // Clamped at zero in case the row drifted while the charge was in flight.
+    await db
+      .update(quotaUsage)
+      .set({
+        bytesReserved: sql`MAX(${quotaUsage.bytesReserved} - ${reservation.bytes}, 0)`,
+        updatedAt: now,
+      })
+      .where(eq(quotaUsage.userId, userId))
+    return true
+  }
+
+  // The claim lost to a sweeper or a deleter — both now treat the bytes as never charged — so
+  // the usage charge written above is owed back. `bytesReserved` is not touched here: the winning
+  // claimer released it already, and adding it back would double-count the hold.
+  await db
+    .update(quotaUsage)
+    .set({
+      bytesUsed: sql`MAX(${quotaUsage.bytesUsed} - ${actualBytes}, 0)`,
+      objectCount: sql`MAX(${quotaUsage.objectCount} - 1, 0)`,
+      updatedAt: now,
+    })
+    .where(eq(quotaUsage.userId, userId))
+  return false
 }
 
 /** Give a reservation back. Safe to call on an already-settled reservation. */

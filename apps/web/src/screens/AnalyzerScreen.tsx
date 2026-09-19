@@ -319,10 +319,15 @@ export function AnalyzerScreen(): React.JSX.Element {
       mapping: ColumnMapping,
       configOverride?: AnalysisConfig,
       reopenedOnce = false,
+      // Results are stale the moment anything bumps the epoch: a user cancel, or a newer
+      // settings application whose own re-analysis supersedes this one. Without the gate a
+      // slower earlier loop would overwrite datasets the newer configuration produced.
+      epoch = cancelEpoch.current,
     ) => {
       const client = getAnalysisClient()
       const effectiveConfig = configOverride ?? config
       const onProgress = (progress: AnalysisProgress) => {
+        if (epoch !== cancelEpoch.current) return
         setStatuses((current) => ({
           ...current,
           analysis: { kind: 'running', stage: progress.stage, percent: progress.percent },
@@ -349,6 +354,12 @@ export function AnalyzerScreen(): React.JSX.Element {
           return
         }
         const dataset = datasetFromPayload(result.payload, effectiveConfig, result.fromCache)
+        if (epoch !== cancelEpoch.current) {
+          // A cancel or a newer settings application arrived while the worker was computing —
+          // install nothing; the retained table is still released so it cannot linger.
+          void client.release(source.sourceSha256).catch(() => {})
+          return
+        }
         setDatasets((current) => {
           // Re-analysing or re-opening a file must not move it to the end of the
           // list — the comparison graph draws in list order.
@@ -376,7 +387,11 @@ export function AnalyzerScreen(): React.JSX.Element {
       } catch (error) {
         const code = error instanceof AnalysisWorkerError ? error.code : 'INTERNAL'
         if (code === 'ANALYSIS_CANCELLED') {
-          setStatuses((current) => ({ ...current, analysis: { kind: 'cancelled' } }))
+          // Only the live epoch gets to write the lane — a superseded loop must not leave
+          // 'cancelled' over the status of the analysis that replaced it.
+          if (epoch === cancelEpoch.current) {
+            setStatuses((current) => ({ ...current, analysis: { kind: 'cancelled' } }))
+          }
           return
         }
         if (code === 'SOURCE_NOT_RETAINED' && !reopenedOnce) {
@@ -387,7 +402,7 @@ export function AnalyzerScreen(): React.JSX.Element {
           if (file !== undefined) {
             try {
               const reopened = await client.open(file.name, await file.arrayBuffer())
-              await runAnalysis(reopened, mapping, configOverride, true)
+              await runAnalysis(reopened, mapping, configOverride, true, epoch)
               return
             } catch {
               // Fall through to the generic failure path below.
@@ -520,15 +535,23 @@ export function AnalyzerScreen(): React.JSX.Element {
       if (!saveConfig(next)) {
         notify('warning', '設定をブラウザに保存できませんでした。今回のセッションのみ有効です。')
       }
-      const epoch = cancelEpoch.current
       const activeBefore = activeName
       void (async () => {
         const resultChanged = (await configHash(previous)) !== (await configHash(next))
         if (!resultChanged) return
+        // Bump the epoch and cancel in-flight work only now that a numeric change is confirmed —
+        // a theme edit must not abort an unrelated analysis. A previous settings loop may still
+        // be running, and its results must never land on top of the ones this edit is about to
+        // produce: each runAnalysis call below carries this epoch and refuses to install once
+        // it goes stale. The bump also aborts a batch open still in progress — it was asked for
+        // under the old configuration.
+        cancelEpoch.current += 1
+        analysisClient.current?.cancelPending()
+        const epoch = cancelEpoch.current
         for (const dataset of datasets) {
           if (cancelEpoch.current !== epoch) return
           if (!datasetsRef.current.some((current) => current.name === dataset.name)) continue
-          await runAnalysis(openedSourceForDataset(dataset), dataset.mapping, next)
+          await runAnalysis(openedSourceForDataset(dataset), dataset.mapping, next, false, epoch)
         }
         if (activeBefore !== null && datasetsRef.current.some((current) => current.name === activeBefore)) {
           setActiveName(activeBefore)

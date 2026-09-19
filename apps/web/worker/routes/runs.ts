@@ -32,7 +32,13 @@ import { rowsAffected } from '../db/client.ts'
 import { analysisRevisions, cloudObjects, posterFigures, runs, runTags, user } from '../db/schema.ts'
 import { newId } from '../lib/ids.ts'
 import type { AppEnv } from '../middleware/authorize.ts'
-import { requireCapability, requireRun, requireSession, withDatabase } from '../middleware/authorize.ts'
+import {
+  requireCapability,
+  requireRun,
+  requireRunForDelete,
+  requireSession,
+  withDatabase,
+} from '../middleware/authorize.ts'
 import { validate } from '../middleware/validate.ts'
 import { writeAuditLog } from '../services/audit.ts'
 import { releaseObjectAccounting } from '../services/quota.ts'
@@ -380,14 +386,20 @@ runRoutes.delete('/:runId', requireCapability('analysis:delete'), async (context
   // `destroy`, which no Researcher holds for another member's run: deleting a colleague's
   // experiment removes bytes nobody can recompute, and it is the one action in this file that is
   // not reversible by re-running the request differently.
-  const run = await requireRun(context, context.req.param('runId'), 'destroy')
+  // Tombstoned runs resolve too: a delete that failed partway through must be retryable, and the
+  // per-object tombstones below keep the walk idempotent. Everywhere else a deleted run is absent.
+  const run = await requireRunForDelete(context, context.req.param('runId'))
   const now = new Date()
 
   // Tombstone the run BEFORE walking its objects: `deleted_at` is the admission gate. Every
   // upload path re-checks it after inserting its object row (see commitUploadedObject), so a
   // tombstone that lands first guarantees a commit that races this delete either unwinds itself
-  // or is visible to the walk below — it cannot land under a dead run unnoticed.
-  await db.update(runs).set({ deletedAt: now, updatedAt: now }).where(eq(runs.id, run.id))
+  // or is visible to the walk below — it cannot land under a dead run unnoticed. The conditional
+  // keeps a retried delete from rewriting the original timestamp.
+  await db
+    .update(runs)
+    .set({ deletedAt: now, updatedAt: now })
+    .where(and(eq(runs.id, run.id), isNull(runs.deletedAt)))
 
   // Delete the bytes first and correct the quota as each object goes, so a failure partway through
   // leaves the account charged for objects that still exist rather than for objects that do not.

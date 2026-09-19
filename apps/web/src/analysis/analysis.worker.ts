@@ -418,22 +418,30 @@ async function handleAnalyse(request: AnalyseRequest): Promise<void> {
     progress(request.requestId, 'caching', 97)
     const payloadBytes = approximateBytes(payload)
     const budget = await cacheBudgetBytes()
-    // Written before the transfer: after `postMessage` the buffers are detached
-    // and there is nothing left here to store.
-    const stored = await writeCache(cacheParts, request.filename, payload, payloadBytes)
-    if (!stored) {
-      // The write failed under pressure, so the store is over budget even before
-      // this payload: evict to a budget that excludes it, then try once more.
-      await evictToBudget(Math.max(0, budget - payloadBytes))
-      await writeCache(cacheParts, request.filename, payload, payloadBytes)
-    } else {
-      // The write succeeded but the store is still over budget — a failed write earlier left it
-      // that way, or the budget shrank — so evict down to the real limit now rather than waiting
-      // for the next write to fail.
-      await evictToBudget(budget)
+    // A payload larger than the whole budget would evict every other entry to make room for a
+    // record it can never share the cache with — skip it rather than empty the store for nothing.
+    if (payloadBytes <= budget) {
+      // Written before the transfer: after `postMessage` the buffers are detached
+      // and there is nothing left here to store.
+      let stored = await writeCache(cacheParts, request.filename, payload, payloadBytes)
+      if (!stored) {
+        // The write failed under pressure, so the store is over budget even before
+        // this payload: evict to a budget that excludes it, then try once more.
+        await evictToBudget(Math.max(0, budget - payloadBytes))
+        stored = await writeCache(cacheParts, request.filename, payload, payloadBytes)
+      }
+      if (stored) {
+        // Whichever write landed, bring the store back under its real budget now rather than
+        // letting it sit over the cap until a later write happens to fail.
+        await evictToBudget(budget)
+      }
+      // Every await above yields to the event loop, where a queued `cancel` finally runs —
+      // check it before the result is posted, or a cancel during eviction still reports success.
+      throwIfCancelled(request.requestId)
     }
   }
 
+  throwIfCancelled(request.requestId)
   const message: AnalysedMessage = {
     type: 'analysed',
     requestId: request.requestId,
