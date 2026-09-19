@@ -56,6 +56,138 @@ function isAsciiDigit(code: number): boolean {
   return code >= CHAR_ZERO && code <= CHAR_NINE
 }
 
+/** Advance past one run of tokenizer whitespace. */
+function skipAsciiSpace(text: string, position: number, length: number): number {
+  while (position < length && isAsciiSpace(text.charCodeAt(position))) position++
+  return position
+}
+
+/** Advance past a run of digits that are no longer accumulated. */
+function skipAsciiDigits(text: string, position: number, length: number): number {
+  while (position < length && isAsciiDigit(text.charCodeAt(position))) position++
+  return position
+}
+
+interface Sign {
+  negative: boolean
+  position: number
+}
+
+/** The leading `+`/`-`, if one is present. */
+function scanSign(text: string, position: number, length: number): Sign {
+  const signCode = position < length ? text.charCodeAt(position) : 0
+  if (signCode === CHAR_MINUS) return { negative: true, position: position + 1 }
+  if (signCode === CHAR_PLUS) return { negative: false, position: position + 1 }
+  return { negative: false, position }
+}
+
+interface Mantissa {
+  /** The accumulated significant digits. */
+  number: number
+  /** Significant digits read; zero means the cell was not a number at all. */
+  digits: number
+  /** The decimal exponent implied by excess integer digits and the fraction length. */
+  exponent: number
+  position: number
+}
+
+/**
+ * The digits left of the decimal point.
+ *
+ * Only the first `max_digits` significant digits are accumulated; every later
+ * integer digit instead shifts the decimal exponent.
+ */
+function scanIntegerDigits(text: string, position: number, length: number): Mantissa {
+  let number = 0
+  let digits = 0
+  let exponent = 0
+  while (position < length && isAsciiDigit(text.charCodeAt(position))) {
+    if (digits < MAX_DIGITS) {
+      number = number * 10 + (text.charCodeAt(position) - CHAR_ZERO)
+      digits++
+    } else {
+      // Digits past the significand only move the decimal point.
+      exponent++
+    }
+    position++
+  }
+  return { number, digits, exponent, position }
+}
+
+/**
+ * The optional `.digits` part. Fraction digits accumulate only while the
+ * significand has room; the rest are skipped, and the exponent pays for the
+ * digits that were kept.
+ */
+function scanFraction(text: string, length: number, mantissa: Mantissa): Mantissa {
+  let position = mantissa.position
+  if (position >= length || text.charCodeAt(position) !== CHAR_DOT) return mantissa
+  position++
+
+  let { number, digits } = mantissa
+  let decimals = 0
+  while (position < length && digits < MAX_DIGITS && isAsciiDigit(text.charCodeAt(position))) {
+    number = number * 10 + (text.charCodeAt(position) - CHAR_ZERO)
+    position++
+    digits++
+    decimals++
+  }
+  if (digits >= MAX_DIGITS) position = skipAsciiDigits(text, position, length)
+
+  return { number, digits, exponent: mantissa.exponent - decimals, position }
+}
+
+interface ExplicitExponent {
+  /** The signed value the `e` part contributes, or 0 when absent or empty. */
+  value: number
+  position: number
+}
+
+/** The optional `[eE][+-]?digits` tail. */
+function scanExplicitExponent(text: string, position: number, length: number): ExplicitExponent {
+  const marker = position < length ? text.charCodeAt(position) : 0
+  if (marker !== CHAR_LOWER_E && marker !== CHAR_UPPER_E) return { value: 0, position }
+
+  const markerPosition = position
+  const sign = scanSign(text, position + 1, length)
+  position = sign.position
+
+  let digits = 0
+  let value = 0
+  while (position < length && isAsciiDigit(text.charCodeAt(position))) {
+    value = value * 10 + (text.charCodeAt(position) - CHAR_ZERO)
+    digits++
+    position++
+  }
+
+  // "1e" with no digits: the tokenizer un-consumes the marker, which leaves
+  // trailing text behind and makes the whole cell non-numeric.
+  if (digits === 0) return { value: 0, position: markerPosition }
+  return { value: sign.negative ? -value : value, position }
+}
+
+/**
+ * Apply the decimal exponent by scaling with the `e[]` table.
+ *
+ * A decimal exponent above 308 does not set `ERANGE`: the tokenizer emits
+ * `number == 0 ? 0 : number < 0 ? -HUGE_VAL : HUGE_VAL`, and the caller
+ * accepts the infinity. `0e999` is therefore a real `0` — a sample pandas
+ * would count, and one this port must not silently turn into a gap. In the
+ * subnormal range the tokenizer scales in two steps to stay in range.
+ */
+function scaleByPowerOfTen(number: number, exponent: number): number {
+  if (exponent > 308) {
+    // Overflow: a signed zero stays a real zero; a nonzero mantissa becomes ±Infinity.
+    return number === 0 ? 0 : number < 0 ? Number.NEGATIVE_INFINITY : Number.POSITIVE_INFINITY
+  }
+  if (exponent > 0) return number * (POWERS_OF_TEN[exponent] as number)
+  if (exponent < -308) {
+    if (exponent < -616) return 0
+    return number / (POWERS_OF_TEN[-308 - exponent] as number) / (POWERS_OF_TEN[308] as number)
+  }
+  return number / (POWERS_OF_TEN[-exponent] as number)
+}
+
 /**
  * Parse one cell the way pandas' C parser does.
  *
@@ -82,104 +214,28 @@ function isAsciiDigit(code: number): boolean {
  */
 export function parsePandasFloat(text: string): number | null {
   const length = text.length
-  let position = 0
+  let position = skipAsciiSpace(text, 0, length)
 
-  while (position < length && isAsciiSpace(text.charCodeAt(position))) position++
+  const sign = scanSign(text, position, length)
+  position = sign.position
 
-  let negative = false
-  const signCode = position < length ? text.charCodeAt(position) : 0
-  if (signCode === CHAR_MINUS) {
-    negative = true
-    position++
-  } else if (signCode === CHAR_PLUS) {
-    position++
-  }
+  const mantissa = scanFraction(text, length, scanIntegerDigits(text, position, length))
+  position = mantissa.position
+  if (mantissa.digits === 0) return null
 
-  let number = 0
-  let exponent = 0
-  let digits = 0
-  let decimals = 0
+  const number = sign.negative ? -mantissa.number : mantissa.number
 
-  while (position < length && isAsciiDigit(text.charCodeAt(position))) {
-    if (digits < MAX_DIGITS) {
-      number = number * 10 + (text.charCodeAt(position) - CHAR_ZERO)
-      digits++
-    } else {
-      // Digits past the significand only move the decimal point.
-      exponent++
-    }
-    position++
-  }
-
-  if (position < length && text.charCodeAt(position) === CHAR_DOT) {
-    position++
-    while (position < length && digits < MAX_DIGITS && isAsciiDigit(text.charCodeAt(position))) {
-      number = number * 10 + (text.charCodeAt(position) - CHAR_ZERO)
-      position++
-      digits++
-      decimals++
-    }
-    if (digits >= MAX_DIGITS) {
-      while (position < length && isAsciiDigit(text.charCodeAt(position))) position++
-    }
-    exponent -= decimals
-  }
-
-  if (digits === 0) return null
-
-  if (negative) number = -number
-
-  const exponentMarker = position < length ? text.charCodeAt(position) : 0
-  if (exponentMarker === CHAR_LOWER_E || exponentMarker === CHAR_UPPER_E) {
-    const markerPosition = position
-    position++
-    let negativeExponent = false
-    const exponentSign = position < length ? text.charCodeAt(position) : 0
-    if (exponentSign === CHAR_MINUS) {
-      negativeExponent = true
-      position++
-    } else if (exponentSign === CHAR_PLUS) {
-      position++
-    }
-    let exponentDigits = 0
-    let exponentValue = 0
-    while (position < length && isAsciiDigit(text.charCodeAt(position))) {
-      exponentValue = exponentValue * 10 + (text.charCodeAt(position) - CHAR_ZERO)
-      exponentDigits++
-      position++
-    }
-    exponent += negativeExponent ? -exponentValue : exponentValue
-    // "1e" with no digits: the tokenizer un-consumes the marker, which leaves
-    // trailing text behind and makes the whole cell non-numeric.
-    if (exponentDigits === 0) position = markerPosition
-  }
+  const sci = scanExplicitExponent(text, position, length)
+  position = sci.position
 
   // `skip_trailing = 1`: trailing whitespace is allowed, anything else is not.
-  while (position < length && isAsciiSpace(text.charCodeAt(position))) position++
+  position = skipAsciiSpace(text, position, length)
   if (position !== length) return null
-
-  if (exponent > 308) {
-    // Overflow: `number == 0 ? 0 : number < 0 ? -HUGE_VAL : HUGE_VAL`. A
-    // signed zero stays a real zero; a nonzero mantissa becomes ±Infinity.
-    number = number === 0 ? 0 : number < 0 ? Number.NEGATIVE_INFINITY : Number.POSITIVE_INFINITY
-  } else if (exponent > 0) {
-    number *= POWERS_OF_TEN[exponent] as number
-  } else if (exponent < -308) {
-    // Subnormal range: the tokenizer scales in two steps to stay in range.
-    if (exponent < -616) {
-      number = 0
-    } else {
-      number /= POWERS_OF_TEN[-308 - exponent] as number
-      number /= POWERS_OF_TEN[308] as number
-    }
-  } else {
-    number /= POWERS_OF_TEN[-exponent] as number
-  }
 
   // The scaled value itself is returned unchecked: `1.7e310` overflows at the
   // multiply and pandas accepts the resulting Infinity, just as it accepts the
   // `inf` spellings the caller handles separately.
-  return number
+  return scaleByPowerOfTen(number, mantissa.exponent + sci.value)
 }
 
 /**
