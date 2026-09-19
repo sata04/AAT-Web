@@ -33,6 +33,14 @@ The `--check` form runs in CI. If the vendored reference or a fixture changes
 without the goldens being regenerated, the build fails rather than silently
 comparing against stale expectations.
 
+**Generate goldens on x86_64.** NumPy's `arange` takes an FMA code path on
+ARM64 that it does not take on x86_64, so the G-quality window-size ladder can
+differ in the last bit between an Apple Silicon machine and CI (which runs
+x86_64). Goldens regenerated on arm64 therefore read as stale — or, if
+committed, *become* stale for everyone else. Regeneration belongs on CI's
+platform (or `x86_64` emulation); `--check` mismatches on arm64 alone are not
+evidence of a drifted fixture.
+
 ## The guarantee: bit equality, not tolerance
 
 The TypeScript engine reproduces the Python reference **bit-for-bit** for every
@@ -142,6 +150,9 @@ because they are load-bearing, not incidental:
 - Invalid numeric cells become **missing values**, never strings leaking into
   arithmetic downstream.
 - **±Infinity is missing**, not data. Admitting it poisons a whole channel.
+  Overflowing literals land in the same place: `1e400` parses to +Infinity —
+  pandas' tokenizer emits `HUGE_VAL` for `exponent > 308` rather than failing —
+  and is then excluded by the same incomplete-window rule.
 - **Incomplete windows cannot win** the minimum-standard-deviation search. A
   standard deviation is only defined over a fully observed window; allowing
   partial ones lets a window holding two valid samples win with std ≈ 0 while
@@ -196,7 +207,17 @@ alternative. It never silently truncates rows and never silently drops a sensor.
 This is the one place where the reference implementation is treated as carrying
 a bug rather than a specification.
 
-### 3. Encoding fallback uses the WHATWG decoder
+### 3. The CSV delimiter is sniffed, not fixed to `,`
+
+The desktop application is hard-wired to `pd.read_csv` with the default comma
+and reads a semicolon file as a single unanalysable column. The web parser
+(Papa Parse) sniffs `,`, `;`, `\t` and `|` from the header row, matching the
+files real instruments emit. Once a header is split the same way pandas would
+split it, every downstream rule — dtype inference, coercion, deduplication —
+behaves identically, so the widening cannot change the interpretation of a
+file the desktop app could already read.
+
+### 4. Encoding fallback uses the WHATWG decoder
 
 The desktop app retries with pandas' `cp932` codec. The browser has
 `TextDecoder('shift_jis')`, which implements the WHATWG Shift_JIS index and

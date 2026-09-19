@@ -121,7 +121,15 @@ export function matchLocation(location: string): RouteMatch {
       const wanted = expected[index] ?? ''
       const given = actual[index] ?? ''
       if (wanted.startsWith(':')) {
-        params[wanted.slice(1)] = decodeURIComponent(given)
+        // A malformed escape like `/runs/%` throws URIError out of
+        // decodeURIComponent — which, run inside a memo above every screen,
+        // takes the whole application down. Keep the raw segment: no pattern
+        // needs it decoded to match, and the API layer validates ids anyway.
+        try {
+          params[wanted.slice(1)] = decodeURIComponent(given)
+        } catch {
+          params[wanted.slice(1)] = given
+        }
         continue
       }
       if (wanted !== given) {

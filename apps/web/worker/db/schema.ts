@@ -251,6 +251,9 @@ export const registrationInvites = sqliteTable(
     uniqueIndex('registration_invites_token_hash_unique').on(table.tokenHash),
     index('registration_invites_status_idx').on(table.status, table.expiresAt),
     index('registration_invites_target_user_idx').on(table.targetUserId),
+    // Context resolution (`resolveRegistrationContext`) looks up by this hash on every
+    // registration ceremony; without an index that read scans the whole table.
+    index('registration_invites_claim_context_idx').on(table.claimContextHash),
   ],
 )
 
@@ -376,6 +379,13 @@ export const analysisRevisions = sqliteTable(
     revisionNumber: integer('revision_number').notNull(),
     sourceSha256: text('source_sha256').notNull(),
     configHash: text('config_hash').notNull(),
+    /**
+     * Hash of the CSV-column-to-sensor mapping — part of the analysis identity, because the
+     * columns ARE the data. NULL only on rows written before the field existed; those can
+     * never match a request's identity, which is the safe direction (a new revision is minted
+     * rather than a snapshot filed under a mapping it may not describe).
+     */
+    mappingHash: text('mapping_hash'),
     /** The full analysis configuration as canonical JSON, so a revision explains itself. */
     configJson: text('config_json').notNull(),
     engineVersion: text('engine_version').notNull(),
@@ -396,6 +406,7 @@ export const analysisRevisions = sqliteTable(
       table.sourceSha256,
       table.configHash,
       table.engineVersion,
+      table.mappingHash,
     ),
     index('revisions_run_created_idx').on(table.runId, table.createdAt),
     index('revisions_owner_created_idx').on(table.ownerUserId, table.createdAt),
@@ -549,6 +560,12 @@ export const cloudObjects = sqliteTable(
     analysisRevisionId: text('analysis_revision_id').references(() => analysisRevisions.id, {
       onDelete: 'cascade',
     }),
+    /**
+     * The quota reservation this object's bytes were charged through. Deletion reads it to decide
+     * which side of the ledger to release: NULL on rows committed before the column existed, and
+     * NULL means "committed under the old accounting" — those were always charged.
+     */
+    reservationId: text('reservation_id').references(() => quotaReservations.id),
     createdAt: integer('created_at', { mode: 'timestamp' }).notNull(),
     deletedAt: integer('deleted_at', { mode: 'timestamp' }),
   },

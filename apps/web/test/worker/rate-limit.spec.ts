@@ -61,4 +61,21 @@ describe('invitation redemption rate limit', () => {
     const allowed = await redeem(token)
     expect(allowed.status).toBe(200)
   })
+
+  it('does not honour x-forwarded-for as an identity', async () => {
+    // No cf-connecting-ip header (as in the test harness) → every request shares the 'unknown'
+    // bucket. A client that could mint a fresh identity per request would never be limited.
+    const statuses: number[] = []
+    for (let attempt = 0; attempt < 12; attempt++) {
+      const response = await apiFetch('/api/auth/aat/invitation/redeem', {
+        method: 'POST',
+        headers: { 'x-forwarded-for': `10.0.0.${attempt}` },
+        body: JSON.stringify({ token: `spoofed-${attempt}` }),
+      })
+      statuses.push(response.status)
+    }
+
+    expect(statuses.filter((status) => status === 400).length).toBe(10)
+    expect(statuses.filter((status) => status === 429).length).toBe(2)
+  })
 })

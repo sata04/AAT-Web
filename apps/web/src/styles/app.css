@@ -170,12 +170,29 @@ textarea {
 }
 
 .graph-area {
+  position: relative;
   display: flex;
   flex-direction: column;
   min-width: 0;
   min-height: 0;
   padding: var(--space-md);
   gap: var(--space-sm);
+}
+
+/* The same affordance as .dropzone--active, stretched over the existing
+   content rather than replacing it — the graph stays where it was. */
+.graph-area__drop-hint {
+  position: absolute;
+  inset: var(--space-sm);
+  display: grid;
+  place-items: center;
+  z-index: 15;
+  border: 1px dashed var(--accent);
+  border-radius: var(--radius-panel);
+  background: color-mix(in srgb, var(--bg-selected) 80%, transparent);
+  color: var(--text-primary);
+  font-weight: var(--weight-bold);
+  pointer-events: none;
 }
 
 .side-panel {
@@ -552,6 +569,17 @@ textarea {
   transition: width var(--transition);
 }
 
+/* Progress bar plus its abort control, kept on one thin row. */
+.analysis-progress {
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+}
+
+.analysis-progress .progress {
+  flex: 1 1 auto;
+}
+
 .notice {
   display: flex;
   align-items: flex-start;
@@ -780,6 +808,34 @@ textarea {
   overflow: hidden;
   clip-path: inset(50%);
   white-space: nowrap;
+}
+
+/* Present only on keyboard focus — the whole point is to skip the toolbar's
+   tab order, not to take up room in a dense panel. */
+.skip-link {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+.skip-link:focus-visible {
+  width: auto;
+  height: auto;
+  margin: 0;
+  padding: var(--space-xs) var(--space-sm);
+  clip-path: none;
+  z-index: 20;
+  position: absolute;
+  top: 0;
+  left: 0;
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  border: 1px solid var(--border-strong);
 }
 
 /*

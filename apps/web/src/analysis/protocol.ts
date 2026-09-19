@@ -63,7 +63,28 @@ export interface ReleaseRequest {
   sourceSha256: string
 }
 
-export type AnalysisWorkerRequest = OpenRequest | AnalyseRequest | ReleaseRequest
+/**
+ * Ask the worker to abandon requests that are still in flight.
+ *
+ * Cancellation is cooperative: the worker checks the set at stage boundaries
+ * and once per G-quality window, so a request stops as soon as the engine
+ * yields rather than midway through a window's arithmetic. Requests that have
+ * already finished (or have not been dequeued yet) are unaffected — a
+ * not-yet-started request reads the set at its first checkpoint and exits
+ * immediately.
+ */
+export interface CancelRequest {
+  type: 'cancel'
+  requestIds: string[]
+}
+
+/**
+ * Requests that carry a `requestId` and pair with exactly one response.
+ * `cancel` is deliberately excluded: it is fire-and-forget.
+ */
+export type AddressableRequest = OpenRequest | AnalyseRequest | ReleaseRequest
+
+export type AnalysisWorkerRequest = AddressableRequest | CancelRequest
 
 /** What `open` learned about the file, before any analysis. */
 export interface OpenedSource {

@@ -37,6 +37,7 @@ import {
   type RunSummary,
   updateRun,
 } from '../cloud/gateway.ts'
+import { type PosterStatus, posterLabel } from '../cloud/status.ts'
 import { Dialog } from '../components/Dialog.tsx'
 import { type MemoSaveOutcome, RunMemoEditor } from '../components/RunMemoEditor.tsx'
 import { RunPosterImage } from '../components/RunPosterImage.tsx'
@@ -104,6 +105,10 @@ export function RunDetailScreen(): React.JSX.Element {
   const [source, setSource] = useState<SourceState>({ kind: 'unknown' })
   const [notices, setNotices] = useState<readonly Notice[]>([])
   const [busy, setBusy] = useState(false)
+  // The renderer's queue position and progress for the auto poster. A render
+  // can poll for up to two minutes; without a status the only feedback is a
+  // disabled button.
+  const [autoPosterStatus, setAutoPosterStatus] = useState<PosterStatus>({ kind: 'unavailable' })
   const [confirmingDelete, setConfirmingDelete] = useState(false)
 
   const mounted = useRef(true)
@@ -162,16 +167,23 @@ export function RunDetailScreen(): React.JSX.Element {
 
   useEffect(() => {
     if (selectedRevisionId === null) return
+    // Two fetches race whenever the user switches revision quickly: without
+    // this flag the slower, older response would overwrite the newer metrics
+    // and posters and nothing would ever correct it.
+    let superseded = false
     setMetrics(null)
     setPosters([])
     void fetchRevision(selectedRevisionId).then((outcome) => {
-      if (!mounted.current || !outcome.ok) return
+      if (!mounted.current || superseded || !outcome.ok) return
       setMetrics(decodeRunMetrics(outcome.value.metrics))
     })
     void listPosters(selectedRevisionId).then((outcome) => {
-      if (!mounted.current || !outcome.ok) return
+      if (!mounted.current || superseded || !outcome.ok) return
       setPosters(outcome.value.posters)
     })
+    return () => {
+      superseded = true
+    }
   }, [selectedRevisionId])
 
   const selectedRevision = useMemo(
@@ -258,8 +270,8 @@ export function RunDetailScreen(): React.JSX.Element {
     setBusy(true)
     const outcome =
       posterId === null
-        ? await generateAutoPoster(context, () => {})
-        : await retryAutoPoster(context, posterId, () => {})
+        ? await generateAutoPoster(context, setAutoPosterStatus)
+        : await retryAutoPoster(context, posterId, setAutoPosterStatus)
     if (!mounted.current) return
     setBusy(false)
 
@@ -635,6 +647,9 @@ export function RunDetailScreen(): React.JSX.Element {
               </p>
             )}
             <RunReplayPanel
+              // A different revision is a different axis: the panel's selection
+              // and viewport belong to the snapshot it was drawn from.
+              key={replay.revisionId}
               replay={replay.replay}
               analysisRevisionId={selectedRevision.id}
               runCode={current.runCode}
@@ -703,6 +718,11 @@ export function RunDetailScreen(): React.JSX.Element {
             </button>
           ) : null}
         </div>
+        {autoPosterStatus.kind === 'queued' || autoPosterStatus.kind === 'rendering' ? (
+          <p className="panel__hint" role="status">
+            {posterLabel(autoPosterStatus).text}
+          </p>
+        ) : null}
 
         <h3 className="panel__title">カスタム</h3>
         {customPosters.length === 0 ? (

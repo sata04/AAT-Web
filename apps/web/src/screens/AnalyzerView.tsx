@@ -1,8 +1,8 @@
 import type { AnalysisConfig } from '@aat/shared'
-import type { Dispatch, SetStateAction } from 'react'
+import { type Dispatch, type SetStateAction, useRef, useState } from 'react'
 import type { ColumnMapping, OpenedSource } from '../analysis/protocol.ts'
 import type { Dataset } from '../app/dataset.ts'
-import { sensorModeFrom } from '../app/dataset.ts'
+import { openedSourceForDataset, sensorModeFrom } from '../app/dataset.ts'
 import type { RangeStatisticsResult } from '../app/range-statistics.ts'
 import { saveConfig } from '../app/settings.ts'
 import { clearCache } from '../cache/analysis-cache.ts'
@@ -11,7 +11,7 @@ import type { CloudStatuses } from '../cloud/status.ts'
 import { CloudStatusBar } from '../components/CloudStatusBar.tsx'
 import { ColumnSelectorDialog } from '../components/ColumnSelectorDialog.tsx'
 import { CommandBar } from '../components/CommandBar.tsx'
-import { FileDropZone } from '../components/FileDropZone.tsx'
+import { csvFilesFrom, FileDropZone } from '../components/FileDropZone.tsx'
 import { type NoticeItem, NoticeStack } from '../components/NoticeStack.tsx'
 import { RangeStatisticsPanel } from '../components/RangeStatisticsPanel.tsx'
 import { SettingsDialog } from '../components/SettingsDialog.tsx'
@@ -44,6 +44,8 @@ interface AnalyzerViewState {
   rangeResult: RangeStatisticsResult | null
   selectionEnabled: boolean
   statuses: CloudStatuses
+  /** Name of the file the cloud/poster lanes describe, or null when none has synced. */
+  cloudSubject: string | null
   notices: readonly NoticeItem[]
   posterContext: PosterContext | null
   posterUnavailableReason: string | null
@@ -59,6 +61,8 @@ interface AnalyzerPlotState {
   bounds: ChartViewport
   geometry: ChartGeometry | null
   canvas: HTMLCanvasElement | null
+  /** uPlot's `.u-over` element — where selection gestures actually listen. */
+  gestureLayer: HTMLElement | null
 }
 
 interface AnalyzerViewActions {
@@ -71,6 +75,7 @@ interface AnalyzerViewActions {
   setViewport: Dispatch<SetStateAction<ChartViewport | null>>
   setGeometry: Dispatch<SetStateAction<ChartGeometry | null>>
   setCanvas: Dispatch<SetStateAction<HTMLCanvasElement | null>>
+  setGestureLayer: Dispatch<SetStateAction<HTMLElement | null>>
   setSelection: Dispatch<SetStateAction<SelectionRange | null>>
   setActiveName: Dispatch<SetStateAction<string | null>>
   closeDataset: (dataset: Dataset) => void
@@ -82,8 +87,23 @@ interface AnalyzerViewActions {
   addCustomPoster: (poster: PosterFigure) => void
   notify: (tone: NoticeItem['tone'], text: string) => void
   setPendingColumns: Dispatch<SetStateAction<PendingColumnChoice | null>>
-  runAnalysis: (source: OpenedSource, mapping: ColumnMapping) => Promise<void>
+  /** Resolve the column dialog and continue any queued batch of files. */
+  confirmPendingColumns: (mapping: ColumnMapping) => void
+  cancelPendingColumns: () => void
+  runAnalysis: (
+    source: OpenedSource,
+    mapping: ColumnMapping,
+    configOverride?: AnalysisConfig,
+  ) => Promise<void>
   setSettingsOpen: Dispatch<SetStateAction<boolean>>
+  /**
+   * Apply a settings edit: persists it, and re-analyses open datasets when a
+   * number-changing key moved. Implemented by the screen, which owns the
+   * datasets and the worker client.
+   */
+  applyConfig: (next: AnalysisConfig) => void
+  /** Abort every in-flight worker request. */
+  cancelAnalysis: () => void
 }
 
 export interface AnalyzerViewProps {
@@ -144,10 +164,16 @@ function AnalyzerToolbar({ state, plot, actions }: AnalyzerViewProps): React.JSX
             className="button"
             disabled={plot.canvas === null}
             title={PNG_PARITY_NOTICE}
+            aria-describedby="png-parity-hint"
             onClick={() => void actions.exportPng()}
           >
             PNGを保存
           </button>
+          {/* A `title` tooltip never reaches touch or screen-reader users; the
+              parity caveat is worth one line of hidden text. */}
+          <span id="png-parity-hint" className="visually-hidden">
+            {PNG_PARITY_NOTICE}
+          </span>
           <button type="button" className="button button--flat" onClick={() => actions.setSettingsOpen(true)}>
             設定
           </button>
@@ -253,14 +279,58 @@ function FileOpenControl({ onFiles }: { onFiles: (files: File[]) => Promise<void
 
 function GraphArea({ state, plot, actions }: AnalyzerViewProps): React.JSX.Element {
   const running = state.statuses.analysis.kind === 'running' ? state.statuses.analysis : null
+  // Dropping is how the second file of a comparison arrives; the full-size
+  // dropzone only exists for the first file, so the graph itself answers a
+  // file drag once datasets are open.
+  const [dropping, setDropping] = useState(false)
+  const dropDepth = useRef(0)
+  const isFileDrag = (event: React.DragEvent) => event.dataTransfer.types.includes('Files')
   return (
-    <main className="graph-area">
+    <main
+      className="graph-area"
+      id="aat-graph"
+      tabIndex={-1}
+      onDragEnter={(event) => {
+        if (!isFileDrag(event)) return
+        event.preventDefault()
+        // Counted rather than toggled: child boundaries fire enter/leave pairs.
+        dropDepth.current += 1
+        setDropping(true)
+      }}
+      onDragOver={(event) => {
+        if (!isFileDrag(event)) return
+        event.preventDefault()
+        event.dataTransfer.dropEffect = 'copy'
+      }}
+      onDragLeave={() => {
+        dropDepth.current = Math.max(0, dropDepth.current - 1)
+        if (dropDepth.current === 0) setDropping(false)
+      }}
+      onDrop={(event) => {
+        if (!isFileDrag(event)) return
+        event.preventDefault()
+        dropDepth.current = 0
+        setDropping(false)
+        const files = csvFilesFrom(event.dataTransfer.files)
+        if (files.length > 0) void actions.openFiles(files)
+      }}
+    >
       <h1 className="visually-hidden">加速度データ解析</h1>
+      {dropping ? (
+        <div className="graph-area__drop-hint" aria-hidden="true">
+          CSVファイルをドロップして追加
+        </div>
+      ) : null}
       <NoticeStack notices={state.notices} onDismiss={actions.dismissNotice} />
       {running === null ? null : (
-        <progress className="progress" max={100} value={running.percent}>
-          {running.percent}%
-        </progress>
+        <div className="analysis-progress">
+          <progress className="progress" max={100} value={running.percent}>
+            {running.percent}%
+          </progress>
+          <button type="button" className="button button--flat" onClick={actions.cancelAnalysis}>
+            中止
+          </button>
+        </div>
       )}
       {state.datasets.length === 0 ? (
         <FileDropZone onFiles={(files) => void actions.openFiles(files)} disabled={false} />
@@ -273,6 +343,7 @@ function GraphArea({ state, plot, actions }: AnalyzerViewProps): React.JSX.Eleme
           bounds={plot.bounds}
           onGeometryChange={actions.setGeometry}
           onCanvasChange={actions.setCanvas}
+          onGestureLayerChange={actions.setGestureLayer}
           primaryDragReserved={state.selectionEnabled}
         >
           <SelectionOverlay
@@ -280,6 +351,7 @@ function GraphArea({ state, plot, actions }: AnalyzerViewProps): React.JSX.Eleme
             selection={state.selection}
             onSelectionChange={actions.setSelection}
             enabled={state.selectionEnabled}
+            gestureLayer={plot.gestureLayer}
           />
         </UPlotChart>
       )}
@@ -326,24 +398,11 @@ function DatasetPanel({ state, actions }: Pick<AnalyzerViewProps, 'state' | 'act
   )
 }
 
-function openedSourceFrom(dataset: Dataset): OpenedSource {
-  return {
-    sourceSha256: dataset.sourceSha256,
-    filename: dataset.filename,
-    encoding: dataset.encoding,
-    columnNames: [...dataset.columnNames],
-    detected: { time: [], acceleration: [] },
-    rowCount: dataset.sampleCount,
-    suggestedMapping: dataset.mapping,
-    ambiguity: null,
-  }
-}
-
 function FileInfoPanel({ state, actions }: Pick<AnalyzerViewProps, 'state' | 'actions'>): React.JSX.Element {
   const editColumns = () => {
     if (state.active === null) return
     actions.setPendingColumns({
-      source: openedSourceFrom(state.active),
+      source: openedSourceForDataset(state.active),
       initial: state.active.mapping,
       reason: undefined,
     })
@@ -401,7 +460,7 @@ function AnalyzerSidebar({
       : [state.active]
   const posterStatus = state.posterContext === null ? { kind: 'unavailable' as const } : state.statuses.poster
   return (
-    <aside className="side-panel">
+    <aside className="side-panel" aria-label="データセットと統計">
       <DatasetPanel state={state} actions={actions} />
       <StatisticsPanel datasets={statisticsDatasets} mode={state.mode} />
       <RangeStatisticsPanel
@@ -416,10 +475,14 @@ function AnalyzerSidebar({
         status={posterStatus}
         selection={state.selectionEnabled ? state.selection : null}
         selectionEnabled={state.selectionEnabled}
+        // ylim is display framing, not numeric provenance: it is outside `configHash`, so a
+        // dataset's numbers never depend on it, and the poster should match the graph the user
+        // is looking at now — read the live config, not the dataset's producing one.
         yRange={{ min: state.config.ylim_min, max: state.config.ylim_max }}
         onRetryAuto={actions.retryPoster}
         customPosters={state.activeCustomPosters}
         onCustomCreated={actions.addCustomPoster}
+        onCustomFailed={(message) => actions.notify('error', message)}
       />
       <FileInfoPanel state={state} actions={actions} />
     </aside>
@@ -431,16 +494,8 @@ function AnalyzerDialogs({
   actions,
 }: Pick<AnalyzerViewProps, 'state' | 'actions'>): React.JSX.Element {
   const applySettings = (next: AnalysisConfig) => {
-    actions.setConfig(next)
-    if (!saveConfig(next))
-      actions.notify('warning', '設定をブラウザに保存できませんでした。今回のセッションのみ有効です。')
-    actions.setSettingsOpen(false)
-  }
-  const confirmColumns = (mapping: ColumnMapping) => {
-    if (state.pendingColumns === null) return
-    const source = state.pendingColumns.source
-    actions.setPendingColumns(null)
-    void actions.runAnalysis(source, mapping)
+    // Save + possible re-analysis are the screen's business; see applyConfig.
+    actions.applyConfig(next)
   }
   return (
     <>
@@ -449,8 +504,8 @@ function AnalyzerDialogs({
           source={state.pendingColumns.source}
           initial={state.pendingColumns.initial}
           reason={state.pendingColumns.reason}
-          onCancel={() => actions.setPendingColumns(null)}
-          onConfirm={confirmColumns}
+          onCancel={actions.cancelPendingColumns}
+          onConfirm={actions.confirmPendingColumns}
         />
       )}
       {state.settingsOpen ? (
@@ -477,6 +532,11 @@ export function AnalyzerView(props: AnalyzerViewProps): React.JSX.Element {
   const viewProps = { ...props, actions: { ...actions, addCustomPoster } }
   return (
     <div className="app">
+      {/* The toolbar is the whole tab order before the graph; one jump past it
+          is the entire reason for the link. */}
+      <a className="skip-link" href="#aat-graph">
+        グラフへ移動
+      </a>
       <AnalyzerToolbar {...viewProps} />
       <div className={hasDatasets ? 'workspace' : 'workspace workspace--single'}>
         <GraphArea {...viewProps} />
@@ -484,6 +544,8 @@ export function AnalyzerView(props: AnalyzerViewProps): React.JSX.Element {
       </div>
       <CloudStatusBar
         statuses={state.statuses}
+        cloudSubject={state.cloudSubject}
+        activeName={state.activeName}
         onRetrySync={actions.retrySync}
         onRetryPoster={actions.retryPoster}
       />

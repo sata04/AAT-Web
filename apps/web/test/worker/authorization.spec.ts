@@ -431,6 +431,9 @@ describe('what a Researcher still cannot do to a colleague’s work', () => {
       body: JSON.stringify({
         sourceSha256: 'c'.repeat(64),
         configHash: 'd'.repeat(64),
+        // A complete body on purpose: the assertion is about *ownership*, not validation — a
+        // malformed request would 400 before the colleague's run is ever looked up.
+        mappingHash: 'e'.repeat(64),
         config: {},
         engineVersion: '1.0.0',
         snapshotFormatVersion: 1,

@@ -63,6 +63,10 @@ export class ExportClient {
     worker.addEventListener('error', (event) => {
       for (const [, request] of this.pending) request.reject(new Error(event.message))
       this.pending.clear()
+      // A failed worker is discarded so the next export spawns a fresh one
+      // instead of posting into the void and hanging forever.
+      worker.terminate()
+      if (this.worker === worker) this.worker = null
     })
     this.worker = worker
     return worker
@@ -75,13 +79,20 @@ export class ExportClient {
     return new Promise<ExportResult>((resolve, reject) => {
       this.pending.set(requestId, { resolve, reject })
       const request: ExportRequest = { requestId, format, input }
-      worker.postMessage(request)
+      try {
+        worker.postMessage(request)
+      } catch (error) {
+        this.pending.delete(requestId)
+        reject(error instanceof Error ? error : new Error(String(error)))
+      }
     })
   }
 
   dispose(): void {
     this.worker?.terminate()
     this.worker = null
+    const error = new DOMException('The export client was disposed.', 'AbortError')
+    for (const [, request] of this.pending) request.reject(error)
     this.pending.clear()
   }
 }

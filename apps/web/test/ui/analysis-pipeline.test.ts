@@ -53,7 +53,7 @@ function syntheticCsv(): Uint8Array {
   return new TextEncoder().encode(`${rows.join('\n')}\n`)
 }
 
-function runPipeline(config = DEFAULT_ANALYSIS_CONFIG, mapping = MAPPING) {
+async function runPipeline(config = DEFAULT_ANALYSIS_CONFIG, mapping = MAPPING) {
   const { text, encoding } = decodeCsv(syntheticCsv())
   const table = parseCsvText(text)
   const detected = detectColumns(table)
@@ -65,7 +65,7 @@ function runPipeline(config = DEFAULT_ANALYSIS_CONFIG, mapping = MAPPING) {
     inner: calculateStatistics(filtered.inner.gravity, filtered.inner.time, statisticsConfig),
     drag: calculateStatistics(filtered.drag.gravity, filtered.drag.time, statisticsConfig),
   }
-  const gQuality = calculateGQuality(filtered, engineConfig)
+  const gQuality = await calculateGQuality(filtered, engineConfig)
   return { encoding, table, detected, loaded, filtered, statistics, gQuality }
 }
 
@@ -102,8 +102,8 @@ describe('toEngineConfig', () => {
 })
 
 describe('the pipeline the worker runs', () => {
-  it('produces both sensors, filtered to the microgravity segment', () => {
-    const result = runPipeline()
+  it('produces both sensors, filtered to the microgravity segment', async () => {
+    const result = await runPipeline()
     expect(result.encoding).toBe('utf-8')
     expect(result.filtered.inner.gravity.length).toBeGreaterThan(1000)
     expect(result.filtered.drag.gravity.length).toBeGreaterThan(1000)
@@ -111,36 +111,33 @@ describe('the pipeline the worker runs', () => {
     expect(result.filtered.inner.time[0]).toBeCloseTo(0, 9)
   })
 
-  it('finds a quiet minimum-standard-deviation window on both sensors', () => {
-    const { statistics } = runPipeline()
+  it('finds a quiet minimum-standard-deviation window on both sensors', async () => {
+    const { statistics } = await runPipeline()
     expect(statistics.inner.std as number).toBeLessThan(0.001)
     expect(statistics.drag.std as number).toBeLessThan(0.001)
     expect(statistics.inner.startTime).not.toBeNull()
   })
 
-  it('sweeps G-quality across the configured ladder', () => {
-    const { gQuality } = runPipeline()
+  it('sweeps G-quality across the configured ladder', async () => {
+    const { gQuality } = await runPipeline()
     // 0.1 to 1.0 in steps of 0.05 — nineteen window sizes.
     expect(gQuality.rows).toHaveLength(19)
     expect(gQuality.rows[0]?.windowSize).toBeCloseTo(0.1, 12)
     expect(gQuality.rows.at(-1)?.windowSize).toBeCloseTo(1.0, 12)
   })
 
-  it('inverts the Inner Capsule so both sensors agree in sign', () => {
-    const { statistics } = runPipeline()
+  it('inverts the Inner Capsule so both sensors agree in sign', async () => {
+    const { statistics } = await runPipeline()
     // Without the inversion the Inner Capsule's release phase would read as -1 G
     // while the Drag Shield read +1 G, and the filter would never terminate.
     expect(statistics.inner.mean as number).toBeGreaterThanOrEqual(0)
     expect(statistics.drag.mean as number).toBeGreaterThanOrEqual(0)
   })
 
-  it('raises ColumnNotFoundError with the candidates the dialog needs', () => {
-    let thrown: unknown = null
-    try {
-      runPipeline(DEFAULT_ANALYSIS_CONFIG, { ...MAPPING, timeColumn: 'nope' })
-    } catch (error) {
-      thrown = error
-    }
+  it('raises ColumnNotFoundError with the candidates the dialog needs', async () => {
+    const thrown = await runPipeline(DEFAULT_ANALYSIS_CONFIG, { ...MAPPING, timeColumn: 'nope' }).catch(
+      (error: unknown) => error,
+    )
     expect(thrown).toBeInstanceOf(ColumnNotFoundError)
     const error = thrown as ColumnNotFoundError
     expect(error.missingColumns).toEqual(['nope'])
@@ -150,8 +147,8 @@ describe('the pipeline the worker runs', () => {
 })
 
 describe('column proposal', () => {
-  it('accepts the canonical three-column layout without asking', () => {
-    const { detected } = runPipeline()
+  it('accepts the canonical three-column layout without asking', async () => {
+    const { detected } = await runPipeline()
     const proposal = proposeMapping(detected)
     expect(proposal.ambiguity).toBeNull()
     expect(proposal.mapping).toEqual(MAPPING)

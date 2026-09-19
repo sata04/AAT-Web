@@ -9,7 +9,7 @@
  * when the result is which window wins a minimum-standard-deviation search.
  */
 
-import { describe, expect, it } from 'vitest'
+import { beforeAll, describe, expect, it } from 'vitest'
 import { analyseCsv } from '../src/analysis.ts'
 import { detectColumns } from '../src/columns.ts'
 import { analysisConfigFromRecord } from '../src/config.ts'
@@ -68,20 +68,23 @@ function expectScalar(actual: number | null, expected: GoldenScalar, label: stri
 }
 
 /** Run every stage once per fixture; each `it` then asserts one aspect of it. */
-function runFixture(golden: GoldenRecord) {
+async function runFixture(golden: GoldenRecord) {
   const bytes = loadFixtureBytes(golden.csv)
   const decoded = decodeCsv(bytes)
   const table = parseCsvText(decoded.text)
   const config = analysisConfigFromRecord(golden.config)
   const loaded = loadAndProcessData(table, config)
   const filtered = filterData(loaded, config)
-  const gQuality = calculateGQuality(filtered, config)
+  const gQuality = await calculateGQuality(filtered, config)
   return { decoded, table, config, detected: detectColumns(table), loaded, filtered, gQuality }
 }
 
 describe.each(index.fixtures.map((fixture) => fixture.name))('%s', (name) => {
   const golden = loadGolden(name)
-  const actual = runFixture(golden)
+  let actual: Awaited<ReturnType<typeof runFixture>>
+  beforeAll(async () => {
+    actual = await runFixture(golden)
+  })
 
   it('decodes with the encoding the reference used', () => {
     // The oracle records pandas' codec name; cp932 is read by the WHATWG
@@ -156,10 +159,10 @@ describe.each(index.fixtures.map((fixture) => fixture.name))('%s', (name) => {
 describe('analyseCsv', () => {
   const representative = ['normal_two_sensor_utf8', 'japanese_headers_cp932', 'inner_only', 'short_data']
 
-  it.each(representative)('reproduces the staged pipeline for %s', (name) => {
+  it.each(representative)('reproduces the staged pipeline for %s', async (name) => {
     const golden = loadGolden(name)
     const config = analysisConfigFromRecord(golden.config)
-    const result = analyseCsv(loadFixtureBytes(golden.csv), config)
+    const result = await analyseCsv(loadFixtureBytes(golden.csv), config)
 
     expect(result.detectedColumns.time).toEqual(golden.detectedColumns.time)
     expect(result.filtered.inner.gravity.length).toBe(golden.filter.innerLength)
@@ -182,11 +185,11 @@ describe('analyseCsv', () => {
     )
   })
 
-  it('can skip the sweep without touching anything else', () => {
+  it('can skip the sweep without touching anything else', async () => {
     const golden = loadGolden('normal_two_sensor_utf8')
     const config = analysisConfigFromRecord(golden.config)
     const bytes = loadFixtureBytes(golden.csv)
-    const skipped = analyseCsv(bytes, config, { skipGQuality: true })
+    const skipped = await analyseCsv(bytes, config, { skipGQuality: true })
     expect(skipped.gQuality.rows).toEqual([])
     expect(skipped.filtered.inner.gravity.length).toBe(golden.filter.innerLength)
   })

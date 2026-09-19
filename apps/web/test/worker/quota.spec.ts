@@ -9,10 +9,11 @@
  */
 
 import { env } from 'cloudflare:test'
-import { and, eq } from 'drizzle-orm'
+import { and, eq, isNull } from 'drizzle-orm'
 import { describe, expect, it } from 'vitest'
 import { cloudObjects, quotaReservations, quotaUsage } from '../../worker/db/schema.ts'
 import { newId } from '../../worker/lib/ids.ts'
+import { finaliseReservation, sweepStaleReservations } from '../../worker/services/quota.ts'
 import { apiFetch, createRevision, createRun, createUser, db, type TestUser } from './helpers/client.ts'
 import { buildSnapshot, encodeForUpload } from './helpers/snapshot.ts'
 
@@ -79,6 +80,31 @@ async function uploadSnapshot(
 async function snapshotSize(): Promise<number> {
   const encoded = await encodeForUpload(buildSnapshot({ sourceSha256: SOURCE_SHA, configHash: CONFIG_HASH }))
   return encoded.bytes.length
+}
+
+/** SHA-256 hex of `bytes`, the way the upload endpoints demand it. */
+async function sha256Hex(bytes: Uint8Array): Promise<string> {
+  const digest = await crypto.subtle.digest('SHA-256', bytes as BufferSource)
+  return [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, '0')).join('')
+}
+
+/** PUT /api/v1/runs/:runId/source — the opt-in raw-CSV backup path. */
+async function uploadSource(user: TestUser, runId: string, bytes: Uint8Array): Promise<Response> {
+  const query = new URLSearchParams({
+    declaredBytes: String(bytes.length),
+    sha256: await sha256Hex(bytes),
+    filename: 'src.csv',
+  })
+  return apiFetch(`/api/v1/runs/${runId}/source?${query}`, {
+    method: 'PUT',
+    cookie: user.cookie,
+    headers: {
+      'content-type': 'text/csv',
+      // The backup is opt-in: the upload is refused without the explicit request marker.
+      'x-aat-source-backup': 'requested-by-user',
+    },
+    body: bytes as BodyInit,
+  })
 }
 
 describe('snapshot upload', () => {
@@ -272,5 +298,260 @@ describe('quota enforcement', () => {
 
     const quota = await quotaOf(user)
     expect(quota.bytesReserved).toBe(0)
+  })
+
+  it('releases quota exactly once when two source deletes race', async () => {
+    const user = await createUser()
+    const runId = await createRun(user)
+    const revisionId = await createRevision(user, runId)
+
+    // A snapshot alongside the source: if a racing delete subtracted the source's bytes twice,
+    // this is the usage figure it would eat into — the clamp at zero would hide a single
+    // over-release but cannot hide one that consumes a second object's accounting.
+    const { size } = await uploadSnapshot(user, revisionId)
+    expect(size).toBeGreaterThan(8)
+
+    const sourceBytes = new TextEncoder().encode('a,b\n1,2\n')
+    const uploaded = await uploadSource(user, runId, sourceBytes)
+    expect(uploaded.status).toBe(201)
+    expect((await quotaOf(user)).bytesUsed).toBe(size + sourceBytes.length)
+
+    const [a, b] = await Promise.all([
+      apiFetch(`/api/v1/runs/${runId}/source`, { method: 'DELETE', cookie: user.cookie }),
+      apiFetch(`/api/v1/runs/${runId}/source`, { method: 'DELETE', cookie: user.cookie }),
+    ])
+    expect([a.status, b.status]).toEqual([200, 200])
+
+    // The tombstone is the claim: exactly one delete owns the transition, so the reported count
+    // is the truth and the bytes are subtracted once — not once per request.
+    const deletedCounts = [
+      ((await a.json()) as { objectsDeleted: number }).objectsDeleted,
+      ((await b.json()) as { objectsDeleted: number }).objectsDeleted,
+    ]
+    expect(deletedCounts.reduce((sum, count) => sum + count, 0)).toBe(1)
+
+    const quota = await quotaOf(user)
+    expect(quota.bytesUsed).toBe(size)
+    expect(quota.objectCount).toBe(1)
+  })
+
+  it('does not release usage for an object whose reservation the sweeper already claimed', async () => {
+    const user = await createUser()
+    const runId = await createRun(user)
+    const revisionId = await createRevision(user, runId)
+
+    // The charged baseline lives under a second run so it survives the delete: without it a
+    // wrongful release is invisible because bytesUsed clamps at zero.
+    const survivorRunId = await createRun(user, '260812a_data.csv')
+    const survivorRevisionId = await createRevision(user, survivorRunId)
+    const { size } = await uploadSnapshot(user, survivorRevisionId)
+    expect((await quotaOf(user)).bytesUsed).toBe(size)
+
+    // An upload that got as far as inserting its object row but whose reservation lapsed before
+    // commit: the sweeper releases the reservation — and leaves the row when the row claims the
+    // key — so the object sits there never having charged usage.
+    const key = `snapshots/${user.userId}/${runId}/${newId()}.json`
+    const reservationId = newId()
+    await db()
+      .insert(quotaReservations)
+      .values({
+        id: reservationId,
+        userId: user.userId,
+        bytes: 256,
+        purpose: 'snapshot',
+        r2Key: key,
+        status: 'pending',
+        createdAt: new Date(0),
+        expiresAt: new Date(0),
+      })
+    await db()
+      .insert(cloudObjects)
+      .values({
+        id: newId(),
+        ownerUserId: user.userId,
+        kind: 'snapshot',
+        r2Key: key,
+        byteSize: 256,
+        sha256: 'c'.repeat(64),
+        contentType: 'application/json',
+        runId,
+        analysisRevisionId: revisionId,
+        reservationId,
+        createdAt: new Date(),
+      })
+    const sweep = await sweepStaleReservations(db(), env.AAT_OBJECTS)
+    expect(sweep.reservationsReleased).toBe(1)
+
+    const deleted = await apiFetch(`/api/v1/runs/${runId}`, { method: 'DELETE', cookie: user.cookie })
+    expect(deleted.status).toBe(200)
+
+    // The swept reservation charged nothing, so the delete must subtract nothing — releasing
+    // usage here would take quota away from the surviving run's snapshot.
+    const quota = await quotaOf(user)
+    expect(quota.bytesUsed).toBe(size)
+    expect(quota.bytesReserved).toBe(0)
+  })
+
+  it('releases the reservation — not usage — for an object deleted mid-upload', async () => {
+    const user = await createUser()
+    const runId = await createRun(user)
+    const revisionId = await createRevision(user, runId)
+
+    // As above: a committed upload under another run keeps the ledger non-zero so a release from
+    // the wrong side of it cannot hide behind the clamp.
+    const survivorRunId = await createRun(user, '260812a_data.csv')
+    const survivorRevisionId = await createRevision(user, survivorRunId)
+    const { size } = await uploadSnapshot(user, survivorRevisionId)
+
+    // The same mid-flight shape, but with the reservation still live: the deleter reaches it
+    // before the sweeper does.
+    const key = `snapshots/${user.userId}/${runId}/${newId()}.json`
+    const reservationId = newId()
+    await db()
+      .insert(quotaReservations)
+      .values({
+        id: reservationId,
+        userId: user.userId,
+        bytes: 256,
+        purpose: 'snapshot',
+        r2Key: key,
+        status: 'pending',
+        createdAt: new Date(),
+        expiresAt: new Date(Date.now() + 60_000),
+      })
+    await db()
+      .insert(cloudObjects)
+      .values({
+        id: newId(),
+        ownerUserId: user.userId,
+        kind: 'snapshot',
+        r2Key: key,
+        byteSize: 256,
+        sha256: 'd'.repeat(64),
+        contentType: 'application/json',
+        runId,
+        analysisRevisionId: revisionId,
+        reservationId,
+        createdAt: new Date(),
+      })
+    await db()
+      .update(quotaUsage)
+      .set({ bytesReserved: 256, updatedAt: new Date() })
+      .where(eq(quotaUsage.userId, user.userId))
+
+    const deleted = await apiFetch(`/api/v1/runs/${runId}`, { method: 'DELETE', cookie: user.cookie })
+    expect(deleted.status).toBe(200)
+
+    const quota = await quotaOf(user)
+    expect(quota.bytesUsed).toBe(size)
+    expect(quota.bytesReserved).toBe(0)
+  })
+
+  it('lets a retried run delete finish cleaning up a tombstoned run', async () => {
+    const user = await createUser()
+    const runId = await createRun(user)
+    const revisionId = await createRevision(user, runId)
+    await uploadSnapshot(user, revisionId)
+
+    const first = await apiFetch(`/api/v1/runs/${runId}`, { method: 'DELETE', cookie: user.cookie })
+    expect(first.status).toBe(200)
+
+    // A delete that failed partway through its object walk lands here: the run is already
+    // tombstoned, and without admission the retry would 404 while its objects stay charged.
+    const retried = await apiFetch(`/api/v1/runs/${runId}`, { method: 'DELETE', cookie: user.cookie })
+    expect(retried.status).toBe(200)
+    const quota = await quotaOf(user)
+    expect(quota.bytesUsed).toBe(0)
+    expect(quota.objectCount).toBe(0)
+  })
+
+  it('uncharges a settlement whose reservation was already claimed', async () => {
+    const user = await createUser()
+    const runId = await createRun(user)
+    const revisionId = await createRevision(user, runId)
+    const { size } = await uploadSnapshot(user, revisionId)
+
+    // Settle a reservation the sweeper already claimed: the charge lands, the pending→finalised
+    // claim fails, and the unwind must restore the account exactly — reserved column included,
+    // because the sweeper subtracted it as well.
+    const reservationId = newId()
+    const key = `snapshots/${user.userId}/${runId}/${newId()}.json`
+    await db()
+      .insert(quotaReservations)
+      .values({
+        id: reservationId,
+        userId: user.userId,
+        bytes: 256,
+        purpose: 'snapshot',
+        r2Key: key,
+        status: 'pending',
+        createdAt: new Date(0),
+        expiresAt: new Date(0),
+      })
+    await db()
+      .update(quotaUsage)
+      .set({ bytesReserved: 256, updatedAt: new Date() })
+      .where(eq(quotaUsage.userId, user.userId))
+    await sweepStaleReservations(db(), env.AAT_OBJECTS)
+
+    const settled = await finaliseReservation(
+      db(),
+      { id: reservationId, bytes: 256, purpose: 'snapshot', r2Key: key },
+      256,
+      user.userId,
+      new Date(),
+    )
+    expect(settled).toBe(false)
+
+    const quota = await quotaOf(user)
+    expect(quota.bytesUsed).toBe(size)
+    expect(quota.bytesReserved).toBe(0)
+    expect(quota.objectCount).toBe(1)
+  })
+
+  it('never orphans a committed object when its run is deleted mid-upload', async () => {
+    const user = await createUser()
+    const runId = await createRun(user)
+    const revisionId = await createRevision(user, runId)
+    const encoded = await encodeForUpload(
+      buildSnapshot({ sourceSha256: SOURCE_SHA, configHash: CONFIG_HASH }),
+    )
+
+    // Race the upload's commit against the run's delete. Which one lands first is timing, not
+    // contract — the contract is what must hold afterwards either way.
+    const query = new URLSearchParams({
+      declaredBytes: String(encoded.bytes.length),
+      sha256: encoded.sha256,
+      format: 'json',
+    })
+    const upload = apiFetch(`/api/v1/revisions/${revisionId}/snapshot?${query}`, {
+      method: 'PUT',
+      cookie: user.cookie,
+      headers: { 'content-type': 'application/json' },
+      body: encoded.bytes as BodyInit,
+    })
+    const deleted = await apiFetch(`/api/v1/runs/${runId}`, { method: 'DELETE', cookie: user.cookie })
+    const response = await upload
+
+    expect(deleted.status).toBe(200)
+    // 404: the delete won and the upload unwound itself. 201: the commit landed inside the
+    // delete's object walk and the delete reclaimed it. Both answers are honest.
+    expect([201, 404]).toContain(response.status)
+
+    // Whatever the order, the ledger agrees with reality: no live row, no bytes without one,
+    // no charge for storage that is gone. (R2 is shared across the file, so the check is scoped
+    // to this user's key prefix.)
+    const live = await db()
+      .select()
+      .from(cloudObjects)
+      .where(and(eq(cloudObjects.ownerUserId, user.userId), isNull(cloudObjects.deletedAt)))
+    expect(live).toHaveLength(0)
+    const stored = await env.AAT_OBJECTS.list({ prefix: `snapshots/${user.userId}/` })
+    expect(stored.objects).toHaveLength(0)
+
+    const quota = await quotaOf(user)
+    expect(quota.bytesUsed).toBe(0)
+    expect(quota.bytesReserved).toBe(0)
+    expect(quota.objectCount).toBe(0)
   })
 })

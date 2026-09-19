@@ -58,7 +58,7 @@ import {
   renderViaContainer,
   takeOverStaleRender,
 } from '../services/poster.ts'
-import { ensureQuotaRow, finaliseReservation, releaseReservation, reserveQuota } from '../services/quota.ts'
+import { commitUploadedObject, ensureQuotaRow, releaseReservation, reserveQuota } from '../services/quota.ts'
 import { consumeRateLimit, RATE_LIMITS, rateLimitKey } from '../services/rate-limit.ts'
 import { posterKey, streamObject } from '../services/storage.ts'
 
@@ -170,9 +170,17 @@ async function performRender(
         originalFilename: null,
         runId: revision.runId,
         analysisRevisionId: revision.id,
+        reservationId: reservation.id,
         createdAt: now,
       })
-      await finaliseReservation(db, reservation, actualBytes, ownerUserId, now)
+      await commitUploadedObject(
+        db,
+        context.env.AAT_OBJECTS,
+        { id: objectId, r2Key: key, ownerUserId, byteSize: actualBytes },
+        reservation,
+        revision.runId,
+        now,
+      )
       await markRendered(db, figureId, objectId, outcome.rendererVersion, now)
 
       await writeAuditLog(db, {
@@ -279,12 +287,18 @@ posterRoutes.post(
       }
 
       // Capacity is checked BEFORE the claim, never after: a check that ran afterwards would count
-      // the row this request had just moved into `rendering` and refuse its own work.
+      // the row this request had just moved into `rendering` and refuse its own work. The claim
+      // itself repeats the check inside its UPDATE — that is the one that holds under concurrency.
       await assertRenderCapacity(db, config.maxConcurrentRenders, config.renderStaleSeconds, now)
 
+      const claimOptions = {
+        maxConcurrent: config.maxConcurrentRenders,
+        staleSeconds: config.renderStaleSeconds,
+        spec: { specHash: hash, presetVersion: spec.posterPresetVersion },
+      }
       const claimed = isStale
-        ? await takeOverStaleRender(db, existing.id, config.renderStaleSeconds, now)
-        : await claimForRender(db, existing.id, ['queued'], now)
+        ? await takeOverStaleRender(db, existing.id, claimOptions, now)
+        : await claimForRender(db, existing.id, ['queued'], claimOptions, now)
       if (!claimed) {
         // Another request claimed it in between. There is exactly one render, and it is theirs.
         const [fresh] = await db
@@ -298,7 +312,12 @@ posterRoutes.post(
     }
 
     await assertRenderCapacity(db, config.maxConcurrentRenders, config.renderStaleSeconds, now)
-    if (!(await claimForRender(db, figureId, ['queued'], now))) {
+    const claimed = await claimForRender(db, figureId, ['queued'], {
+      maxConcurrent: config.maxConcurrentRenders,
+      staleSeconds: config.renderStaleSeconds,
+      spec: { specHash: hash, presetVersion: spec.posterPresetVersion },
+    })
+    if (!claimed) {
       const [fresh] = await db.select().from(posterFigures).where(eq(posterFigures.id, figureId)).limit(1)
       if (fresh) return context.json({ poster: figureResponse(fresh), created: false })
       throw new ApiError('POSTER_BUSY', { details: { reason: 'already_claimed' } })
@@ -327,6 +346,7 @@ posterRoutes.post(
     await assertRenderCapacity(db, config.maxConcurrentRenders, config.renderStaleSeconds, now)
 
     const figureId = newId()
+    const hash = await specHash(spec)
     await db.insert(posterFigures).values({
       id: figureId,
       analysisRevisionId: revision.id,
@@ -334,14 +354,18 @@ posterRoutes.post(
       kind: 'custom',
       presetKey: 'aat-poster',
       presetVersion: spec.posterPresetVersion,
-      specHash: await specHash(spec),
+      specHash: hash,
       status: 'queued',
       attemptCount: 0,
       createdAt: now,
       updatedAt: now,
     })
 
-    if (!(await claimForRender(db, figureId, ['queued'], now))) {
+    const claimed = await claimForRender(db, figureId, ['queued'], {
+      maxConcurrent: config.maxConcurrentRenders,
+      staleSeconds: config.renderStaleSeconds,
+    })
+    if (!claimed) {
       throw new ApiError('POSTER_BUSY', { details: { reason: 'already_claimed' } })
     }
     return performRender(context, figureId, spec, revision)
@@ -383,8 +407,15 @@ posterRoutes.post(
     await assertRenderCapacity(db, config.maxConcurrentRenders, config.renderStaleSeconds, now)
 
     // Only a failed or queued figure may be retried, and only by the caller that wins this
-    // transition — so a user hammering "retry" starts one render, not five.
-    if (!(await claimForRender(db, figure.id, ['failed', 'queued'], now))) {
+    // transition — so a user hammering "retry" starts one render, not five. The retry's spec is
+    // the caller's, not necessarily the one the figure was created with, so the claim writes its
+    // hash onto the row: `specHash` must always describe the render that produced the PNG.
+    const claimed = await claimForRender(db, figure.id, ['failed', 'queued'], {
+      maxConcurrent: config.maxConcurrentRenders,
+      staleSeconds: config.renderStaleSeconds,
+      spec: { specHash: await specHash(spec), presetVersion: spec.posterPresetVersion },
+    })
+    if (!claimed) {
       throw new ApiError('POSTER_BUSY', { details: { reason: 'not_retryable' } })
     }
 

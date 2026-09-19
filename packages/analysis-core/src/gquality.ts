@@ -15,7 +15,12 @@
 
 import type { AnalysisConfig } from './config.ts'
 import type { FilterResult } from './pipeline.ts'
-import { AnalysisSizeError, calculateStatistics, windowSampleCount } from './statistics.ts'
+import {
+  AnalysisParameterError,
+  AnalysisSizeError,
+  calculateStatistics,
+  windowSampleCount,
+} from './statistics.ts'
 import { type AnalysisWarning, warning } from './warnings.ts'
 
 export interface GQualityRow {
@@ -44,6 +49,22 @@ export interface GQualityResult {
   warnings: AnalysisWarning[]
 }
 
+export interface GQualityOptions {
+  /** Called after each window size, matching the desktop progress signal. */
+  onProgress?: (progress: GQualityProgress) => void
+  /**
+   * Awaited once per window size, before that window's work starts.
+   *
+   * A synchronous loop cannot be interrupted: a `cancel` message sits in the
+   * worker's queue until the function suspends on a *macrotask*, and a promise
+   * that resolves immediately is still only a microtask. The caller passes a
+   * checkpoint that yields to the event loop and then throws
+   * `AnalysisCancelledError` when its request has been cancelled — which is
+   * also why this function is async.
+   */
+  checkpoint?: () => void | Promise<void>
+}
+
 /**
  * `np.arange(start, end + tolerance, step)`, filtered to `<= end + tolerance`
  * and clamped to `end`.
@@ -54,9 +75,24 @@ export interface GQualityResult {
  * differs from the reference at the third element onward.
  */
 export function gQualityWindowSizes(start: number, end: number, step: number): Float64Array {
+  // A non-positive step allocates `Float64Array(Infinity)` below and crashes
+  // with a bare RangeError; fail with the declared code instead.
+  if (!Number.isFinite(step) || step <= 0) {
+    throw new AnalysisParameterError(
+      `g_quality_step must be a finite number greater than zero (received ${String(step)})`,
+      'g_quality_step',
+    )
+  }
+
   const tolerance = Number.EPSILON * Math.max(1, Math.abs(start), Math.abs(end), Math.abs(step)) * 8
   const stop = end + tolerance
   const count = Math.max(0, Math.ceil((stop - start) / step))
+  if (!Number.isFinite(count)) {
+    throw new AnalysisParameterError(
+      `The G-quality sweep range [${start}, ${end}] at step ${step} is unbounded.`,
+      'g_quality_step',
+    )
+  }
   if (count === 0) return new Float64Array(0)
 
   const ladder = new Float64Array(count)
@@ -83,11 +119,11 @@ export function gQualityWindowSizes(start: number, end: number, step: number): F
  * mean — an all-null row would draw a gap in the curve that looks like a
  * measurement, not like an absence of one.
  */
-export function calculateGQuality(
+export async function calculateGQuality(
   filtered: FilterResult,
   config: AnalysisConfig,
-  onProgress?: (progress: GQualityProgress) => void,
-): GQualityResult {
+  options: GQualityOptions = {},
+): Promise<GQualityResult> {
   const warnings: AnalysisWarning[] = []
   const samplingRate = config.samplingRate
   const innerLength = filtered.inner.gravity.length
@@ -124,6 +160,7 @@ export function calculateGQuality(
 
   const rows: GQualityRow[] = []
   for (let index = 0; index < total; index++) {
+    await options.checkpoint?.()
     const windowSize = windowSizes[index] as number
     const windowSamples = windowSampleCount(windowSize, samplingRate)
     const statisticsConfig = { windowSize, samplingRate }
@@ -161,7 +198,7 @@ export function calculateGQuality(
       rows.push({ windowSize, innerStartTime, innerMean, innerStd, dragStartTime, dragMean, dragStd })
     }
 
-    onProgress?.({
+    options.onProgress?.({
       completed: index + 1,
       total,
       percent: Math.trunc(((index + 1) / total) * 100),

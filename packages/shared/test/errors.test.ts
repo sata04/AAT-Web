@@ -21,6 +21,7 @@ describe('error taxonomy', () => {
       'INVALID_CSV',
       'INVALID_ANALYSIS_CONFIG',
       'RATE_LIMITED',
+      'REQUEST_TOO_LARGE',
       'INTERNAL',
     ]
     expect([...ERROR_CODES].sort()).toEqual([...expected].sort())

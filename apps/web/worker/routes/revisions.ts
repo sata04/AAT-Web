@@ -43,6 +43,7 @@ import { and, asc, eq, isNull, sql } from 'drizzle-orm'
 import { Hono } from 'hono'
 import { z } from 'zod'
 import { APP_VERSION, resolveConfig } from '../config.ts'
+import { rowsAffected } from '../db/client.ts'
 import { analysisMetrics, analysisRevisions, cloudObjects } from '../db/schema.ts'
 import { newId } from '../lib/ids.ts'
 import type { AppEnv } from '../middleware/authorize.ts'
@@ -57,10 +58,10 @@ import {
 import { validate } from '../middleware/validate.ts'
 import { writeAuditLog } from '../services/audit.ts'
 import {
+  commitUploadedObject,
   ensureQuotaRow,
-  finaliseReservation,
+  releaseObjectAccounting,
   releaseReservation,
-  releaseUsage,
   reserveQuota,
   sweepStaleReservations,
 } from '../services/quota.ts'
@@ -88,6 +89,7 @@ const windowStatisticsSchema = z.object({
 const createRevisionSchema = z.object({
   sourceSha256: z.string().regex(/^[0-9a-f]{64}$/),
   configHash: z.string().regex(/^[0-9a-f]{64}$/),
+  mappingHash: z.string().regex(/^[0-9a-f]{64}$/),
   config: AnalysisConfigSchema,
   engineVersion: z.string().min(1).max(64),
   appVersion: z.string().min(1).max(64).optional(),
@@ -135,6 +137,7 @@ function revisionResponse(revision: typeof analysisRevisions.$inferSelect) {
     revisionNumber: revision.revisionNumber,
     sourceSha256: revision.sourceSha256,
     configHash: revision.configHash,
+    mappingHash: revision.mappingHash,
     engineVersion: revision.engineVersion,
     appVersion: revision.appVersion,
     snapshotFormatVersion: revision.snapshotFormatVersion,
@@ -151,9 +154,11 @@ function revisionResponse(revision: typeof analysisRevisions.$inferSelect) {
 /**
  * Create an immutable revision of a run.
  *
- * Idempotent by analysis identity: a second call with the same source bytes, configuration and
- * engine version returns the first revision with 200 rather than creating a duplicate. That is
- * what makes a retried request — a flaky network, a double-clicked button — safe.
+ * Idempotent by analysis identity: a second call with the same source bytes, configuration,
+ * column mapping and engine version returns the first revision with 200 rather than creating a
+ * duplicate. That is what makes a retried request — a flaky network, a double-clicked button —
+ * safe. The mapping is part of the identity because re-analysing the same bytes with different
+ * columns is a different analysis, not a repeat of the first.
  *
  * `own`, and deliberately not widened by the workspace policy: a revision records who analysed a
  * measurement with which settings, and letting a colleague — or an administrator — append to
@@ -180,6 +185,7 @@ revisionRoutes.post(
           eq(analysisRevisions.runId, run.id),
           eq(analysisRevisions.sourceSha256, body.sourceSha256),
           eq(analysisRevisions.configHash, body.configHash),
+          eq(analysisRevisions.mappingHash, body.mappingHash),
           eq(analysisRevisions.engineVersion, body.engineVersion),
         ),
       )
@@ -210,6 +216,7 @@ revisionRoutes.post(
             revisionNumber,
             sourceSha256: body.sourceSha256,
             configHash: body.configHash,
+            mappingHash: body.mappingHash,
             configJson: JSON.stringify(body.config),
             engineVersion: body.engineVersion,
             appVersion: body.appVersion ?? APP_VERSION,
@@ -232,6 +239,7 @@ revisionRoutes.post(
               eq(analysisRevisions.runId, run.id),
               eq(analysisRevisions.sourceSha256, body.sourceSha256),
               eq(analysisRevisions.configHash, body.configHash),
+              eq(analysisRevisions.mappingHash, body.mappingHash),
               eq(analysisRevisions.engineVersion, body.engineVersion),
             ),
           )
@@ -266,7 +274,12 @@ revisionRoutes.post(
       targetType: 'analysis_revision',
       targetId: inserted.id,
       targetOwnerUserId: run.ownerUserId,
-      details: { runId: run.id, configHash: body.configHash, engineVersion: body.engineVersion },
+      details: {
+        runId: run.id,
+        configHash: body.configHash,
+        mappingHash: body.mappingHash,
+        engineVersion: body.engineVersion,
+      },
       headers: context.req.raw.headers,
     })
 
@@ -433,10 +446,18 @@ revisionRoutes.put(
         originalFilename: snapshot.originalFilename,
         runId: revision.runId,
         analysisRevisionId: revision.id,
+        reservationId: reservation.id,
         createdAt: now,
       })
 
-      await finaliseReservation(db, reservation, actualBytes, ownerUserId, now)
+      await commitUploadedObject(
+        db,
+        context.env.AAT_OBJECTS,
+        { id: objectId, r2Key: key, ownerUserId, byteSize: actualBytes },
+        reservation,
+        revision.runId,
+        now,
+      )
       await db
         .update(analysisRevisions)
         .set({ snapshotObjectId: objectId })
@@ -580,9 +601,17 @@ revisionRoutes.put(
         // Metadata only. Never a key component — see services/storage.ts.
         originalFilename: query.filename,
         runId: run.id,
+        reservationId: reservation.id,
         createdAt: now,
       })
-      await finaliseReservation(db, reservation, actualBytes, ownerUserId, now)
+      await commitUploadedObject(
+        db,
+        context.env.AAT_OBJECTS,
+        { id: objectId, r2Key: key, ownerUserId, byteSize: actualBytes },
+        reservation,
+        run.id,
+        now,
+      )
 
       await writeAuditLog(db, {
         actorUserId: actor.userId,
@@ -649,10 +678,22 @@ revisionRoutes.delete('/runs/:runId/source', requireCapability('raw:delete'), as
   // against that owner at `destroy`. Re-testing each row against the *caller* here would skip the
   // owner's objects on exactly the administrative path this route exists to serve, and would
   // leave the bytes in R2 while reporting a successful delete.
+  //
+  // The quota release is gated on winning the tombstone — the same rule as run deletion. Two
+  // concurrent source deletes both walk this list; `AND deleted_at IS NULL` makes the UPDATE the
+  // claim, so only the winner subtracts the bytes. The R2 delete stays outside it: deleting bytes
+  // twice is harmless where releasing them twice is free quota.
+  let objectsDeleted = 0
   for (const record of records) {
     await context.env.AAT_OBJECTS.delete(record.r2Key)
-    await db.update(cloudObjects).set({ deletedAt: now }).where(eq(cloudObjects.id, record.id))
-    await releaseUsage(db, record.ownerUserId, record.byteSize, now)
+    const claimed = await db
+      .update(cloudObjects)
+      .set({ deletedAt: now })
+      .where(and(eq(cloudObjects.id, record.id), isNull(cloudObjects.deletedAt)))
+    if (rowsAffected(claimed) === 1) {
+      objectsDeleted += 1
+      await releaseObjectAccounting(db, record, now)
+    }
   }
 
   await writeAuditLog(db, {
@@ -661,9 +702,9 @@ revisionRoutes.delete('/runs/:runId/source', requireCapability('raw:delete'), as
     targetType: 'run',
     targetId: run.id,
     targetOwnerUserId: run.ownerUserId,
-    details: { objectsDeleted: records.length },
+    details: { objectsDeleted },
     headers: context.req.raw.headers,
   })
 
-  return context.json({ ok: true, objectsDeleted: records.length })
+  return context.json({ ok: true, objectsDeleted })
 })

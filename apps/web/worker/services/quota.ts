@@ -41,7 +41,7 @@
 import { ApiError } from '@aat/shared'
 import { and, eq, lte, sql } from 'drizzle-orm'
 import { type Database, rowsAffected } from '../db/client.ts'
-import { cloudObjects, quotaReservations, quotaUsage } from '../db/schema.ts'
+import { cloudObjects, quotaReservations, quotaUsage, runs } from '../db/schema.ts'
 import { newId } from '../lib/ids.ts'
 
 export type ReservationPurpose = 'snapshot' | 'poster' | 'source'
@@ -147,9 +147,11 @@ export async function reserveQuota(
 /**
  * Convert a reservation into recorded usage, charging the ACTUAL byte count.
  *
- * Both the reservation release and the usage increment happen in one UPDATE, conditional on the
- * reservation still being pending — so a double finalise (a retry, a duplicate request) charges
- * once. Returns false if the reservation had already been settled.
+ * The charge is written before the reservation settles so a deletion never observes `finalised`
+ * ahead of the charge it implies. A lost claim uncharges exactly the bytes and object count it
+ * added; the reservation's hold on `bytesReserved` is released only after the claim is won, so a
+ * sweeper's or deleter's subtraction can never be subtracted twice. Returns false if the
+ * reservation had already been settled.
  */
 export async function finaliseReservation(
   db: Database,
@@ -158,25 +160,44 @@ export async function finaliseReservation(
   userId: string,
   now: Date = new Date(),
 ): Promise<boolean> {
-  const claimed = await db
-    .update(quotaReservations)
-    .set({ status: 'finalised' })
-    .where(and(eq(quotaReservations.id, reservation.id), eq(quotaReservations.status, 'pending')))
-  if (rowsAffected(claimed) !== 1) return false
-
   await db
     .update(quotaUsage)
     .set({
       bytesUsed: sql`${quotaUsage.bytesUsed} + ${actualBytes}`,
-      // Clamped at zero: a reservation swept by the stale-reservation sweeper has already been
-      // subtracted, and a negative reserved column would give away free quota forever.
-      bytesReserved: sql`MAX(${quotaUsage.bytesReserved} - ${reservation.bytes}, 0)`,
       objectCount: sql`${quotaUsage.objectCount} + 1`,
       updatedAt: now,
     })
     .where(eq(quotaUsage.userId, userId))
 
-  return true
+  const claimed = await db
+    .update(quotaReservations)
+    .set({ status: 'finalised' })
+    .where(and(eq(quotaReservations.id, reservation.id), eq(quotaReservations.status, 'pending')))
+  if (rowsAffected(claimed) === 1) {
+    // We own the settlement, so the hold is ours to release: nobody else subtracts it now.
+    // Clamped at zero in case the row drifted while the charge was in flight.
+    await db
+      .update(quotaUsage)
+      .set({
+        bytesReserved: sql`MAX(${quotaUsage.bytesReserved} - ${reservation.bytes}, 0)`,
+        updatedAt: now,
+      })
+      .where(eq(quotaUsage.userId, userId))
+    return true
+  }
+
+  // The claim lost to a sweeper or a deleter — both now treat the bytes as never charged — so
+  // the usage charge written above is owed back. `bytesReserved` is not touched here: the winning
+  // claimer released it already, and adding it back would double-count the hold.
+  await db
+    .update(quotaUsage)
+    .set({
+      bytesUsed: sql`MAX(${quotaUsage.bytesUsed} - ${actualBytes}, 0)`,
+      objectCount: sql`MAX(${quotaUsage.objectCount} - 1, 0)`,
+      updatedAt: now,
+    })
+    .where(eq(quotaUsage.userId, userId))
+  return false
 }
 
 /** Give a reservation back. Safe to call on an already-settled reservation. */
@@ -216,6 +237,107 @@ export async function releaseUsage(
       updatedAt: now,
     })
     .where(eq(quotaUsage.userId, userId))
+}
+
+/**
+ * Release whatever accounting a deleted object still holds.
+ *
+ * A deleter cannot assume the object it is reclaiming ever finished uploading. The object's
+ * reservation may still be `pending` — the uploader is mid-flight between writing to R2 and
+ * converting its reservation — and subtracting `bytesUsed` for it would take quota away from
+ * bytes that were never charged. `released` is the third state that matters: the
+ * stale-reservation sweeper can claim an expired reservation while the object row is already
+ * sitting there, and a released reservation charged nothing either.
+ *
+ * The lookup is by `reservation_id` rather than by `r2_key` because a deterministic R2 key can
+ * have several historical reservation rows (a finalised one from the upload that landed plus a
+ * swept one from a retry that never did); only the object's own reservation says what this row's
+ * bytes were charged as.
+ */
+export async function releaseObjectAccounting(
+  db: Database,
+  object: { r2Key: string; ownerUserId: string; byteSize: number; reservationId: string | null },
+  now: Date = new Date(),
+): Promise<void> {
+  // Rows committed before `reservation_id` existed have NULL — those bytes were always charged.
+  if (object.reservationId === null) {
+    await releaseUsage(db, object.ownerUserId, object.byteSize, now)
+    return
+  }
+
+  // Claim the reservation only while it is still pending: a reservation that is still open belongs
+  // to an upload that never charged usage, so the release comes out of `bytesReserved`.
+  const claimed = await db
+    .update(quotaReservations)
+    .set({ status: 'released' })
+    .where(and(eq(quotaReservations.id, object.reservationId), eq(quotaReservations.status, 'pending')))
+    .returning({ bytes: quotaReservations.bytes })
+  const [claimedReservation] = claimed
+  if (claimedReservation !== undefined) {
+    await db
+      .update(quotaUsage)
+      .set({
+        bytesReserved: sql`MAX(${quotaUsage.bytesReserved} - ${claimedReservation.bytes}, 0)`,
+        updatedAt: now,
+      })
+      .where(eq(quotaUsage.userId, object.ownerUserId))
+    return
+  }
+
+  const [reservation] = await db
+    .select({ status: quotaReservations.status })
+    .from(quotaReservations)
+    .where(eq(quotaReservations.id, object.reservationId))
+    .limit(1)
+  // `finalised` is the only state that ever incremented usage. A reservation the stale-reservation
+  // sweeper claimed is `released` — nothing was charged, and subtracting `bytesUsed` now would take
+  // quota away from objects that still exist.
+  if (reservation?.status === 'finalised') {
+    await releaseUsage(db, object.ownerUserId, object.byteSize, now)
+  }
+}
+
+/**
+ * Commit an uploaded object: prove the run it belongs to is still alive, then convert the
+ * reservation into usage.
+ *
+ * The liveness check runs *after* the object row exists, on purpose — the `requireRun` at the
+ * top of the handler predates the body read by seconds. A run deleted while the body streamed
+ * in walked its object list before this row existed, so committing anyway would leave live
+ * bytes under a dead run that nothing can reach or reclaim. The run delete tombstones
+ * `runs.deleted_at` *before* walking objects, so a row inserted before this read is guaranteed
+ * to be inside a delete that lands later — and this read is what forces the upload to unwind
+ * when it is not.
+ *
+ * The reservation check is the mirror image: a stale-reservation sweep or a deleter may have
+ * already claimed it, in which case nothing was charged and nothing may remain. On either
+ * failure the object row and the R2 bytes are rolled back before the error propagates.
+ */
+export async function commitUploadedObject(
+  db: Database,
+  bucket: R2Bucket,
+  object: { id: string; r2Key: string; ownerUserId: string; byteSize: number },
+  reservation: Reservation,
+  runId: string,
+  now: Date = new Date(),
+): Promise<void> {
+  const [live] = await db.select({ deletedAt: runs.deletedAt }).from(runs).where(eq(runs.id, runId)).limit(1)
+  const runGone = !live || live.deletedAt !== null
+
+  const finalised = runGone
+    ? false
+    : await finaliseReservation(db, reservation, object.byteSize, object.ownerUserId, now)
+  if (finalised) return
+
+  await db.delete(cloudObjects).where(eq(cloudObjects.id, object.id))
+  await bucket.delete(object.r2Key)
+  if (runGone) {
+    // The reservation may already have been released by the deleter — releasing again is a
+    // no-op on a settled row — so this is safe from either side of that race.
+    await releaseReservation(db, reservation, object.ownerUserId, now)
+    throw new ApiError('RESOURCE_NOT_FOUND', { details: { reason: 'run_deleted_mid_upload' } })
+  }
+  throw new ApiError('INTERNAL', { details: { reason: 'reservation_settled_early' } })
 }
 
 export interface SweepResult {

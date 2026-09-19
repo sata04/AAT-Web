@@ -240,6 +240,24 @@ export async function requireRun(context: AppContext, runId: string, access: Res
 }
 
 /**
+ * Resolve a run for `DELETE`, live or already tombstoned.
+ *
+ * Deletion has to be retryable: the route tombstones the run before walking its objects, so a
+ * failure partway through the walk leaves `requireRun` unable to see it at all — unreachable to
+ * its owner but still charged and still holding bytes. Admitting tombstoned rows here lets a
+ * retried delete resume the object walk (the per-object tombstones keep it idempotent) without
+ * opening the door anywhere else: uploads check `deleted_at` directly and still refuse.
+ */
+export async function requireRunForDelete(context: AppContext, runId: string) {
+  const db = context.get('db')
+  const [run] = await db.select().from(runs).where(eq(runs.id, runId)).limit(1)
+  if (!run || !reachesResource(context.get('actor'), run.ownerUserId, 'destroy')) {
+    throw new ApiError('RESOURCE_NOT_FOUND')
+  }
+  return run
+}
+
+/**
  * Resolve a revision of a live run the caller reaches at `access`, or report it as absent.
  *
  * The join to `runs` is the part that matters. A revision carries its own `owner_user_id`, so

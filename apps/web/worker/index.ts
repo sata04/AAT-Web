@@ -120,6 +120,25 @@ app.all('/api/auth/*', async (context) => {
 
 const v1 = new Hono<AppEnv>()
 
+/**
+ * JSON bodies are buffered whole before a schema ever sees them, so a request whose declared
+ * size is already impossible — the largest legitimate body is a poster spec, a few hundred KB —
+ * is refused before a byte is paid for in isolate memory. The bound is on `Content-Length`, not
+ * on what the schema later allows: chunked bodies with no length still land in validation, which
+ * is where every real body is bounded anyway.
+ */
+const MAX_JSON_BODY_BYTES = 16 * 1024 * 1024
+v1.use('*', async (context, next) => {
+  const contentType = context.req.header('content-type') ?? ''
+  if (contentType.includes('application/json')) {
+    const declared = Number(context.req.header('content-length') ?? '')
+    if (declared > MAX_JSON_BODY_BYTES) {
+      throw new ApiError('REQUEST_TOO_LARGE', { details: { maxBytes: MAX_JSON_BODY_BYTES } })
+    }
+  }
+  await next()
+})
+
 v1.route('/me', meRoutes)
 v1.route('/runs', runRoutes)
 // There is no /projects. Runs are grouped by their tags — see worker/routes/runs.ts and

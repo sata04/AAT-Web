@@ -82,7 +82,15 @@ export function rateLimitKey(scope: keyof typeof RATE_LIMITS, discriminator: str
   return `${scope}:${discriminator}`
 }
 
-/** The client's address, as Cloudflare reports it. Falls back to a constant so the limit still binds. */
+/**
+ * The client's address, as Cloudflare reports it.
+ *
+ * `cf-connecting-ip` is set at the edge and cannot be forged by the request. `x-forwarded-for`
+ * is deliberately NOT a fallback: a browser `fetch` may send it, so honouring it would let a
+ * caller mint a fresh bucket per attempt and walk straight past the invitation limit. Requests
+ * without the edge header — local dev, the test harness — share the one `'unknown'` bucket,
+ * which keeps the limit binding there too.
+ */
 export function clientAddress(headers: Headers): string {
-  return headers.get('cf-connecting-ip') ?? headers.get('x-forwarded-for')?.split(',')[0]?.trim() ?? 'unknown'
+  return headers.get('cf-connecting-ip') ?? 'unknown'
 }

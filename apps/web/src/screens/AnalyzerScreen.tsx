@@ -19,14 +19,14 @@
  * runs.
  */
 
-import type { AnalysisConfig } from '@aat/shared'
+import { type AnalysisConfig, configHash } from '@aat/shared'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { AnalysisClient, type AnalysisProgress, AnalysisWorkerError } from '../analysis/client.ts'
 import { defaultDialogMapping } from '../analysis/mapping.ts'
 import type { ColumnMapping, OpenedSource } from '../analysis/protocol.ts'
-import { type Dataset, datasetFromPayload, sensorModeFrom } from '../app/dataset.ts'
+import { type Dataset, datasetFromPayload, openedSourceForDataset, sensorModeFrom } from '../app/dataset.ts'
 import { rangeStatisticsFor } from '../app/range-statistics.ts'
-import { loadConfig } from '../app/settings.ts'
+import { loadConfig, saveConfig } from '../app/settings.ts'
 import type { PosterFigure } from '../cloud/gateway.ts'
 import { type CloudStatuses, INITIAL_STATUSES, type PosterStatus } from '../cloud/status.ts'
 import { syncDataset } from '../cloud/sync.ts'
@@ -56,6 +56,7 @@ export function AnalyzerScreen(): React.JSX.Element {
   const [viewport, setViewport] = useState<ChartViewport | null>(null)
   const [geometry, setGeometry] = useState<ChartGeometry | null>(null)
   const [canvas, setCanvas] = useState<HTMLCanvasElement | null>(null)
+  const [gestureLayer, setGestureLayer] = useState<HTMLElement | null>(null)
   const [statuses, setStatuses] = useState<CloudStatuses>(INITIAL_STATUSES)
   const [pendingColumns, setPendingColumns] = useState<PendingColumnChoice | null>(null)
   const [settingsOpen, setSettingsOpen] = useState(false)
@@ -63,6 +64,10 @@ export function AnalyzerScreen(): React.JSX.Element {
   // The revision the poster figures of the last synced dataset hang from. Null
   // until an analysis has been stored, which is most of the time: local-first.
   const [syncedPoster, setSyncedPoster] = useState<PosterContext | null>(null)
+  // Which file the cloud sync/poster lanes are describing. Set when a sync is
+  // attempted — not only when it succeeds — because a failure for another file
+  // is exactly when an unlabeled lane would mislead.
+  const [cloudSubject, setCloudSubject] = useState<string | null>(null)
   const [customPosters, setCustomPosters] = useState<PosterFigure[]>([])
 
   // One probe for the whole application, in the provider. A negative answer is
@@ -73,10 +78,30 @@ export function AnalyzerScreen(): React.JSX.Element {
   const analysisClient = useRef<AnalysisClient | null>(null)
   const exportClient = useRef<ExportClient | null>(null)
   const noticeId = useRef(0)
+  /**
+   * The `File` each open dataset came from, keyed by source SHA-256. A `File`
+   * is a disk reference — holding it costs no memory — and it is the only way
+   * to recover when the worker's bounded table cache has evicted a parsed CSV
+   * that needs re-analysing.
+   */
+  const sourceFiles = useRef(new Map<string, File>())
+  /** Sources the user closed while a worker request was still in flight. */
+  const closedSources = useRef(new Set<string>())
+  /**
+   * Files waiting behind the modal column dialog, in drop order. The dialog
+   * can only ask about one source at a time, so the rest of the batch parks
+   * here and resumes on resolve — including on cancel, which skips the
+   * ambiguous file, not the batch.
+   */
+  const pendingFileQueue = useRef<File[]>([])
+  /** Bumped on every cancel; an open/analyse loop reads it to stop cleanly. */
+  const cancelEpoch = useRef(0)
+  const datasetsRef = useRef<readonly Dataset[]>([])
   // Aborts the poster poll when the screen goes away or a newer request starts.
   // Polling is a read loop against the poster listing; abandoning one costs the
   // renderer nothing, which is the point of not queueing work server-side.
   const posterPoll = useRef<AbortController | null>(null)
+  const syncGeneration = useRef(0)
 
   // Lazily constructed so that merely loading the page does not start a worker,
   // and stable so the callbacks that use them do not change identity per render.
@@ -97,6 +122,10 @@ export function AnalyzerScreen(): React.JSX.Element {
     },
     [],
   )
+
+  useEffect(() => {
+    datasetsRef.current = datasets
+  }, [datasets])
 
   const notify = useCallback((tone: NoticeItem['tone'], text: string) => {
     noticeId.current += 1
@@ -215,9 +244,15 @@ export function AnalyzerScreen(): React.JSX.Element {
   )
 
   const syncToCloud = useCallback(
-    async (dataset: Dataset) => {
+    async (dataset: Dataset, analysedWith?: AnalysisConfig) => {
+      const generation = ++syncGeneration.current
+      setCloudSubject(dataset.name)
       setStatuses((current) => ({ ...current, sync: { kind: 'saving' } }))
-      const outcome = await syncDataset(dataset, config)
+      const outcome = await syncDataset(dataset, analysedWith ?? dataset.config)
+      // A newer sync started while this one was in flight: the lanes describe whichever sync
+      // started last, so a stale completion must not overwrite them (or the saved/poster state)
+      // with the older file's result.
+      if (generation !== syncGeneration.current) return
       if (!outcome.ok) {
         setStatuses((current) => ({
           ...current,
@@ -244,7 +279,7 @@ export function AnalyzerScreen(): React.JSX.Element {
       // fail, and neither outcome touches the analysis the user already has.
       await startAutoPoster(context, null)
     },
-    [config, startAutoPoster],
+    [startAutoPoster],
   )
 
   // A poster belongs to one revision of one file, so the panel shows one only
@@ -279,9 +314,20 @@ export function AnalyzerScreen(): React.JSX.Element {
   /* ------------------------------------------------------------- opening */
 
   const runAnalysis = useCallback(
-    async (source: OpenedSource, mapping: ColumnMapping) => {
+    async (
+      source: OpenedSource,
+      mapping: ColumnMapping,
+      configOverride?: AnalysisConfig,
+      reopenedOnce = false,
+      // Results are stale the moment anything bumps the epoch: a user cancel, or a newer
+      // settings application whose own re-analysis supersedes this one. Without the gate a
+      // slower earlier loop would overwrite datasets the newer configuration produced.
+      epoch = cancelEpoch.current,
+    ) => {
       const client = getAnalysisClient()
+      const effectiveConfig = configOverride ?? config
       const onProgress = (progress: AnalysisProgress) => {
+        if (epoch !== cancelEpoch.current) return
         setStatuses((current) => ({
           ...current,
           analysis: { kind: 'running', stage: progress.stage, percent: progress.percent },
@@ -293,15 +339,36 @@ export function AnalyzerScreen(): React.JSX.Element {
           {
             sourceSha256: source.sourceSha256,
             filename: source.filename,
-            config,
+            config: effectiveConfig,
             mapping,
-            skipGQuality: !config.auto_calculate_g_quality,
-            useCache: config.use_cache,
+            skipGQuality: !effectiveConfig.auto_calculate_g_quality,
+            useCache: effectiveConfig.use_cache,
           },
           onProgress,
         )
-        const dataset = datasetFromPayload(result.payload, result.fromCache)
-        setDatasets((current) => [...current.filter((existing) => existing.name !== dataset.name), dataset])
+        if (closedSources.current.delete(source.sourceSha256)) {
+          // The user closed this file while the worker was computing; the
+          // result arriving now is stale. Release the retained table instead
+          // of resurrecting a dataset they dismissed.
+          void client.release(source.sourceSha256).catch(() => {})
+          return
+        }
+        const dataset = datasetFromPayload(result.payload, effectiveConfig, result.fromCache)
+        if (epoch !== cancelEpoch.current) {
+          // A cancel or a newer settings application arrived while the worker was computing —
+          // install nothing; the retained table is still released so it cannot linger.
+          void client.release(source.sourceSha256).catch(() => {})
+          return
+        }
+        setDatasets((current) => {
+          // Re-analysing or re-opening a file must not move it to the end of the
+          // list — the comparison graph draws in list order.
+          const index = current.findIndex((existing) => existing.name === dataset.name)
+          if (index === -1) return [...current, dataset]
+          const next = [...current]
+          next[index] = dataset
+          return next
+        })
         setActiveName(dataset.name)
         setSelection(null)
         setViewport(null)
@@ -318,6 +385,30 @@ export function AnalyzerScreen(): React.JSX.Element {
         // below is optional and must never gate it.
         if (signedIn) void syncToCloud(dataset)
       } catch (error) {
+        const code = error instanceof AnalysisWorkerError ? error.code : 'INTERNAL'
+        if (code === 'ANALYSIS_CANCELLED') {
+          // Only the live epoch gets to write the lane — a superseded loop must not leave
+          // 'cancelled' over the status of the analysis that replaced it.
+          if (epoch === cancelEpoch.current) {
+            setStatuses((current) => ({ ...current, analysis: { kind: 'cancelled' } }))
+          }
+          return
+        }
+        if (code === 'SOURCE_NOT_RETAINED' && !reopenedOnce) {
+          // The worker's bounded table cache evicted this file. Its `File` is
+          // still held, so re-open transparently and try once more instead of
+          // sending the user back to the drop zone.
+          const file = sourceFiles.current.get(source.sourceSha256)
+          if (file !== undefined) {
+            try {
+              const reopened = await client.open(file.name, await file.arrayBuffer())
+              await runAnalysis(reopened, mapping, configOverride, true, epoch)
+              return
+            } catch {
+              // Fall through to the generic failure path below.
+            }
+          }
+        }
         if (error instanceof AnalysisWorkerError && error.code === 'COLUMN_NOT_FOUND') {
           // The desktop answers this by reopening column selection; so do we,
           // rather than presenting a dead end.
@@ -330,7 +421,6 @@ export function AnalyzerScreen(): React.JSX.Element {
           return
         }
         const message = error instanceof Error ? error.message : String(error)
-        const code = error instanceof AnalysisWorkerError ? error.code : 'INTERNAL'
         setStatuses((current) => ({ ...current, analysis: { kind: 'failed', message, code } }))
         notify('error', `${source.filename}: ${message}`)
       }
@@ -341,7 +431,10 @@ export function AnalyzerScreen(): React.JSX.Element {
   const openFiles = useCallback(
     async (files: File[]) => {
       const client = getAnalysisClient()
-      for (const file of files) {
+      const epoch = cancelEpoch.current
+      for (let index = 0; index < files.length; index++) {
+        if (cancelEpoch.current !== epoch) break
+        const file = files[index] as File
         setStatuses((current) => ({
           ...current,
           analysis: { kind: 'running', stage: 'decoding', percent: 0 },
@@ -354,6 +447,9 @@ export function AnalyzerScreen(): React.JSX.Element {
               analysis: { kind: 'running', stage: progress.stage, percent: progress.percent },
             }))
           })
+          sourceFiles.current.set(source.sourceSha256, file)
+          // A re-open supersedes any close-while-in-flight marker.
+          closedSources.current.delete(source.sourceSha256)
           if (source.suggestedMapping === null) {
             // Ambiguous or missing candidates: ask, rather than guess. A wrong
             // guess does not fail — it produces a believable graph of the wrong
@@ -364,18 +460,19 @@ export function AnalyzerScreen(): React.JSX.Element {
               reason: undefined,
             })
             setStatuses((current) => ({ ...current, analysis: { kind: 'idle' } }))
-            const remaining = files.length - files.indexOf(file) - 1
-            if (remaining > 0) {
-              // The dialog is modal, so the rest of the batch cannot be analysed
-              // behind it. Say so rather than dropping files silently.
-              notify('info', `残り ${remaining} 件は列を選択したあとで開き直してください。`)
-            }
+            // The dialog is modal; the rest of the batch resumes when it
+            // resolves rather than requiring a second drop.
+            pendingFileQueue.current = files.slice(index + 1)
             return
           }
           await runAnalysis(source, source.suggestedMapping)
         } catch (error) {
-          const message = error instanceof Error ? error.message : String(error)
           const code = error instanceof AnalysisWorkerError ? error.code : 'INTERNAL'
+          if (code === 'ANALYSIS_CANCELLED') {
+            setStatuses((current) => ({ ...current, analysis: { kind: 'cancelled' } }))
+            return
+          }
+          const message = error instanceof Error ? error.message : String(error)
           setStatuses((current) => ({ ...current, analysis: { kind: 'failed', message, code } }))
           notify('error', `${file.name}: ${message}`)
         }
@@ -384,13 +481,109 @@ export function AnalyzerScreen(): React.JSX.Element {
     [runAnalysis, notify, getAnalysisClient],
   )
 
+  /** What remains of a batch once the column dialog has spoken for this file. */
+  const drainPendingFiles = useCallback(() => {
+    const rest = pendingFileQueue.current
+    pendingFileQueue.current = []
+    if (rest.length > 0) void openFiles(rest)
+  }, [openFiles])
+
+  /** Confirm the column choice: analyse this file, then continue the batch. */
+  const confirmPendingColumns = useCallback(
+    (mapping: ColumnMapping) => {
+      const choice = pendingColumns
+      setPendingColumns(null)
+      if (choice === null) return
+      void runAnalysis(choice.source, mapping).finally(drainPendingFiles)
+    },
+    [pendingColumns, runAnalysis, drainPendingFiles],
+  )
+
+  /** Cancel skips this file; the rest of the batch still deserves its answer. */
+  const cancelPendingColumns = useCallback(() => {
+    setPendingColumns(null)
+    drainPendingFiles()
+  }, [drainPendingFiles])
+
+  /**
+   * Abort whatever the worker is doing. `cancelPending` resolves every
+   * in-flight request with `ANALYSIS_CANCELLED`, which the catch paths above
+   * turn into the `cancelled` status rather than a failure.
+   */
+  const cancelAnalysis = useCallback(() => {
+    cancelEpoch.current += 1
+    analysisClient.current?.cancelPending()
+    setStatuses((current) =>
+      current.analysis.kind === 'running' ? { ...current, analysis: { kind: 'cancelled' } } : current,
+    )
+  }, [])
+
+  /**
+   * Apply a settings edit — and, when a number-changing key moved, re-analyse
+   * every open dataset under the new configuration.
+   *
+   * The worker's cache key is `configHash`, which covers only the keys that
+   * change results, so a theme or export-format edit re-renders without paying
+   * for a re-run. The re-analysis cannot fail destructively: a dataset whose
+   * retained table was evicted is re-opened from its `File`.
+   */
+  const applyConfig = useCallback(
+    (next: AnalysisConfig) => {
+      const previous = config
+      setConfig(next)
+      setSettingsOpen(false)
+      if (!saveConfig(next)) {
+        notify('warning', '設定をブラウザに保存できませんでした。今回のセッションのみ有効です。')
+      }
+      const activeBefore = activeName
+      void (async () => {
+        const resultChanged = (await configHash(previous)) !== (await configHash(next))
+        if (!resultChanged) return
+        // Bump the epoch and cancel in-flight work only now that a numeric change is confirmed —
+        // a theme edit must not abort an unrelated analysis. A previous settings loop may still
+        // be running, and its results must never land on top of the ones this edit is about to
+        // produce: each runAnalysis call below carries this epoch and refuses to install once
+        // it goes stale. The bump also aborts a batch open still in progress — it was asked for
+        // under the old configuration.
+        cancelEpoch.current += 1
+        analysisClient.current?.cancelPending()
+        const epoch = cancelEpoch.current
+        for (const dataset of datasets) {
+          if (cancelEpoch.current !== epoch) return
+          if (!datasetsRef.current.some((current) => current.name === dataset.name)) continue
+          await runAnalysis(openedSourceForDataset(dataset), dataset.mapping, next, false, epoch)
+        }
+        if (activeBefore !== null && datasetsRef.current.some((current) => current.name === activeBefore)) {
+          setActiveName(activeBefore)
+        }
+      })()
+    },
+    [config, datasets, activeName, notify, runAnalysis],
+  )
+
   const closeDataset = useCallback(
     (dataset: Dataset) => {
       setDatasets((current) => current.filter((existing) => existing.name !== dataset.name))
-      setActiveName((current) => (current === dataset.name ? null : current))
-      void getAnalysisClient().release(dataset.sourceSha256)
+      if (dataset.name === activeName) {
+        // Closing the on-screen dataset must not leave a selection and a
+        // viewport aimed at data that is gone; activate the first remaining
+        // file so the graph has something to frame.
+        const next = datasets.find((existing) => existing.name !== dataset.name)
+        setActiveName(next?.name ?? null)
+        setSelection(null)
+        setViewport(null)
+      }
+      sourceFiles.current.delete(dataset.sourceSha256)
+      // If an analysis for this source is still in flight, its result must be
+      // dropped when it lands rather than re-adding a dataset the user closed.
+      closedSources.current.add(dataset.sourceSha256)
+      // A dead worker rejects here; the release is advisory cleanup, so the
+      // rejection is expected noise rather than an error the user can act on.
+      void getAnalysisClient()
+        .release(dataset.sourceSha256)
+        .catch(() => {})
     },
-    [getAnalysisClient],
+    [getAnalysisClient, activeName, datasets],
   )
 
   const retrySync = () => {
@@ -416,14 +609,13 @@ export function AnalyzerScreen(): React.JSX.Element {
   /* --------------------------------------------------------------- modes */
 
   const applyEvent = (event: Parameters<typeof transition>[1]) => {
-    setMode((current) => {
-      const next = transition(current, event)
-      // Leaving the normal view invalidates a selection: every other view either
-      // has no time axis or has several, so the span would no longer mean the
-      // thing it was drawn over.
-      if (!canSelectRange(next)) setSelection(null)
-      return next
-    })
+    // Leaving the normal view invalidates a selection: every other view either
+    // has no time axis or has several, so the span would no longer mean the
+    // thing it was drawn over. Computed outside the `setMode` updater so the
+    // side effect cannot run twice under a re-rendered or StrictMode update.
+    const next = transition(mode, event)
+    if (!canSelectRange(next)) setSelection(null)
+    setMode(next)
     setViewport(null)
   }
 
@@ -441,7 +633,10 @@ export function AnalyzerScreen(): React.JSX.Element {
     if (active === null) return
     const input = workbookInputFor(
       active,
-      config.sampling_rate,
+      // The workbook's unified time axis resamples at the rate the numbers were produced
+      // under, which is the dataset's config — not the live one a settings edit may have
+      // moved on to while this dataset is still mid re-analysis.
+      active.config.sampling_rate,
       rangeResult === null
         ? null
         : { range: rangeResult.range, inner: rangeResult.inner, drag: rangeResult.drag },
@@ -491,6 +686,9 @@ export function AnalyzerScreen(): React.JSX.Element {
         rangeResult,
         selectionEnabled,
         statuses,
+        // The cloud lanes describe the last file synced, which is not always
+        // the one on screen — the status bar names it when they differ.
+        cloudSubject,
         notices,
         posterContext,
         posterUnavailableReason,
@@ -505,15 +703,19 @@ export function AnalyzerScreen(): React.JSX.Element {
         bounds,
         geometry,
         canvas,
+        gestureLayer,
       }}
       actions={{
         openFiles,
         applyModeEvent: applyEvent,
         startComparison,
         setConfig,
+        applyConfig,
+        cancelAnalysis,
         setViewport,
         setGeometry,
         setCanvas,
+        setGestureLayer,
         setSelection,
         setActiveName,
         closeDataset,
@@ -525,6 +727,8 @@ export function AnalyzerScreen(): React.JSX.Element {
         addCustomPoster,
         notify,
         setPendingColumns,
+        confirmPendingColumns,
+        cancelPendingColumns,
         runAnalysis,
         setSettingsOpen,
       }}

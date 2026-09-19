@@ -58,7 +58,7 @@ async function buildXlsx(input: WorkbookInput): Promise<{ blob: Blob; dataRows: 
   // and finding that out before building a million cell objects is the
   // difference between a clean error and a long wait followed by one.
   const plan = planWorkbook(input)
-  const sheets = buildSheets(input)
+  const sheets = buildSheets(input, plan)
   // The library's `Cell` type models a cell as a union that includes bare
   // values; the sheets from `src/export/` are always cell objects with an
   // explicit `type`, which is a strict subset. The cast states that.

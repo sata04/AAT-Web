@@ -18,7 +18,8 @@ export interface FileDropZoneProps {
 /** Everything the desktop's dialog accepted. */
 const ACCEPT = '.csv,text/csv'
 
-function csvFilesFrom(list: FileList | null): File[] {
+/** Shared so the graph area's drop affordance applies the same filter. */
+export function csvFilesFrom(list: FileList | null): File[] {
   if (list === null) return []
   return [...list].filter((file) => file.name.toLowerCase().endsWith('.csv') || file.type === 'text/csv')
 }

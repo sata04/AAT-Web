@@ -9,7 +9,8 @@
  */
 
 import type { AnalysisWarning, GQualityRow, SyncResult, WindowStatistics } from '@aat/analysis-core'
-import type { AnalysisPayload, ColumnMapping } from '../analysis/protocol.ts'
+import type { AnalysisConfig } from '@aat/shared'
+import type { AnalysisPayload, ColumnMapping, OpenedSource } from '../analysis/protocol.ts'
 import { asFullResolution, type FullResolutionArray } from '../analysis/series.ts'
 
 export interface SensorDataset {
@@ -48,6 +49,14 @@ export interface Dataset {
   readonly sampleCount: number
   readonly analysisTimestamp: string
   readonly fromCache: boolean
+  /**
+   * The configuration these numbers were produced under. `state.config` in the screen is the
+   * *next* analysis's configuration — they differ during a settings-change re-analysis, and a
+   * dataset whose re-run failed keeps its old config permanently. Anything written alongside
+   * the numbers (an export's time axis, a synced revision's identity) must key off this, not the
+   * live one.
+   */
+  readonly config: AnalysisConfig
 }
 
 /** `os.path.splitext(os.path.basename(path))[0]` — the desktop's dataset key. */
@@ -70,7 +79,11 @@ function toSensorDataset(sensor: AnalysisPayload['inner']): SensorDataset {
   }
 }
 
-export function datasetFromPayload(payload: AnalysisPayload, fromCache: boolean): Dataset {
+export function datasetFromPayload(
+  payload: AnalysisPayload,
+  config: AnalysisConfig,
+  fromCache: boolean,
+): Dataset {
   return {
     name: datasetNameFromFilename(payload.filename),
     filename: payload.filename,
@@ -89,6 +102,29 @@ export function datasetFromPayload(payload: AnalysisPayload, fromCache: boolean)
     sampleCount: payload.sampleCount,
     analysisTimestamp: payload.analysisTimestamp,
     fromCache,
+    config,
+  }
+}
+
+/**
+ * Reconstruct the `OpenedSource` a dataset came from.
+ *
+ * Used to re-analyse an already-open file — after a settings change, or when
+ * the worker's bounded table cache has evicted it — without making the user
+ * drop the CSV again. `detected` is left empty on purpose: the only consumer
+ * that reads it is the column dialog, which merges it with `columnNames`, and
+ * column detection cannot produce a new answer for the same bytes anyway.
+ */
+export function openedSourceForDataset(dataset: Dataset): OpenedSource {
+  return {
+    sourceSha256: dataset.sourceSha256,
+    filename: dataset.filename,
+    encoding: dataset.encoding,
+    columnNames: [...dataset.columnNames],
+    detected: { time: [], acceleration: [] },
+    rowCount: dataset.sampleCount,
+    suggestedMapping: dataset.mapping,
+    ambiguity: null,
   }
 }
 

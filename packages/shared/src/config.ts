@@ -124,6 +124,23 @@ export async function configHash(config: AnalysisConfig): Promise<string> {
   return sha256Hex(canonicalJson(relevant))
 }
 
+/**
+ * Stable SHA-256 over the column mapping, in the same canonical form as {@link configHash}.
+ *
+ * Two analyses of the same CSV under different column assignments are different analyses — the
+ * columns ARE the data — so the cloud's revision identity hashes them alongside `configHash`,
+ * not inside it (the snapshot's `configHash` field documents the config alone).
+ */
+export async function columnMappingHash(mapping: {
+  timeColumn: string
+  innerColumn: string
+  dragColumn: string
+  useInner: boolean
+  useDrag: boolean
+}): Promise<string> {
+  return sha256Hex(canonicalJson({ ...mapping }))
+}
+
 export interface ConfigMigrationWarning {
   /** The desktop config key this warning is about, or '<root>' for whole-document problems. */
   key: string

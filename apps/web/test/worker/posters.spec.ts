@@ -10,8 +10,11 @@
  */
 
 import { env } from 'cloudflare:test'
+import { specHash } from '@aat/plot-spec'
+import { eq } from 'drizzle-orm'
 import { describe, expect, it } from 'vitest'
-import { apiFetch, createRevision, createRun, createUser, posterSpec } from './helpers/client.ts'
+import { posterFigures } from '../../worker/db/schema.ts'
+import { apiFetch, createRevision, createRun, createUser, db, posterSpec } from './helpers/client.ts'
 
 /** How many renders the stub container has been asked for since the run started. */
 async function renderCount(): Promise<number> {
@@ -221,5 +224,36 @@ describe('failure and retry', () => {
     // distinguishes an explicit retry from a poll.
     expect(retry.status).toBe(500)
     expect(await renderCount()).toBe(before + 1)
+  })
+
+  it('records the spec a retry actually rendered, not the one the figure was created with', async () => {
+    const user = await createUser()
+    const runId = await createRun(user)
+    const revisionId = await createRevision(user, runId)
+
+    await makeRendererFail()
+    const failed = await autoPoster(user.cookie, revisionId)
+    expect(failed.status).toBe(500)
+
+    const history = await apiFetch(`/api/v1/revisions/${revisionId}/posters`, { cookie: user.cookie })
+    const poster = ((await history.json()) as { posters: { posterId: string }[] }).posters[0]
+
+    // A retry carries the caller's spec, which need not be the insert's — the claim writes the
+    // rendered spec's hash onto the row, so `specHash` always names what produced the PNG.
+    const substituted = { ...posterSpec(revisionId), title: 'すり替え' }
+    const retry = await apiFetch(`/api/v1/posters/${poster?.posterId}/retry`, {
+      method: 'POST',
+      cookie: user.cookie,
+      body: JSON.stringify({ spec: substituted }),
+    })
+    expect(retry.status).toBe(500)
+
+    const [figure] = await db()
+      .select({ specHash: posterFigures.specHash })
+      .from(posterFigures)
+      .where(eq(posterFigures.id, poster?.posterId ?? ''))
+      .limit(1)
+    expect(figure?.specHash).toBe(await specHash(substituted))
+    expect(figure?.specHash).not.toBe(await specHash(posterSpec(revisionId)))
   })
 })
