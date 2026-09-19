@@ -36,7 +36,7 @@ import { and, desc, eq, isNull } from 'drizzle-orm'
 import { Hono } from 'hono'
 import { z } from 'zod'
 import { resolveConfig } from '../config.ts'
-import { rowsAffected } from '../db/client.ts'
+import { type Database, rowsAffected } from '../db/client.ts'
 import { cloudObjects, posterFigures } from '../db/schema.ts'
 import { newId } from '../lib/ids.ts'
 import type { AppContext, AppEnv } from '../middleware/authorize.ts'
@@ -55,10 +55,17 @@ import {
   claimForRender,
   markFailed,
   markRendered,
+  type RenderOutcome,
   renderViaContainer,
   takeOverStaleRender,
 } from '../services/poster.ts'
-import { commitUploadedObject, ensureQuotaRow, releaseReservation, reserveQuota } from '../services/quota.ts'
+import {
+  commitUploadedObject,
+  ensureQuotaRow,
+  type Reservation,
+  releaseReservation,
+  reserveQuota,
+} from '../services/quota.ts'
 import { consumeRateLimit, RATE_LIMITS, rateLimitKey } from '../services/rate-limit.ts'
 import { posterKey, streamObject } from '../services/storage.ts'
 
@@ -110,6 +117,93 @@ function validateSpec(raw: unknown, revisionId: string, expectedKind: 'auto' | '
 }
 
 /**
+ * Store the rendered PNG, record the object and settle the reservation against its actual size.
+ *
+ * The reservation is released on any failure so a render that cannot be committed does not keep
+ * holding quota. Everything else on this path — the figure row, the audit entry — is written by
+ * the caller once the object is durable.
+ */
+async function commitPosterRender(
+  context: AppContext,
+  figureId: string,
+  outcome: RenderOutcome,
+  revision: { id: string; runId: string; ownerUserId: string },
+  reservation: Reservation,
+  key: string,
+  now: Date,
+): Promise<void> {
+  const db = context.get('db')
+  const actor = context.get('actor')
+  const ownerUserId = revision.ownerUserId
+
+  try {
+    const digest = await sha256Hex(outcome.png)
+    const put = await context.env.AAT_OBJECTS.put(key, outcome.png as ArrayBufferView, {
+      httpMetadata: { contentType: 'image/png' },
+      sha256: digest,
+      customMetadata: { revisionId: revision.id, posterId: figureId, ownerUserId },
+    })
+    const actualBytes = put?.size ?? outcome.png.length
+
+    const objectId = newId()
+    await db.insert(cloudObjects).values({
+      id: objectId,
+      ownerUserId,
+      kind: 'poster',
+      r2Key: key,
+      byteSize: actualBytes,
+      sha256: digest,
+      contentType: 'image/png',
+      originalFilename: null,
+      runId: revision.runId,
+      analysisRevisionId: revision.id,
+      reservationId: reservation.id,
+      createdAt: now,
+    })
+    await commitUploadedObject(
+      db,
+      context.env.AAT_OBJECTS,
+      { id: objectId, r2Key: key, ownerUserId, byteSize: actualBytes },
+      reservation,
+      revision.runId,
+      now,
+    )
+    await markRendered(db, figureId, objectId, outcome.rendererVersion, now)
+
+    await writeAuditLog(db, {
+      actorUserId: actor.userId,
+      action: 'poster.render',
+      targetType: 'poster_figure',
+      targetId: figureId,
+      targetOwnerUserId: ownerUserId,
+      details: { byteSize: actualBytes, rendererVersion: outcome.rendererVersion },
+      headers: context.req.raw.headers,
+    })
+  } catch (error) {
+    await releaseReservation(db, reservation, ownerUserId, now)
+    throw error
+  }
+}
+
+/**
+ * Record the failed outcome on the figure.
+ *
+ * POSTER_BUSY is backpressure, not a failed render: the figure goes back to `queued` so a later
+ * retry — or the next call to the idempotent endpoint — can pick it up.
+ */
+async function recordRenderFailure(db: Database, figureId: string, error: unknown, now: Date): Promise<void> {
+  const code = error instanceof ApiError ? error.code : 'POSTER_RENDER_FAILED'
+  if (code === 'POSTER_BUSY') {
+    await db
+      .update(posterFigures)
+      .set({ status: 'queued', updatedAt: now })
+      .where(eq(posterFigures.id, figureId))
+  } else {
+    await markFailed(db, figureId, code, now)
+  }
+}
+
+/**
  * Render, store the PNG, and record the outcome. Never throws past the figure's status.
  *
  * `revision.ownerUserId` — not the actor — is what the storage is charged to and keyed under. See
@@ -123,7 +217,6 @@ async function performRender(
   revision: { id: string; runId: string; ownerUserId: string },
 ): Promise<Response> {
   const db = context.get('db')
-  const actor = context.get('actor')
   const config = resolveConfig(context.env)
   const ownerUserId = revision.ownerUserId
   const now = new Date()
@@ -148,66 +241,9 @@ async function performRender(
       config.reservationTtlSeconds,
       now,
     )
-
-    try {
-      const digest = await sha256Hex(outcome.png)
-      const put = await context.env.AAT_OBJECTS.put(key, outcome.png as ArrayBufferView, {
-        httpMetadata: { contentType: 'image/png' },
-        sha256: digest,
-        customMetadata: { revisionId: revision.id, posterId: figureId, ownerUserId },
-      })
-      const actualBytes = put?.size ?? outcome.png.length
-
-      const objectId = newId()
-      await db.insert(cloudObjects).values({
-        id: objectId,
-        ownerUserId,
-        kind: 'poster',
-        r2Key: key,
-        byteSize: actualBytes,
-        sha256: digest,
-        contentType: 'image/png',
-        originalFilename: null,
-        runId: revision.runId,
-        analysisRevisionId: revision.id,
-        reservationId: reservation.id,
-        createdAt: now,
-      })
-      await commitUploadedObject(
-        db,
-        context.env.AAT_OBJECTS,
-        { id: objectId, r2Key: key, ownerUserId, byteSize: actualBytes },
-        reservation,
-        revision.runId,
-        now,
-      )
-      await markRendered(db, figureId, objectId, outcome.rendererVersion, now)
-
-      await writeAuditLog(db, {
-        actorUserId: actor.userId,
-        action: 'poster.render',
-        targetType: 'poster_figure',
-        targetId: figureId,
-        targetOwnerUserId: ownerUserId,
-        details: { byteSize: actualBytes, rendererVersion: outcome.rendererVersion },
-        headers: context.req.raw.headers,
-      })
-    } catch (error) {
-      await releaseReservation(db, reservation, ownerUserId, now)
-      throw error
-    }
+    await commitPosterRender(context, figureId, outcome, revision, reservation, key, now)
   } catch (error) {
-    const code = error instanceof ApiError ? error.code : 'POSTER_RENDER_FAILED'
-    // POSTER_BUSY is backpressure, not a failed render: the figure goes back to `queued` so a
-    // later retry — or the next call to the idempotent endpoint — can pick it up.
-    if (code === 'POSTER_BUSY') {
-      await db
-        .update(posterFigures)
-        .set({ status: 'queued', updatedAt: now })
-        .where(eq(posterFigures.id, figureId))
-    } else {
-      await markFailed(db, figureId, code, now)
-    }
+    await recordRenderFailure(db, figureId, error, now)
     throw error
   }
 
