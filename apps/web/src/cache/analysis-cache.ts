@@ -87,6 +87,22 @@ function promisify<T>(request: IDBRequest<T>): Promise<T> {
 }
 
 /**
+ * Resolves when a readwrite transaction commits. Attach it before the first
+ * await — a transaction that finishes before its handlers are registered has
+ * already fired `complete`, and a promise attached late never resolves. A
+ * request's `onsuccess` alone is not durability: the transaction can still
+ * abort afterwards, and `close()` on the database is allowed to preempt queued
+ * work that has not committed.
+ */
+function committed(transaction: IDBTransaction): Promise<void> {
+  return new Promise((resolve, reject) => {
+    transaction.oncomplete = () => resolve()
+    transaction.onerror = () => reject(transaction.error ?? new Error('Cache transaction failed'))
+    transaction.onabort = () => reject(transaction.error ?? new Error('Cache transaction aborted'))
+  })
+}
+
+/**
  * Read a cached analysis.
  *
  * Any failure — a corrupt entry, a schema surprise, a storage error — resolves
@@ -157,7 +173,9 @@ export async function writeCache<T>(
       payload,
     }
     const transaction = database.transaction(STORE_NAME, 'readwrite')
+    const done = committed(transaction)
     await promisify(transaction.objectStore(STORE_NAME).put(record))
+    await done
     return true
   } catch {
     return false
@@ -200,6 +218,10 @@ export async function evictToBudget(budgetBytes: number): Promise<number> {
   try {
     database = await openDatabase()
     const transaction = database.transaction(STORE_NAME, 'readwrite')
+    const done = committed(transaction)
+    // If a request above throws, the transaction aborts without anyone awaiting
+    // `done` — swallow that rejection here; the request's own error is reported.
+    void done.catch(() => {})
     const store = transaction.objectStore(STORE_NAME)
     const records = (await promisify(store.getAll())) as Array<CachedAnalysis<unknown>>
 
@@ -214,6 +236,9 @@ export async function evictToBudget(budgetBytes: number): Promise<number> {
       total -= record.approximateBytes || 0
       evicted++
     }
+    // The deletes only count once the transaction commits — reporting `evicted`
+    // before then lets the caller write under the assumption the budget is free.
+    await done
     return evicted
   } catch {
     return 0

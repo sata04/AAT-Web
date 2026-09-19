@@ -38,6 +38,51 @@ import type { FullResolutionArray } from '../analysis/series.ts'
  */
 const DISPLAY_SERIES = Symbol('aat.displaySeries')
 
+/**
+ * Whether an axis is safe to bisect, remembered per array so a pan/zoom redraw
+ * does not rescan it. Non-finite or backward steps both count as unordered —
+ * the bisect's comparisons silently misclassify either.
+ */
+const monotonicAxes = new WeakMap<FullResolutionArray, boolean>()
+
+function isMonotonic(time: FullResolutionArray): boolean {
+  const known = monotonicAxes.get(time)
+  if (known !== undefined) return known
+  let sorted = true
+  for (let index = 1; index < time.length; index++) {
+    const current = time[index] as number
+    const previous = time[index - 1] as number
+    if (!(current >= previous)) {
+      sorted = false
+      break
+    }
+  }
+  monotonicAxes.set(time, sorted)
+  return sorted
+}
+
+/**
+ * First index whose sample is not before `xMin`. Bisected on a monotonic axis —
+ * at millions of samples a linear scan dominated every wheel tick's redraw —
+ * scanned linearly when the axis steps backward, where "the prefix" does not
+ * exist and only input order is trustworthy (the column loop's own assumption).
+ */
+function firstVisibleIndex(time: FullResolutionArray, length: number, xMin: number): number {
+  if (isMonotonic(time)) {
+    let lower = 0
+    let upper = length
+    while (lower < upper) {
+      const mid = (lower + upper) >>> 1
+      if ((time[mid] as number) < xMin) lower = mid + 1
+      else upper = mid
+    }
+    return lower
+  }
+  let cursor = 0
+  while (cursor < length && (time[cursor] as number) < xMin) cursor++
+  return cursor
+}
+
 /** The shared x axis every trace on one plot is decimated onto. */
 export interface DisplayGrid {
   /** Two positions per column, so a column can show both its extremes. */
@@ -115,16 +160,7 @@ export function decimateToGrid(
 
   // Skip samples before the viewport, remembering the last one so the first
   // visible column can interpolate back to it instead of starting mid-air.
-  // The axis is sorted, so the prefix is a bisect rather than a linear scan —
-  // at millions of samples the scan dominated every wheel tick's redraw.
-  let lower = 0
-  let upper = length
-  while (lower < upper) {
-    const mid = (lower + upper) >>> 1
-    if ((time[mid] as number) < grid.xMin) lower = mid + 1
-    else upper = mid
-  }
-  let cursor = lower
+  let cursor = firstVisibleIndex(time, length, grid.xMin)
   let previousIndex = cursor > 0 ? cursor - 1 : -1
 
   for (let column = 0; column < grid.columns; column++) {

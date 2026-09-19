@@ -87,12 +87,11 @@ const retained = new Map<string, RetainedTable>()
 const releasedBeforeOpen = new Set<string>()
 
 /**
- * Cancellation bookkeeping. `inFlight` bounds `cancelled` to requests that are
- * actually running so a stale cancel for a finished id is a no-op, and each
- * finished run clears its own flag, keeping the set from growing for the
- * lifetime of the worker.
+ * Cancellation bookkeeping. `cancelled` takes every id a `cancel` message names —
+ * including a request whose message is still queued and so not yet running —
+ * and each finished run clears its own flag, keeping the set from growing for
+ * the lifetime of the worker.
  */
-const inFlight = new Set<string>()
 const cancelled = new Set<string>()
 
 function throwIfCancelled(requestId: string): void {
@@ -304,6 +303,9 @@ async function handleAnalyse(request: AnalyseRequest): Promise<void> {
 
   if (request.useCache) {
     const cached = await readCache<AnalysisPayload>(cacheParts)
+    // The IndexedDB read yielded to the event loop, where a queued `cancel` ran —
+    // a hit is not allowed to answer over a cancellation just because it was fast.
+    throwIfCancelled(request.requestId)
     // A cached entry computed without the sweep must not satisfy a request that
     // needs it; the reverse is fine, extra rows are simply ignored.
     if (cached !== null && (request.skipGQuality || cached.payload.gQualityComputed)) {
@@ -464,12 +466,15 @@ scope.addEventListener('message', (event: MessageEvent<AnalysisWorkerRequest>) =
   const request = event.data
   if (request.type === 'cancel') {
     for (const requestId of request.requestIds) {
-      if (inFlight.has(requestId)) cancelled.add(requestId)
+      // Unconditional: a request whose message is still queued behind this one
+      // is not running yet, and the protocol promises it exits at its first
+      // checkpoint. Finished requests delete their own flag, and a stale id for
+      // a request that never ran sits harmlessly until the worker is torn down.
+      cancelled.add(requestId)
     }
     return
   }
 
-  inFlight.add(request.requestId)
   const run = async (): Promise<void> => {
     switch (request.type) {
       case 'open':
@@ -483,7 +488,6 @@ scope.addEventListener('message', (event: MessageEvent<AnalysisWorkerRequest>) =
   run()
     .catch((error: unknown) => reportError(request.requestId, error))
     .finally(() => {
-      inFlight.delete(request.requestId)
       cancelled.delete(request.requestId)
     })
 })
