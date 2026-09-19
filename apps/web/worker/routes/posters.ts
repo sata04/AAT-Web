@@ -170,6 +170,7 @@ async function performRender(
         originalFilename: null,
         runId: revision.runId,
         analysisRevisionId: revision.id,
+        reservationId: reservation.id,
         createdAt: now,
       })
       await commitUploadedObject(

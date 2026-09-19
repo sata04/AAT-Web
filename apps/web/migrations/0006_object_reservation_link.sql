@@ -1,0 +1,1 @@
+ALTER TABLE `cloud_objects` ADD `reservation_id` text REFERENCES quota_reservations(id);

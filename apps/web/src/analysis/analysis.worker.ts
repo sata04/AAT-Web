@@ -416,15 +416,21 @@ async function handleAnalyse(request: AnalyseRequest): Promise<void> {
 
   if (request.useCache) {
     progress(request.requestId, 'caching', 97)
+    const payloadBytes = approximateBytes(payload)
+    const budget = await cacheBudgetBytes()
     // Written before the transfer: after `postMessage` the buffers are detached
     // and there is nothing left here to store.
-    const stored = await writeCache(cacheParts, request.filename, payload, approximateBytes(payload))
+    const stored = await writeCache(cacheParts, request.filename, payload, payloadBytes)
     if (!stored) {
-      // The realistic write failure is quota, and it only becomes likelier as
-      // the cache grows — nothing has ever removed an entry before. Evict the
-      // least recently used records and give the write one more chance.
-      await evictToBudget(await cacheBudgetBytes())
-      await writeCache(cacheParts, request.filename, payload, approximateBytes(payload))
+      // The write failed under pressure, so the store is over budget even before
+      // this payload: evict to a budget that excludes it, then try once more.
+      await evictToBudget(Math.max(0, budget - payloadBytes))
+      await writeCache(cacheParts, request.filename, payload, payloadBytes)
+    } else {
+      // The write succeeded but the store is still over budget — a failed write earlier left it
+      // that way, or the budget shrank — so evict down to the real limit now rather than waiting
+      // for the next write to fail.
+      await evictToBudget(budget)
     }
   }
 

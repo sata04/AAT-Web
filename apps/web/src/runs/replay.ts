@@ -282,6 +282,7 @@ export function replayFromSnapshot(snapshot: AnalysisSnapshot): ReplayedAnalysis
     // The bytes came from the cloud, not from the local IndexedDB cache. Saying "キャッシュ" here
     // would attribute the data to a store that was never consulted.
     fromCache: false,
+    config: snapshot.config,
   }
 
   return {

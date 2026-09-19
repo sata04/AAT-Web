@@ -13,6 +13,7 @@ import { and, eq, isNull } from 'drizzle-orm'
 import { describe, expect, it } from 'vitest'
 import { cloudObjects, quotaReservations, quotaUsage } from '../../worker/db/schema.ts'
 import { newId } from '../../worker/lib/ids.ts'
+import { sweepStaleReservations } from '../../worker/services/quota.ts'
 import { apiFetch, createRevision, createRun, createUser, db, type TestUser } from './helpers/client.ts'
 import { buildSnapshot, encodeForUpload } from './helpers/snapshot.ts'
 
@@ -332,6 +333,118 @@ describe('quota enforcement', () => {
     const quota = await quotaOf(user)
     expect(quota.bytesUsed).toBe(size)
     expect(quota.objectCount).toBe(1)
+  })
+
+  it('does not release usage for an object whose reservation the sweeper already claimed', async () => {
+    const user = await createUser()
+    const runId = await createRun(user)
+    const revisionId = await createRevision(user, runId)
+
+    // The charged baseline lives under a second run so it survives the delete: without it a
+    // wrongful release is invisible because bytesUsed clamps at zero.
+    const survivorRunId = await createRun(user, '260812a_data.csv')
+    const survivorRevisionId = await createRevision(user, survivorRunId)
+    const { size } = await uploadSnapshot(user, survivorRevisionId)
+    expect((await quotaOf(user)).bytesUsed).toBe(size)
+
+    // An upload that got as far as inserting its object row but whose reservation lapsed before
+    // commit: the sweeper releases the reservation — and leaves the row when the row claims the
+    // key — so the object sits there never having charged usage.
+    const key = `snapshots/${user.userId}/${runId}/${newId()}.json`
+    const reservationId = newId()
+    await db()
+      .insert(quotaReservations)
+      .values({
+        id: reservationId,
+        userId: user.userId,
+        bytes: 256,
+        purpose: 'snapshot',
+        r2Key: key,
+        status: 'pending',
+        createdAt: new Date(0),
+        expiresAt: new Date(0),
+      })
+    await db()
+      .insert(cloudObjects)
+      .values({
+        id: newId(),
+        ownerUserId: user.userId,
+        kind: 'snapshot',
+        r2Key: key,
+        byteSize: 256,
+        sha256: 'c'.repeat(64),
+        contentType: 'application/json',
+        runId,
+        analysisRevisionId: revisionId,
+        reservationId,
+        createdAt: new Date(),
+      })
+    const sweep = await sweepStaleReservations(db(), env.AAT_OBJECTS)
+    expect(sweep.reservationsReleased).toBe(1)
+
+    const deleted = await apiFetch(`/api/v1/runs/${runId}`, { method: 'DELETE', cookie: user.cookie })
+    expect(deleted.status).toBe(200)
+
+    // The swept reservation charged nothing, so the delete must subtract nothing — releasing
+    // usage here would take quota away from the surviving run's snapshot.
+    const quota = await quotaOf(user)
+    expect(quota.bytesUsed).toBe(size)
+    expect(quota.bytesReserved).toBe(0)
+  })
+
+  it('releases the reservation — not usage — for an object deleted mid-upload', async () => {
+    const user = await createUser()
+    const runId = await createRun(user)
+    const revisionId = await createRevision(user, runId)
+
+    // As above: a committed upload under another run keeps the ledger non-zero so a release from
+    // the wrong side of it cannot hide behind the clamp.
+    const survivorRunId = await createRun(user, '260812a_data.csv')
+    const survivorRevisionId = await createRevision(user, survivorRunId)
+    const { size } = await uploadSnapshot(user, survivorRevisionId)
+
+    // The same mid-flight shape, but with the reservation still live: the deleter reaches it
+    // before the sweeper does.
+    const key = `snapshots/${user.userId}/${runId}/${newId()}.json`
+    const reservationId = newId()
+    await db()
+      .insert(quotaReservations)
+      .values({
+        id: reservationId,
+        userId: user.userId,
+        bytes: 256,
+        purpose: 'snapshot',
+        r2Key: key,
+        status: 'pending',
+        createdAt: new Date(),
+        expiresAt: new Date(Date.now() + 60_000),
+      })
+    await db()
+      .insert(cloudObjects)
+      .values({
+        id: newId(),
+        ownerUserId: user.userId,
+        kind: 'snapshot',
+        r2Key: key,
+        byteSize: 256,
+        sha256: 'd'.repeat(64),
+        contentType: 'application/json',
+        runId,
+        analysisRevisionId: revisionId,
+        reservationId,
+        createdAt: new Date(),
+      })
+    await db()
+      .update(quotaUsage)
+      .set({ bytesReserved: 256, updatedAt: new Date() })
+      .where(eq(quotaUsage.userId, user.userId))
+
+    const deleted = await apiFetch(`/api/v1/runs/${runId}`, { method: 'DELETE', cookie: user.cookie })
+    expect(deleted.status).toBe(200)
+
+    const quota = await quotaOf(user)
+    expect(quota.bytesUsed).toBe(size)
+    expect(quota.bytesReserved).toBe(0)
   })
 
   it('never orphans a committed object when its run is deleted mid-upload', async () => {

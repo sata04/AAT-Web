@@ -446,6 +446,7 @@ revisionRoutes.put(
         originalFilename: snapshot.originalFilename,
         runId: revision.runId,
         analysisRevisionId: revision.id,
+        reservationId: reservation.id,
         createdAt: now,
       })
 
@@ -600,6 +601,7 @@ revisionRoutes.put(
         // Metadata only. Never a key component — see services/storage.ts.
         originalFilename: query.filename,
         runId: run.id,
+        reservationId: reservation.id,
         createdAt: now,
       })
       await commitUploadedObject(

@@ -9,6 +9,7 @@
  */
 
 import type { AnalysisWarning, GQualityRow, SyncResult, WindowStatistics } from '@aat/analysis-core'
+import type { AnalysisConfig } from '@aat/shared'
 import type { AnalysisPayload, ColumnMapping, OpenedSource } from '../analysis/protocol.ts'
 import { asFullResolution, type FullResolutionArray } from '../analysis/series.ts'
 
@@ -48,6 +49,14 @@ export interface Dataset {
   readonly sampleCount: number
   readonly analysisTimestamp: string
   readonly fromCache: boolean
+  /**
+   * The configuration these numbers were produced under. `state.config` in the screen is the
+   * *next* analysis's configuration — they differ during a settings-change re-analysis, and a
+   * dataset whose re-run failed keeps its old config permanently. Anything written alongside
+   * the numbers (an export's time axis, a synced revision's identity) must key off this, not the
+   * live one.
+   */
+  readonly config: AnalysisConfig
 }
 
 /** `os.path.splitext(os.path.basename(path))[0]` — the desktop's dataset key. */
@@ -70,7 +79,11 @@ function toSensorDataset(sensor: AnalysisPayload['inner']): SensorDataset {
   }
 }
 
-export function datasetFromPayload(payload: AnalysisPayload, fromCache: boolean): Dataset {
+export function datasetFromPayload(
+  payload: AnalysisPayload,
+  config: AnalysisConfig,
+  fromCache: boolean,
+): Dataset {
   return {
     name: datasetNameFromFilename(payload.filename),
     filename: payload.filename,
@@ -89,6 +102,7 @@ export function datasetFromPayload(payload: AnalysisPayload, fromCache: boolean)
     sampleCount: payload.sampleCount,
     analysisTimestamp: payload.analysisTimestamp,
     fromCache,
+    config,
   }
 }
 

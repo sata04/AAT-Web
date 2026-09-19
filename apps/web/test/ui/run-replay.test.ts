@@ -111,6 +111,7 @@ function dataset(): Dataset {
     sampleCount: SAMPLES,
     analysisTimestamp: '2026-08-11T09:15:00.000Z',
     fromCache: false,
+    config: DEFAULT_ANALYSIS_CONFIG,
   }
 }
 

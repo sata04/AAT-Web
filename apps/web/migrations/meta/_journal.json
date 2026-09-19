@@ -43,6 +43,13 @@
       "when": 1789842154299,
       "tag": "0005_revision_identity_and_claim_index",
       "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "6",
+      "when": 1789844886475,
+      "tag": "0006_object_reservation_link",
+      "breakpoints": true
     }
   ]
 }

@@ -475,7 +475,12 @@ function AnalyzerSidebar({
         status={posterStatus}
         selection={state.selectionEnabled ? state.selection : null}
         selectionEnabled={state.selectionEnabled}
-        yRange={{ min: state.config.ylim_min, max: state.config.ylim_max }}
+        // The poster's data was produced under the dataset's own config; the screen's config is
+        // what the *next* analysis will use, and the two differ mid re-analysis.
+        yRange={{
+          min: (state.active?.config ?? state.config).ylim_min,
+          max: (state.active?.config ?? state.config).ylim_max,
+        }}
         onRetryAuto={actions.retryPoster}
         customPosters={state.activeCustomPosters}
         onCustomCreated={actions.addCustomPoster}

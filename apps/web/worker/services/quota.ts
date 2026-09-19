@@ -224,37 +224,56 @@ export async function releaseUsage(
  * A deleter cannot assume the object it is reclaiming ever finished uploading. The object's
  * reservation may still be `pending` — the uploader is mid-flight between writing to R2 and
  * converting its reservation — and subtracting `bytesUsed` for it would take quota away from
- * bytes that were never charged. So the reservation is claimed first: if it was still pending
- * it is released, and if the uploader's finalise already ran, the recorded usage is released
- * instead. Either way the account ends up exactly as charged for the bytes that exist.
+ * bytes that were never charged. `released` is the third state that matters: the
+ * stale-reservation sweeper can claim an expired reservation while the object row is already
+ * sitting there, and a released reservation charged nothing either.
+ *
+ * The lookup is by `reservation_id` rather than by `r2_key` because a deterministic R2 key can
+ * have several historical reservation rows (a finalised one from the upload that landed plus a
+ * swept one from a retry that never did); only the object's own reservation says what this row's
+ * bytes were charged as.
  */
 export async function releaseObjectAccounting(
   db: Database,
-  object: { r2Key: string; ownerUserId: string; byteSize: number },
+  object: { r2Key: string; ownerUserId: string; byteSize: number; reservationId: string | null },
   now: Date = new Date(),
 ): Promise<void> {
+  // Rows committed before `reservation_id` existed have NULL — those bytes were always charged.
+  if (object.reservationId === null) {
+    await releaseUsage(db, object.ownerUserId, object.byteSize, now)
+    return
+  }
+
+  // Claim the reservation only while it is still pending: a reservation that is still open belongs
+  // to an upload that never charged usage, so the release comes out of `bytesReserved`.
   const claimed = await db
     .update(quotaReservations)
     .set({ status: 'released' })
-    .where(and(eq(quotaReservations.r2Key, object.r2Key), eq(quotaReservations.status, 'pending')))
-  if (rowsAffected(claimed) === 1) {
-    const [reservation] = await db
-      .select({ bytes: quotaReservations.bytes })
-      .from(quotaReservations)
-      .where(eq(quotaReservations.r2Key, object.r2Key))
-      .limit(1)
-    if (reservation) {
-      await db
-        .update(quotaUsage)
-        .set({
-          bytesReserved: sql`MAX(${quotaUsage.bytesReserved} - ${reservation.bytes}, 0)`,
-          updatedAt: now,
-        })
-        .where(eq(quotaUsage.userId, object.ownerUserId))
-    }
+    .where(and(eq(quotaReservations.id, object.reservationId), eq(quotaReservations.status, 'pending')))
+    .returning({ bytes: quotaReservations.bytes })
+  const [claimedReservation] = claimed
+  if (claimedReservation !== undefined) {
+    await db
+      .update(quotaUsage)
+      .set({
+        bytesReserved: sql`MAX(${quotaUsage.bytesReserved} - ${claimedReservation.bytes}, 0)`,
+        updatedAt: now,
+      })
+      .where(eq(quotaUsage.userId, object.ownerUserId))
     return
   }
-  await releaseUsage(db, object.ownerUserId, object.byteSize, now)
+
+  const [reservation] = await db
+    .select({ status: quotaReservations.status })
+    .from(quotaReservations)
+    .where(eq(quotaReservations.id, object.reservationId))
+    .limit(1)
+  // `finalised` is the only state that ever incremented usage. A reservation the stale-reservation
+  // sweeper claimed is `released` — nothing was charged, and subtracting `bytesUsed` now would take
+  // quota away from objects that still exist.
+  if (reservation?.status === 'finalised') {
+    await releaseUsage(db, object.ownerUserId, object.byteSize, now)
+  }
 }
 
 /**

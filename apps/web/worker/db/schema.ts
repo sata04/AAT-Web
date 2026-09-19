@@ -560,6 +560,12 @@ export const cloudObjects = sqliteTable(
     analysisRevisionId: text('analysis_revision_id').references(() => analysisRevisions.id, {
       onDelete: 'cascade',
     }),
+    /**
+     * The quota reservation this object's bytes were charged through. Deletion reads it to decide
+     * which side of the ledger to release: NULL on rows committed before the column existed, and
+     * NULL means "committed under the old accounting" — those were always charged.
+     */
+    reservationId: text('reservation_id').references(() => quotaReservations.id),
     createdAt: integer('created_at', { mode: 'timestamp' }).notNull(),
     deletedAt: integer('deleted_at', { mode: 'timestamp' }),
   },

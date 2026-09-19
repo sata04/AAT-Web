@@ -101,6 +101,7 @@ export function AnalyzerScreen(): React.JSX.Element {
   // Polling is a read loop against the poster listing; abandoning one costs the
   // renderer nothing, which is the point of not queueing work server-side.
   const posterPoll = useRef<AbortController | null>(null)
+  const syncGeneration = useRef(0)
 
   // Lazily constructed so that merely loading the page does not start a worker,
   // and stable so the callbacks that use them do not change identity per render.
@@ -243,10 +244,15 @@ export function AnalyzerScreen(): React.JSX.Element {
   )
 
   const syncToCloud = useCallback(
-    async (dataset: Dataset, analysedWith: AnalysisConfig = config) => {
+    async (dataset: Dataset, analysedWith?: AnalysisConfig) => {
+      const generation = ++syncGeneration.current
       setCloudSubject(dataset.name)
       setStatuses((current) => ({ ...current, sync: { kind: 'saving' } }))
-      const outcome = await syncDataset(dataset, analysedWith)
+      const outcome = await syncDataset(dataset, analysedWith ?? dataset.config)
+      // A newer sync started while this one was in flight: the lanes describe whichever sync
+      // started last, so a stale completion must not overwrite them (or the saved/poster state)
+      // with the older file's result.
+      if (generation !== syncGeneration.current) return
       if (!outcome.ok) {
         setStatuses((current) => ({
           ...current,
@@ -273,7 +279,7 @@ export function AnalyzerScreen(): React.JSX.Element {
       // fail, and neither outcome touches the analysis the user already has.
       await startAutoPoster(context, null)
     },
-    [config, startAutoPoster],
+    [startAutoPoster],
   )
 
   // A poster belongs to one revision of one file, so the panel shows one only
@@ -342,7 +348,7 @@ export function AnalyzerScreen(): React.JSX.Element {
           void client.release(source.sourceSha256).catch(() => {})
           return
         }
-        const dataset = datasetFromPayload(result.payload, result.fromCache)
+        const dataset = datasetFromPayload(result.payload, effectiveConfig, result.fromCache)
         setDatasets((current) => {
           // Re-analysing or re-opening a file must not move it to the end of the
           // list — the comparison graph draws in list order.
@@ -366,7 +372,7 @@ export function AnalyzerScreen(): React.JSX.Element {
 
         // The local analysis is finished and usable at this point. Everything
         // below is optional and must never gate it.
-        if (signedIn) void syncToCloud(dataset, effectiveConfig)
+        if (signedIn) void syncToCloud(dataset)
       } catch (error) {
         const code = error instanceof AnalysisWorkerError ? error.code : 'INTERNAL'
         if (code === 'ANALYSIS_CANCELLED') {
@@ -604,7 +610,10 @@ export function AnalyzerScreen(): React.JSX.Element {
     if (active === null) return
     const input = workbookInputFor(
       active,
-      config.sampling_rate,
+      // The workbook's unified time axis resamples at the rate the numbers were produced
+      // under, which is the dataset's config — not the live one a settings edit may have
+      // moved on to while this dataset is still mid re-analysis.
+      active.config.sampling_rate,
       rangeResult === null
         ? null
         : { range: rangeResult.range, inner: rangeResult.inner, drag: rangeResult.drag },
