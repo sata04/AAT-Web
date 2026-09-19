@@ -16,6 +16,7 @@ import type { WindowStatistics } from '@aat/analysis-core'
 import {
   type AnalysisConfig,
   type AnalysisSnapshot,
+  columnMappingHash,
   configHash,
   encodeScalar,
   encodeSeries,
@@ -250,6 +251,10 @@ export async function syncDataset(
   const revision = await createRevision(runId, {
     sourceSha256: dataset.sourceSha256,
     configHash: snapshot.configHash,
+    // The mapping is part of the identity: the same CSV opened with different
+    // columns is a different analysis and must not reuse the first revision's
+    // snapshot, which was stored under its own mapping.
+    mappingHash: await columnMappingHash(dataset.mapping),
     config,
     engineVersion: ANALYSIS_ENGINE_VERSION,
     appVersion: APP_VERSION,

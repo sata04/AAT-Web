@@ -58,14 +58,6 @@ export interface CachedAnalysis<T> {
   payload: T
 }
 
-/** SHA-256 of arbitrary bytes as lowercase hex, via Web Crypto. */
-export async function sha256Hex(bytes: BufferSource): Promise<string> {
-  const digest = await crypto.subtle.digest('SHA-256', bytes)
-  return Array.from(new Uint8Array(digest))
-    .map((byte) => byte.toString(16).padStart(2, '0'))
-    .join('')
-}
-
 /** Compose the cache key. Order is fixed so the key is stable across releases. */
 export function cacheKey(parts: CacheKeyParts): string {
   return [`v${CACHE_FORMAT_VERSION}`, parts.engineVersion, parts.configHash, parts.sourceSha256].join(':')
@@ -172,6 +164,28 @@ export async function writeCache<T>(
   } finally {
     database?.close()
   }
+}
+
+/**
+ * How large the cache may grow before `evictToBudget` starts dropping entries.
+ *
+ * A quarter of the origin's quota when the browser will say what that is —
+ * sharing the budget is what makes this cache a good neighbour to the rest of
+ * the application — and a flat 256 MiB when it will not, capped at 512 MiB so
+ * a workstation's generous quota does not turn the cache into a second heap.
+ */
+export async function cacheBudgetBytes(): Promise<number> {
+  const FALLBACK_BYTES = 256 * 1024 * 1024
+  const MAX_BUDGET_BYTES = 512 * 1024 * 1024
+  try {
+    const quota = (await globalThis.navigator?.storage?.estimate?.())?.quota
+    if (typeof quota === 'number' && quota > 0) {
+      return Math.min(MAX_BUDGET_BYTES, Math.floor(quota / 4))
+    }
+  } catch {
+    // StorageManager may be absent or refused — the fallback still bounds growth.
+  }
+  return FALLBACK_BYTES
 }
 
 /**

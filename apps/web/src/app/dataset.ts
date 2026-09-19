@@ -9,7 +9,7 @@
  */
 
 import type { AnalysisWarning, GQualityRow, SyncResult, WindowStatistics } from '@aat/analysis-core'
-import type { AnalysisPayload, ColumnMapping } from '../analysis/protocol.ts'
+import type { AnalysisPayload, ColumnMapping, OpenedSource } from '../analysis/protocol.ts'
 import { asFullResolution, type FullResolutionArray } from '../analysis/series.ts'
 
 export interface SensorDataset {
@@ -89,6 +89,28 @@ export function datasetFromPayload(payload: AnalysisPayload, fromCache: boolean)
     sampleCount: payload.sampleCount,
     analysisTimestamp: payload.analysisTimestamp,
     fromCache,
+  }
+}
+
+/**
+ * Reconstruct the `OpenedSource` a dataset came from.
+ *
+ * Used to re-analyse an already-open file — after a settings change, or when
+ * the worker's bounded table cache has evicted it — without making the user
+ * drop the CSV again. `detected` is left empty on purpose: the only consumer
+ * that reads it is the column dialog, which merges it with `columnNames`, and
+ * column detection cannot produce a new answer for the same bytes anyway.
+ */
+export function openedSourceForDataset(dataset: Dataset): OpenedSource {
+  return {
+    sourceSha256: dataset.sourceSha256,
+    filename: dataset.filename,
+    encoding: dataset.encoding,
+    columnNames: [...dataset.columnNames],
+    detected: { time: [], acceleration: [] },
+    rowCount: dataset.sampleCount,
+    suggestedMapping: dataset.mapping,
+    ambiguity: null,
   }
 }
 

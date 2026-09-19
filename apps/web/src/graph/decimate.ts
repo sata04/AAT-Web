@@ -111,12 +111,20 @@ export function decimateToGrid(
   if (length === 0) return { [DISPLAY_SERIES]: true, y, grid, sourceLength: 0 }
 
   const step = (grid.xMax - grid.xMin) / grid.columns
-  let cursor = 0
   let counted = 0
 
   // Skip samples before the viewport, remembering the last one so the first
   // visible column can interpolate back to it instead of starting mid-air.
-  while (cursor < length && (time[cursor] as number) < grid.xMin) cursor++
+  // The axis is sorted, so the prefix is a bisect rather than a linear scan —
+  // at millions of samples the scan dominated every wheel tick's redraw.
+  let lower = 0
+  let upper = length
+  while (lower < upper) {
+    const mid = (lower + upper) >>> 1
+    if ((time[mid] as number) < grid.xMin) lower = mid + 1
+    else upper = mid
+  }
+  let cursor = lower
   let previousIndex = cursor > 0 ? cursor - 1 : -1
 
   for (let column = 0; column < grid.columns; column++) {

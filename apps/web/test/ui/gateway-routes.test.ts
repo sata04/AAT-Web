@@ -194,6 +194,7 @@ async function callEveryEndpoint(): Promise<void> {
   await gateway.createRevision(runId, {
     sourceSha256: 'a'.repeat(64),
     configHash: 'b'.repeat(64),
+    mappingHash: 'c'.repeat(64),
     config: DEFAULT_ANALYSIS_CONFIG,
     engineVersion: '1.0.0',
     snapshotFormatVersion: 1,

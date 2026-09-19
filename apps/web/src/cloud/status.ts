@@ -16,6 +16,7 @@ export type AnalysisStatus =
   | { kind: 'idle' }
   | { kind: 'running'; stage: string; percent: number }
   | { kind: 'ready'; fromCache: boolean }
+  | { kind: 'cancelled' }
   | { kind: 'failed'; message: string; code: string }
 
 export type CloudSyncStatus =
@@ -97,6 +98,8 @@ export function analysisLabel(status: AnalysisStatus): StatusLabel {
       return { text: `${ANALYSIS_STAGE_LABELS[status.stage] ?? '解析中'} ${status.percent}%`, tone: 'busy' }
     case 'ready':
       return { text: status.fromCache ? '完了（キャッシュ）' : '完了', tone: 'good' }
+    case 'cancelled':
+      return { text: '中止しました', tone: 'neutral' }
     case 'failed':
       return { text: '失敗', tone: 'bad' }
   }

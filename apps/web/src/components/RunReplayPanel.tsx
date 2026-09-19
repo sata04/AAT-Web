@@ -85,6 +85,7 @@ export function RunReplayPanel(props: RunReplayPanelProps): React.JSX.Element {
   const [viewport, setViewport] = useState<ChartViewport | null>(null)
   const [geometry, setGeometry] = useState<ChartGeometry | null>(null)
   const [canvas, setCanvas] = useState<HTMLCanvasElement | null>(null)
+  const [gestureLayer, setGestureLayer] = useState<HTMLElement | null>(null)
   const [posterOpen, setPosterOpen] = useState(false)
   const [exporting, setExporting] = useState(false)
 
@@ -152,13 +153,12 @@ export function RunReplayPanel(props: RunReplayPanelProps): React.JSX.Element {
   }, [dataset, selection, selectionEnabled])
 
   const applyEvent = (event: Parameters<typeof transition>[1]) => {
-    setMode((current) => {
-      const next = transition(current, event)
-      // Leaving the normal view invalidates a selection: the other views have no single time axis,
-      // so the span would no longer mean the thing it was drawn over.
-      if (!canSelectRange(next)) setSelection(null)
-      return next
-    })
+    // Leaving the normal view invalidates a selection: the other views have no single time axis,
+    // so the span would no longer mean the thing it was drawn over. Computed outside the updater
+    // so the clearing side effect cannot run twice.
+    const next = transition(mode, event)
+    if (!canSelectRange(next)) setSelection(null)
+    setMode(next)
     setViewport(null)
   }
 
@@ -291,6 +291,7 @@ export function RunReplayPanel(props: RunReplayPanelProps): React.JSX.Element {
           bounds={bounds}
           onGeometryChange={setGeometry}
           onCanvasChange={setCanvas}
+          onGestureLayerChange={setGestureLayer}
           primaryDragReserved={selectionEnabled}
         >
           <SelectionOverlay
@@ -298,6 +299,7 @@ export function RunReplayPanel(props: RunReplayPanelProps): React.JSX.Element {
             selection={selection}
             onSelectionChange={setSelection}
             enabled={selectionEnabled}
+            gestureLayer={gestureLayer}
           />
         </UPlotChart>
       </div>

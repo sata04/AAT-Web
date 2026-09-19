@@ -56,9 +56,13 @@ export function RangeStatisticsPanel(props: RangeStatisticsPanelProps): React.JS
   }, [selection])
 
   const commit = (nextMin: string, nextMax: string) => {
+    // Empty input parses as 0, which is a selection, not a cleared field — keep the
+    // hint true by applying the same floor a drag does.
+    if (nextMin.trim() === '' || nextMax.trim() === '') return
     const xMin = Number(nextMin)
     const xMax = Number(nextMax)
     if (!Number.isFinite(xMin) || !Number.isFinite(xMax)) return
+    if (Math.abs(xMax - xMin) < MIN_SELECTION_SECONDS) return
     onChange({ xMin: Math.min(xMin, xMax), xMax: Math.max(xMin, xMax) })
   }
 

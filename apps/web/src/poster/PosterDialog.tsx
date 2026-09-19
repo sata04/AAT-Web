@@ -49,7 +49,7 @@ import {
   posterTitleLine,
   type SeriesSelection,
 } from '@aat/plot-spec'
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { formatFixed } from '../app/format.ts'
 import type { PosterFigure } from '../cloud/gateway.ts'
 import { posterImageUrl } from '../cloud/gateway.ts'
@@ -75,6 +75,12 @@ export interface PosterDialogProps {
   onClose: () => void
   /** Called for every figure that reaches `ready`, so the panel can keep the history. */
   onCreated: (poster: PosterFigure) => void
+  /**
+   * Called when a submit fails *after the dialog has closed* — the render
+   * poll can outlive the dialog by minutes, and a failure then must land in
+   * the notice stack rather than in a form nobody is looking at.
+   */
+  onFailed?: ((message: string) => void) | undefined
 }
 
 /** Text rather than numbers, so a half-typed `0.` is not coerced to `0` mid-keystroke. */
@@ -117,6 +123,15 @@ export function PosterDialog(props: PosterDialogProps): React.JSX.Element {
     yMin: String(props.yRange?.min ?? defaults.yMin),
     yMax: String(props.yRange?.max ?? defaults.yMax),
   }))
+
+  // The dialog can be closed mid-render; the poll continues regardless.
+  const mounted = useRef(true)
+  useEffect(
+    () => () => {
+      mounted.current = false
+    },
+    [],
+  )
 
   const [submitting, setSubmitting] = useState(false)
   const [advice, setAdvice] = useState<PosterSpecAdvice | null>(null)
@@ -165,6 +180,13 @@ export function PosterDialog(props: PosterDialogProps): React.JSX.Element {
 
     setSubmitting(true)
     const outcome = await generateCustomPoster(context, request)
+    if (!mounted.current) {
+      // Nobody can see a form-level message; the result still belongs to the
+      // user, so report it where the app reports everything else.
+      if (outcome.ok) props.onCreated(outcome.poster)
+      else props.onFailed?.(outcome.kind === 'spec' ? outcome.advice.message : outcome.message)
+      return
+    }
     setSubmitting(false)
 
     if (outcome.ok) {

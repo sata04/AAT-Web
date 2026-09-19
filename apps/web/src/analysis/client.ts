@@ -11,10 +11,10 @@
 
 import type { AnalysisConfig } from '@aat/shared'
 import type {
+  AddressableRequest,
   AnalyseRequest,
   AnalysisPayload,
   AnalysisStage,
-  AnalysisWorkerRequest,
   AnalysisWorkerResponse,
   ColumnMapping,
   OpenedSource,
@@ -76,10 +76,14 @@ export class AnalysisClient {
     })
     worker.addEventListener('error', (event) => {
       // A worker-level error is not attributable to one request, so every
-      // in-flight request fails rather than hanging forever.
+      // in-flight request fails rather than hanging forever. The worker itself
+      // is discarded — a dead worker that stays installed would make every
+      // later request hang instead of giving it a fresh process to run in.
       const error = new AnalysisWorkerError('WORKER_FAILED', event.message, [], [])
       for (const [, request] of this.pending) request.reject(error)
       this.pending.clear()
+      worker.terminate()
+      if (this.worker === worker) this.worker = null
     })
     this.worker = worker
     return worker
@@ -130,7 +134,7 @@ export class AnalysisClient {
   }
 
   private send<T>(
-    request: AnalysisWorkerRequest,
+    request: AddressableRequest,
     expect: PendingRequest['expect'],
     transfer: Transferable[],
     onProgress?: (progress: AnalysisProgress) => void,
@@ -143,8 +147,28 @@ export class AnalysisClient {
         onProgress,
         expect,
       })
-      worker.postMessage(request, transfer)
+      try {
+        worker.postMessage(request, transfer)
+      } catch (error) {
+        // A synchronous postMessage failure (a detached buffer, a too-large
+        // clone) must not leave its pending entry behind — it would reject
+        // nothing and pin the closure for the life of the client.
+        this.pending.delete(request.requestId)
+        reject(error instanceof Error ? error : new Error(String(error)))
+      }
     })
+  }
+
+  /**
+   * Abandon every request currently in flight.
+   *
+   * The worker resolves each one with the `ANALYSIS_CANCELLED` error, so the
+   * awaiting caller sees a normal failure path rather than a never-settling
+   * promise. Requests that already settled are untouched.
+   */
+  cancelPending(): void {
+    if (this.worker === null || this.pending.size === 0) return
+    this.worker.postMessage({ type: 'cancel', requestIds: [...this.pending.keys()] })
   }
 
   private id(): string {
@@ -206,6 +230,8 @@ export class AnalysisClient {
   dispose(): void {
     this.worker?.terminate()
     this.worker = null
+    const error = new DOMException('The analysis client was disposed.', 'AbortError')
+    for (const [, request] of this.pending) request.reject(error)
     this.pending.clear()
   }
 }

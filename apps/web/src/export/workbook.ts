@@ -9,6 +9,7 @@
  */
 
 import type { RangeStatistics, WindowStatistics } from '@aat/analysis-core'
+import { sanitiseTextCell } from './formula-safety.ts'
 import { buildUnifiedTimeAxis, finiteRange, resampleToAxis, unionTimeRange } from './resample.ts'
 
 /**
@@ -132,8 +133,10 @@ export function planWorkbook(input: WorkbookInput): {
  * complete and is not; silently dropping a sensor would be worse. The caller is
  * expected to offer CSV, which has no such limit.
  */
-export function buildSheets(input: WorkbookInput): Sheet[] {
-  const plan = planWorkbook(input)
+export function buildSheets(
+  input: WorkbookInput,
+  plan: ReturnType<typeof planWorkbook> = planWorkbook(input),
+): Sheet[] {
   if (!plan.fitsWorksheet) {
     throw new ExportTooLargeError(
       `This analysis needs ${plan.dataRows.toLocaleString()} data rows, but a single Excel ` +
@@ -162,7 +165,10 @@ function numberCell(value: number | null): Cell {
 }
 
 function textCell(value: string): Cell {
-  return { value, type: String }
+  // Sanitise at the point every text cell funnels through, so a future
+  // user-controlled string (a run code, a filename) cannot slip past a call
+  // site that forgot the rule.
+  return { value: sanitiseTextCell(value), type: String }
 }
 
 function gravityDataSheet(unifiedTime: Float64Array, input: WorkbookInput): Sheet {

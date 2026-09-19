@@ -38,6 +38,11 @@ export interface UPlotChartProps {
   /** Handed the drawing canvas so PNG export can read it. */
   onCanvasChange: (canvas: HTMLCanvasElement | null) => void
   /**
+   * Handed uPlot's `.u-over` element — the plot-area event layer — so the
+   * selection overlay can listen there without shadowing zoom and pan.
+   */
+  onGestureLayerChange: (layer: HTMLElement | null) => void
+  /**
    * When true this component leaves left-button drags alone: the selection
    * overlay is using them. Panning then needs Shift, exactly as it does when a
    * selection tool owns the primary drag in other analysis tools.
@@ -72,6 +77,7 @@ export function UPlotChart(props: UPlotChartProps): React.JSX.Element {
     bounds,
     onGeometryChange,
     onCanvasChange,
+    onGestureLayerChange,
     primaryDragReserved,
   } = props
 
@@ -255,12 +261,14 @@ export function UPlotChart(props: UPlotChartProps): React.JSX.Element {
     const plot = new uPlot(options, initial, root)
     plotRef.current = plot
     onCanvasChange(plot.ctx.canvas)
+    onGestureLayerChange(plot.over)
     publishGeometry()
 
     return () => {
       plot.destroy()
       plotRef.current = null
       onCanvasChange(null)
+      onGestureLayerChange(null)
     }
   }, [
     model,
@@ -271,6 +279,7 @@ export function UPlotChart(props: UPlotChartProps): React.JSX.Element {
     publishGeometry,
     onCanvasChange,
     onGeometryChange,
+    onGestureLayerChange,
   ])
 
   /**
@@ -303,9 +312,26 @@ export function UPlotChart(props: UPlotChartProps): React.JSX.Element {
     if (plot === null) return
     const over = plot.over
 
+    // Wheel ticks and pointermove arrive faster than frames do; coalescing to
+    // one viewport change per frame keeps decimation per gesture, not per event.
+    // The pending viewport feeds the next event's math so a fast scroll still
+    // compounds correctly.
+    let queuedViewport: ChartViewport | null = null
+    let viewportFrame = 0
+    const publishViewport = (next: ChartViewport) => {
+      queuedViewport = next
+      if (viewportFrame !== 0) return
+      viewportFrame = requestAnimationFrame(() => {
+        viewportFrame = 0
+        const pending = queuedViewport
+        queuedViewport = null
+        if (pending !== null) onViewportChangeRef.current(pending)
+      })
+    }
+
     const onWheel = (event: WheelEvent) => {
       event.preventDefault()
-      const current = viewportRef.current
+      const current = queuedViewport ?? viewportRef.current
       const span = current.max - current.min
       const rect = over.getBoundingClientRect()
       const fraction = rect.width === 0 ? 0.5 : (event.clientX - rect.left) / rect.width
@@ -314,7 +340,7 @@ export function UPlotChart(props: UPlotChartProps): React.JSX.Element {
       // feel like a magnifier instead of a scrollbar.
       const scale = Math.exp(event.deltaY * WHEEL_ZOOM_FACTOR)
       const nextSpan = span * scale
-      onViewportChangeRef.current(
+      publishViewport(
         clampViewport(
           { min: anchor - fraction * nextSpan, max: anchor + (1 - fraction) * nextSpan },
           boundsRef.current,
@@ -328,7 +354,9 @@ export function UPlotChart(props: UPlotChartProps): React.JSX.Element {
       const isPanGesture = event.button === 1 || (event.button === 0 && event.shiftKey)
       if (!isPanGesture) return
       event.preventDefault()
-      panning = { clientX: event.clientX, start: viewportRef.current }
+      // A queued wheel change still wins: pan from where the next frame lands,
+      // not where the last applied one did.
+      panning = { clientX: event.clientX, start: queuedViewport ?? viewportRef.current }
       over.setPointerCapture(event.pointerId)
     }
 
@@ -338,7 +366,7 @@ export function UPlotChart(props: UPlotChartProps): React.JSX.Element {
       if (rect.width === 0) return
       const span = panning.start.max - panning.start.min
       const delta = ((event.clientX - panning.clientX) / rect.width) * span
-      onViewportChangeRef.current(
+      publishViewport(
         clampViewport({ min: panning.start.min - delta, max: panning.start.max - delta }, boundsRef.current),
       )
     }
@@ -356,6 +384,7 @@ export function UPlotChart(props: UPlotChartProps): React.JSX.Element {
     over.addEventListener('pointercancel', endPan)
 
     return () => {
+      if (viewportFrame !== 0) cancelAnimationFrame(viewportFrame)
       over.removeEventListener('wheel', onWheel)
       over.removeEventListener('pointerdown', onPointerDown)
       over.removeEventListener('pointermove', onPointerMove)

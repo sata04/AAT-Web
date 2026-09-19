@@ -16,7 +16,13 @@ export function NoticeStack({ notices, onDismiss }: NoticeStackProps): React.JSX
   return (
     <div>
       {notices.map((notice) => (
-        <div className={`notice notice--${notice.tone}`} key={notice.id} role="status">
+        // Errors assert themselves (`alert` interrupts); quieter tones wait
+        // their turn in the polite live region.
+        <div
+          className={`notice notice--${notice.tone}`}
+          key={notice.id}
+          role={notice.tone === 'error' ? 'alert' : 'status'}
+        >
           <span className="notice__body">{notice.text}</span>
           <button type="button" className="button button--flat" onClick={() => onDismiss(notice.id)}>
             閉じる

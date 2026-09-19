@@ -17,7 +17,9 @@ describe('notice stack', () => {
       />,
     )
 
-    expect(screen.getAllByRole('status')).toHaveLength(2)
+    // Errors announce themselves assertively; quieter tones stay polite.
+    expect(screen.getAllByRole('status')).toHaveLength(1)
+    expect(screen.getAllByRole('alert')).toHaveLength(1)
     await userEvent.setup().click(screen.getAllByRole('button', { name: '閉じる' })[1] as HTMLElement)
     expect(onDismiss).toHaveBeenCalledWith(9)
   })
