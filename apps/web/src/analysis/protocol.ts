@@ -68,10 +68,9 @@ export interface ReleaseRequest {
  *
  * Cancellation is cooperative: the worker checks the set at stage boundaries
  * and once per G-quality window, so a request stops as soon as the engine
- * yields rather than midway through a window's arithmetic. Requests that have
- * already finished (or have not been dequeued yet) are unaffected — a
- * not-yet-started request reads the set at its first checkpoint and exits
- * immediately.
+ * yields rather than midway through a window's arithmetic. A request that has
+ * already finished ignores the flag; one still queued is not skipped — it
+ * starts, reaches its first checkpoint, and exits there.
  */
 export interface CancelRequest {
   type: 'cancel'

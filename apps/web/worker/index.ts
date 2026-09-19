@@ -123,16 +123,18 @@ const v1 = new Hono<AppEnv>()
 /**
  * JSON bodies are buffered whole before a schema ever sees them, so a request whose declared
  * size is already impossible — the largest legitimate body is a poster spec, a few hundred KB —
- * is refused before a byte is paid for in isolate memory. The bound is on `Content-Length`, not
- * on what the schema later allows: chunked bodies with no length still land in validation, which
- * is where every real body is bounded anyway.
+ * is refused before a byte is paid for in isolate memory. The bound is on `Content-Length`.
+ * A body that arrives without one (chunked or HTTP/2 streaming) cannot be bounded by declaration
+ * at all, so on methods that carry a body it is refused rather than buffered blind — every real
+ * client sends a length, because none of them stream request bodies.
  */
 const MAX_JSON_BODY_BYTES = 16 * 1024 * 1024
+const METHODS_WITH_BODY = new Set(['POST', 'PUT', 'PATCH'])
 v1.use('*', async (context, next) => {
   const contentType = context.req.header('content-type') ?? ''
-  if (contentType.includes('application/json')) {
+  if (contentType.includes('application/json') && METHODS_WITH_BODY.has(context.req.method)) {
     const declared = Number(context.req.header('content-length') ?? '')
-    if (declared > MAX_JSON_BODY_BYTES) {
+    if (!Number.isFinite(declared) || declared > MAX_JSON_BODY_BYTES) {
       throw new ApiError('REQUEST_TOO_LARGE', { details: { maxBytes: MAX_JSON_BODY_BYTES } })
     }
   }

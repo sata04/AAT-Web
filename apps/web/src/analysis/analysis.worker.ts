@@ -91,11 +91,22 @@ interface RetainedTable {
 const retained = new Map<string, RetainedTable>()
 
 /**
- * Sources whose `release` arrived before their `open` finished — or for a table
- * already evicted. The open still answers its request, but it must not go on to
- * retain a table the page has already closed.
+ * Sources whose `release` arrived while their `open` was still parsing. The
+ * open still answers its request — the column proposal was asked for — but it
+ * must not go on to retain a table the page has already closed.
  */
 const releasedBeforeOpen = new Set<string>()
+
+/**
+ * Sources an `open` is working on, from the moment its content hash is known
+ * until the request settles. `handleRelease` consults this to tell an
+ * in-flight open apart from an already-evicted or never-opened source: only
+ * the former earns a `releasedBeforeOpen` marker, because a marker with no
+ * open to consume it would sit until the *next* open of that source and keep
+ * it from retaining — reopening a closed-and-evicted dataset would then fail
+ * analysis with SOURCE_NOT_RETAINED.
+ */
+const opensInFlight = new Set<string>()
 
 /**
  * Cancellation bookkeeping. `inFlight` bounds `cancelled` to requests that are
@@ -216,38 +227,47 @@ async function handleOpen(request: OpenRequest): Promise<void> {
   // table, the cache entry and the cloud snapshot's provenance.
   const sourceSha256 = await sha256Hex(bytes)
 
-  const { text, encoding } = decodeCsv(bytes)
-  progress(request.requestId, 'parsing', 20)
+  opensInFlight.add(sourceSha256)
+  try {
+    const { text, encoding } = decodeCsv(bytes)
+    progress(request.requestId, 'parsing', 20)
 
-  const table = parseCsvText(text)
-  // Decoding and parsing are the long synchronous stretch of `open`; the
-  // earliest a cancel can land is here, at the first suspension.
-  await checkpoint(request.requestId)
-  progress(request.requestId, 'detecting', 45)
+    const table = parseCsvText(text)
+    // Decoding and parsing are the long synchronous stretch of `open`; the
+    // earliest a cancel can land is here, at the first suspension.
+    await checkpoint(request.requestId)
+    progress(request.requestId, 'detecting', 45)
 
-  const detected = detectColumns(table)
-  // A `release` processed during the checkpoint above means the dataset was
-  // closed mid-open: answer it (the columns were asked for) without retaining.
-  if (!releasedBeforeOpen.delete(sourceSha256)) {
-    retain(sourceSha256, { table, filename: request.filename, encoding })
+    const detected = detectColumns(table)
+    // A `release` processed during the checkpoint above means the dataset was
+    // closed mid-open: answer it (the columns were asked for) without retaining.
+    if (!releasedBeforeOpen.delete(sourceSha256)) {
+      retain(sourceSha256, { table, filename: request.filename, encoding })
+    }
+
+    const proposal = proposeMapping(detected)
+    const message: OpenedMessage = {
+      type: 'opened',
+      requestId: request.requestId,
+      source: {
+        sourceSha256,
+        filename: request.filename,
+        encoding,
+        columnNames: [...table.columnNames],
+        detected,
+        rowCount: table.rowCount,
+        suggestedMapping: proposal.mapping,
+        ambiguity: proposal.ambiguity,
+      },
+    }
+    scope.postMessage(message)
+  } finally {
+    opensInFlight.delete(sourceSha256)
+    // A marker that survived to here targeted this open's lifecycle. Clearing it
+    // unconditionally covers the failure paths too: a release during an open
+    // that then errors must not linger into the source's next open.
+    releasedBeforeOpen.delete(sourceSha256)
   }
-
-  const proposal = proposeMapping(detected)
-  const message: OpenedMessage = {
-    type: 'opened',
-    requestId: request.requestId,
-    source: {
-      sourceSha256,
-      filename: request.filename,
-      encoding,
-      columnNames: [...table.columnNames],
-      detected,
-      rowCount: table.rowCount,
-      suggestedMapping: proposal.mapping,
-      ambiguity: proposal.ambiguity,
-    },
-  }
-  scope.postMessage(message)
 }
 
 /**
@@ -543,9 +563,11 @@ async function handleAnalyse(request: AnalyseRequest): Promise<void> {
 }
 
 function handleRelease(request: ReleaseRequest): void {
-  if (!retained.delete(request.sourceSha256)) {
-    // Nothing retained: either evicted already, or an `open` for this source is
-    // still parsing — mark it so the open does not retain a closed table.
+  // Only an open still parsing earns a marker. For an already-evicted (or
+  // never-opened) source there is no open to consume one, and the marker would
+  // outlive its purpose — consumed by the source's *next* open, which would
+  // then skip retention and break the following analyse.
+  if (!retained.delete(request.sourceSha256) && opensInFlight.has(request.sourceSha256)) {
     releasedBeforeOpen.add(request.sourceSha256)
   }
   scope.postMessage({ type: 'released', requestId: request.requestId })
