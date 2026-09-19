@@ -31,6 +31,17 @@ export interface SensorSeries {
   gravity: Float64Array
 }
 
+/** A loaded sensor additionally keeps the pre-conversion acceleration series. */
+export interface LoadedSensor extends SensorSeries {
+  /**
+   * Acceleration in m/s² on the unshifted axis — masked where the timestamp is
+   * unusable and sign-corrected per `invertInnerAcceleration`. The Excel
+   * export's Acceleration Data sheet needs this series as loaded, not
+   * `gravity * gravityConstant`, which would add a rounding step per sample.
+   */
+  acceleration: Float64Array
+}
+
 /** How a sync index was arrived at when no sample crossed the threshold. */
 export type SyncFallback = 'borrowed-drag' | 'first-sample'
 
@@ -46,8 +57,8 @@ export interface SyncResult {
 }
 
 export interface LoadedData {
-  inner: SensorSeries
-  drag: SensorSeries
+  inner: LoadedSensor
+  drag: LoadedSensor
   sync: SyncResult
   /** Rows in the source table (before any trimming). */
   sampleCount: number
@@ -353,8 +364,8 @@ export function loadAndProcessData(table: CsvTable, config: AnalysisConfig): Loa
   const dragGravity = useDrag ? divide(dragAcceleration, gravityConstant) : EMPTY_SERIES
 
   return {
-    inner: { time: innerTime, gravity: innerGravity },
-    drag: { time: dragTime, gravity: dragGravity },
+    inner: { time: innerTime, gravity: innerGravity, acceleration: innerAcceleration },
+    drag: { time: dragTime, gravity: dragGravity, acceleration: dragAcceleration },
     sync: {
       innerIndex: useInner ? innerIndex : null,
       dragIndex: useDrag ? dragIndex : null,

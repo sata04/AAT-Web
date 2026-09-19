@@ -61,17 +61,18 @@ function isAsciiDigit(code: number): boolean {
  *
  * Returns `null` when pandas would *not* accept the text as a float — which is
  * how a column ends up as `object` dtype and how `pd.to_numeric(errors='coerce')`
- * decides to emit a missing value. `Infinity` is never returned from here; the
- * infinity spellings are handled by the caller, mirroring pandas, where they are
- * a fallback applied after the numeric conversion has failed.
+ * decides to emit a missing value. Overflowing magnitudes return ±Infinity, and
+ * the `inf` spellings are handled by the caller, mirroring pandas, where they
+ * are a fallback applied after the numeric conversion has failed.
  *
  * Known faithful quirks, reproduced deliberately:
  *   - only the first 17 significant digits are read, the rest shift the decimal
  *     exponent, so `0.00000000000000000001` converts to `0` exactly as pandas
  *     does with its default `float_precision`;
- *   - a decimal exponent above 308, or a scaled value that overflows to
- *     infinity, is reported as *not a number* rather than as `Infinity`,
- *     because the tokenizer sets `ERANGE` and the caller then rejects the cell.
+ *   - a decimal exponent above 308 does not set `ERANGE`: the tokenizer emits
+ *     `number == 0 ? 0 : number < 0 ? -HUGE_VAL : HUGE_VAL`, and the caller
+ *     accepts the infinity. `0e999` is therefore a real `0` — a sample pandas
+ *     would count, and one this port must not silently turn into a gap.
  *
  * Deliberate, documented divergence: an all-integer column is `int64` in pandas
  * and converts to float in one correctly-rounded step, whereas this converter
@@ -157,8 +158,11 @@ export function parsePandasFloat(text: string): number | null {
   while (position < length && isAsciiSpace(text.charCodeAt(position))) position++
   if (position !== length) return null
 
-  if (exponent > 308) return null
-  if (exponent > 0) {
+  if (exponent > 308) {
+    // Overflow: `number == 0 ? 0 : number < 0 ? -HUGE_VAL : HUGE_VAL`. A
+    // signed zero stays a real zero; a nonzero mantissa becomes ±Infinity.
+    number = number === 0 ? 0 : number < 0 ? Number.NEGATIVE_INFINITY : Number.POSITIVE_INFINITY
+  } else if (exponent > 0) {
     number *= POWERS_OF_TEN[exponent] as number
   } else if (exponent < -308) {
     // Subnormal range: the tokenizer scales in two steps to stay in range.
@@ -172,10 +176,9 @@ export function parsePandasFloat(text: string): number | null {
     number /= POWERS_OF_TEN[-exponent] as number
   }
 
-  // The tokenizer flags an overflowed result as ERANGE, and the caller then
-  // treats the cell as non-numeric rather than as an infinity.
-  if (!Number.isFinite(number)) return null
-
+  // The scaled value itself is returned unchecked: `1.7e310` overflows at the
+  // multiply and pandas accepts the resulting Infinity, just as it accepts the
+  // `inf` spellings the caller handles separately.
   return number
 }
 
@@ -217,7 +220,7 @@ export function isMissingToken(text: string): boolean {
  * the numeric conversion has failed (`cinf` / `cposinf` / `cneginf` and the
  * `Infinity` forms in `pandas/_libs/parsers.pyx`).
  */
-function parseInfinityToken(text: string): number | null {
+export function parseInfinityToken(text: string): number | null {
   // `strcasecmp` against the whole cell — no trimming, exactly as pandas does it.
   const normalised = text.toLowerCase()
   if (normalised === 'inf' || normalised === '+inf') return Number.POSITIVE_INFINITY

@@ -6,6 +6,7 @@
 
 import { describe, expect, it } from 'vitest'
 import { type AnalysisConfig, DEFAULT_ANALYSIS_CONFIG } from '../src/config.ts'
+import { AnalysisCancelledError } from '../src/errors.ts'
 import { calculateGQuality, type GQualityProgress, gQualityWindowSizes } from '../src/gquality.ts'
 import type { FilterResult } from '../src/pipeline.ts'
 
@@ -66,14 +67,14 @@ describe('gQualityWindowSizes', () => {
 })
 
 describe('calculateGQuality', () => {
-  it('sweeps every window and reports progress', () => {
+  it('sweeps every window and reports progress', async () => {
     const inner = series(40, (index) => 0.001 * Math.sin(index))
     const drag = series(40, (index) => 0.002 * Math.cos(index))
     const progress: GQualityProgress[] = []
 
-    const result = calculateGQuality(filterResult(inner, drag, 100), CONFIG, (update) =>
-      progress.push(update),
-    )
+    const result = await calculateGQuality(filterResult(inner, drag, 100), CONFIG, {
+      onProgress: (update) => progress.push(update),
+    })
 
     expect(result.rows.length).toBe(3)
     expect(result.rows.map((row) => row.windowSize)).toEqual([0.1, 0.15000000000000002, 0.2])
@@ -87,11 +88,11 @@ describe('calculateGQuality', () => {
     expect(progress[2]?.total).toBe(3)
   })
 
-  it('skips a sensor whose series is shorter than the window', () => {
+  it('skips a sensor whose series is shorter than the window', async () => {
     // 12 samples at 100 Hz covers the 0.1 s window but not the 0.15 s one.
     const inner = series(12, (index) => 0.001 * index)
     const drag = series(40, (index) => 0.002 * index)
-    const result = calculateGQuality(filterResult(inner, drag, 100), CONFIG)
+    const result = await calculateGQuality(filterResult(inner, drag, 100), CONFIG)
 
     expect(result.rows[0]?.innerMean).not.toBeNull()
     expect(result.rows[1]?.innerMean).toBeNull()
@@ -99,24 +100,47 @@ describe('calculateGQuality', () => {
     expect(result.rows[1]?.dragMean).not.toBeNull()
   })
 
-  it('emits no row when neither sensor produced a mean', () => {
+  it('emits no row when neither sensor produced a mean', async () => {
     // Every window holds a missing sample, so no window is eligible.
     const inner = series(40, () => Number.NaN)
-    const result = calculateGQuality(filterResult(inner, new Float64Array(0), 100), CONFIG)
+    const result = await calculateGQuality(filterResult(inner, new Float64Array(0), 100), CONFIG)
     expect(result.rows).toEqual([])
   })
 
-  it('skips the sweep when nothing is long enough for the smallest window', () => {
+  it('skips the sweep when nothing is long enough for the smallest window', async () => {
     const inner = series(4, (index) => 0.001 * index)
-    const result = calculateGQuality(filterResult(inner, new Float64Array(0), 100), CONFIG)
+    const result = await calculateGQuality(filterResult(inner, new Float64Array(0), 100), CONFIG)
     expect(result.rows).toEqual([])
     expect(result.warnings.map((entry) => entry.code)).toEqual(['GQUALITY_SKIPPED'])
     expect(result.warnings[0]?.details.reason).toBe('too-short')
   })
 
-  it('skips the sweep when neither sensor has data at all', () => {
-    const result = calculateGQuality(filterResult(new Float64Array(0), new Float64Array(0), 100), CONFIG)
+  it('skips the sweep when neither sensor has data at all', async () => {
+    const result = await calculateGQuality(
+      filterResult(new Float64Array(0), new Float64Array(0), 100),
+      CONFIG,
+    )
     expect(result.rows).toEqual([])
     expect(result.warnings[0]?.details.reason).toBe('no-data')
+  })
+
+  it('stops the sweep when the checkpoint throws, without losing earlier rows', async () => {
+    const inner = series(40, (index) => 0.001 * Math.sin(index))
+    const drag = series(40, (index) => 0.002 * Math.cos(index))
+    const progressed: number[] = []
+    let completed = 0
+
+    const attempt = calculateGQuality(filterResult(inner, drag, 100), CONFIG, {
+      onProgress: (update) => progressed.push(update.percent),
+      checkpoint: () => {
+        completed += 1
+        if (completed === 2) throw new AnalysisCancelledError()
+      },
+    })
+
+    await expect(attempt).rejects.toBeInstanceOf(AnalysisCancelledError)
+    // The first window finished — cancellation is between windows, not inside
+    // one, so a completed window's numbers are never corrupted by the abort.
+    expect(progressed).toEqual([Math.trunc(100 / 3)])
   })
 })

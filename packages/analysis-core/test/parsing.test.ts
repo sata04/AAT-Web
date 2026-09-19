@@ -74,8 +74,17 @@ describe('parsePandasFloat', () => {
     expect(parsePandasFloat('1.5x')).toBeNull()
     // An exponent marker with no digits leaves trailing text behind.
     expect(parsePandasFloat('1e')).toBeNull()
-    // Overflow is ERANGE in the tokenizer, which makes the cell non-numeric.
-    expect(parsePandasFloat('1e400')).toBeNull()
+  })
+
+  it('lets magnitudes overflow to a signed infinity, as the tokenizer does', () => {
+    // `exponent > 308` in tokenizer.c produces -HUGE_VAL / HUGE_VAL, which the
+    // caller accepts — overflow is not ERANGE.
+    expect(parsePandasFloat('1e400')).toBe(Number.POSITIVE_INFINITY)
+    expect(parsePandasFloat('-1e400')).toBe(Number.NEGATIVE_INFINITY)
+    // A signed zero stays zero even with a huge exponent.
+    expect(parsePandasFloat('0e999')).toBe(0)
+    // A large mantissa can also overflow at the scale step (1e17 * 1e308).
+    expect(parsePandasFloat('99999999999999999999e300')).toBe(Number.POSITIVE_INFINITY)
   })
 })
 
@@ -117,6 +126,15 @@ describe('parseCsvText', () => {
     expect(table.column('a.2')?.cells).toEqual(['3'])
   })
 
+  it('mangles a duplicate that collides with a generated name, as dedup_names does', () => {
+    // pandas counts occurrences of the *original* name and keeps suffixing when
+    // the generated name itself is taken: the third column is a.1.1, not a.2.
+    const table = parseCsvText('a,a.1,a\n1,2,3\n')
+    expect(table.columnNames).toEqual(['a', 'a.1', 'a.1.1'])
+    expect(table.column('a.1')?.cells).toEqual(['2'])
+    expect(table.column('a.1.1')?.cells).toEqual(['3'])
+  })
+
   it('skips blank lines and pads short rows', () => {
     const table = parseCsvText('t,a,b\n\n0.0,1.0,2.0\n0.001,3.0\n')
     expect(table.rowCount).toBe(2)
@@ -148,6 +166,14 @@ describe('toNumericColumn', () => {
     expect(() => toNumericColumn(table.column('a') as never)).toThrow(DataProcessingError)
   })
 
+  it('reads an all-boolean column as 1.0/0.0, matching pandas bool dtype', () => {
+    const table = parseCsvText('flags\nTrue\nFalse\ntrue\n')
+    const result = toNumericColumn(table.column('flags') as never)
+    expect(Array.from(result.values)).toEqual([1, 0, 1])
+    expect(result.missingCount).toBe(0)
+    expect(result.coercedCount).toBe(0)
+  })
+
   it('accepts a column that is empty because the file has no rows', () => {
     const table = parseCsvText('a,b\n')
     expect(toNumericColumn(table.column('a') as never).values.length).toBe(0)
@@ -163,6 +189,19 @@ describe('isNumericColumn', () => {
     expect(isNumericColumn(table.column('text') as never)).toBe(false)
     // `is_numeric_dtype` is True for bool columns.
     expect(isNumericColumn(table.column('flags') as never)).toBe(true)
+  })
+
+  it('treats the infinity spellings as numeric, matching float64 inference', () => {
+    const table = parseCsvText('t,a\n0.0,inf\n0.001,-Infinity\n')
+    expect(isNumericColumn(table.column('a') as never)).toBe(true)
+  })
+
+  it('keeps bool columns un-numeric when a missing or numeric cell makes them object dtype', () => {
+    // bool dtype cannot hold NaN, and booleans mixed with numbers are object.
+    const gapped = parseCsvText('a,b\nTrue,1\n,x\nFalse,2\n')
+    expect(isNumericColumn(gapped.column('a') as never)).toBe(false)
+    const mixed = parseCsvText('a\nTrue\n1.0\nFalse\n')
+    expect(isNumericColumn(mixed.column('a') as never)).toBe(false)
   })
 })
 

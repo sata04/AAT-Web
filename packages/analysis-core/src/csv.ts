@@ -14,7 +14,7 @@
 
 import Papa from 'papaparse'
 import { CsvParseError, DataProcessingError } from './errors.ts'
-import { isMissingToken, parseCell, parsePandasFloat } from './pandas-number.ts'
+import { isMissingToken, parseCell, parseInfinityToken, parsePandasFloat } from './pandas-number.ts'
 
 /** One column of raw, unconverted cell text. */
 export interface CsvColumn {
@@ -46,28 +46,26 @@ export class CsvTable {
 }
 
 /**
- * `mangle_dupe_cols`: pandas renames repeated headers `name`, `name.1`, `name.2`.
+ * `mangle_dupe_cols` via `parsers.pyx::dedup_names`: the first copy keeps the
+ * name, later copies become `.1`, `.2`, … counting occurrences *of the original
+ * name*, and a generated name that itself collides keeps suffixing —
+ * `a, a.1, a` becomes `a, a.1, a.1.1`, not `a.2`.
  *
  * Without this a duplicated header would silently shadow the earlier column, and
  * a configuration naming that column would analyse the wrong data.
  */
 function deduplicateHeader(header: readonly string[]): string[] {
-  const seen = new Map<string, number>()
-  return header.map((name) => {
-    const previous = seen.get(name)
-    if (previous === undefined) {
-      seen.set(name, 0)
-      return name
+  const counts = new Map<string, number>()
+  return header.map((original) => {
+    let name = original
+    let seen = counts.get(name) ?? 0
+    while (seen > 0) {
+      counts.set(name, seen + 1)
+      name = `${name}.${seen}`
+      seen = counts.get(name) ?? 0
     }
-    let suffix = previous + 1
-    let candidate = `${name}.${suffix}`
-    while (seen.has(candidate)) {
-      suffix++
-      candidate = `${name}.${suffix}`
-    }
-    seen.set(name, suffix)
-    seen.set(candidate, 0)
-    return candidate
+    counts.set(name, 1)
+    return name
   })
 }
 
@@ -139,10 +137,14 @@ const BOOLEAN_TOKENS: ReadonlySet<string> = new Set(['True', 'TRUE', 'true', 'Fa
  */
 export function isNumericColumn(column: CsvColumn): boolean {
   let sawBoolean = false
+  let sawMissing = false
   let sawNumber = false
   for (const cell of column.cells) {
-    if (isMissingToken(cell)) continue
-    if (parsePandasFloat(cell) !== null) {
+    if (isMissingToken(cell)) {
+      sawMissing = true
+      continue
+    }
+    if (parsePandasFloat(cell) !== null || parseInfinityToken(cell) !== null) {
       sawNumber = true
       continue
     }
@@ -152,8 +154,9 @@ export function isNumericColumn(column: CsvColumn): boolean {
     }
     return false
   }
-  // A column mixing booleans and numbers falls back to object dtype in pandas.
-  return !(sawBoolean && sawNumber)
+  // bool dtype can hold no NaN, so a boolean column with a missing cell — like
+  // one mixing booleans and numbers — is object dtype, which is not numeric.
+  return !(sawBoolean && (sawNumber || sawMissing))
 }
 
 export interface NumericColumn {
@@ -176,6 +179,25 @@ export interface NumericColumn {
  */
 export function toNumericColumn(column: CsvColumn): NumericColumn {
   const length = column.cells.length
+
+  // A column of pure boolean tokens is bool dtype to pandas, and
+  // `pd.to_numeric` leaves it as 1.0/0.0 rather than coercing it to NaN.
+  let allBoolean = length > 0
+  for (const cell of column.cells) {
+    if (!BOOLEAN_TOKENS.has(cell)) {
+      allBoolean = false
+      break
+    }
+  }
+  if (allBoolean) {
+    const values = new Float64Array(length)
+    for (let index = 0; index < length; index++) {
+      const cell = column.cells[index] as string
+      values[index] = cell === 'True' || cell === 'TRUE' || cell === 'true' ? 1 : 0
+    }
+    return { values, missingCount: 0, coercedCount: 0 }
+  }
+
   const values = new Float64Array(length)
   let missingCount = 0
   let coercedCount = 0
