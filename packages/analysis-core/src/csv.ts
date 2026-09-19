@@ -14,7 +14,13 @@
 
 import Papa from 'papaparse'
 import { CsvParseError, DataProcessingError } from './errors.ts'
-import { isMissingToken, parseCell, parseInfinityToken, parsePandasFloat } from './pandas-number.ts'
+import {
+  type CellKind,
+  isMissingToken,
+  parseCell,
+  parseInfinityToken,
+  parsePandasFloat,
+} from './pandas-number.ts'
 
 /** One column of raw, unconverted cell text. */
 export interface CsvColumn {
@@ -103,6 +109,20 @@ export function parseCsvText(text: string): CsvTable {
 
   const header = deduplicateHeader(headerRow)
   const rowCount = rows.length - 1
+  const cells = pivotRows(rows, header, rowCount)
+  const columns = header.map((name, index) => ({ name, cells: cells[index] as string[] }))
+  return new CsvTable(columns, rowCount)
+}
+
+/**
+ * Transpose the body rows into column-major cell arrays.
+ *
+ * A row with more fields than the header is an error in pandas ("Expected N
+ * fields") and is an error here — the alternative is silently analysing shifted
+ * columns. A *short* row is padded with empty cells, which pandas reads as
+ * missing values.
+ */
+function pivotRows(rows: string[][], header: readonly string[], rowCount: number): string[][] {
   const cells: string[][] = header.map(() => new Array<string>(rowCount))
 
   for (let rowIndex = 0; rowIndex < rowCount; rowIndex++) {
@@ -119,12 +139,23 @@ export function parseCsvText(text: string): CsvTable {
     }
   }
 
-  const columns = header.map((name, index) => ({ name, cells: cells[index] as string[] }))
-  return new CsvTable(columns, rowCount)
+  return cells
 }
 
 /** The boolean spellings the C parser accepts; a bool column is numeric to pandas. */
 const BOOLEAN_TOKENS: ReadonlySet<string> = new Set(['True', 'TRUE', 'true', 'False', 'FALSE', 'false'])
+
+/**
+ * How the pandas C parser would classify one cell for dtype inference: a
+ * number (including the `inf` spellings), a missing token, a boolean token, or
+ * `null` for text it cannot read as any of those.
+ */
+function cellNumericKind(cell: string): 'missing' | 'number' | 'boolean' | null {
+  if (isMissingToken(cell)) return 'missing'
+  if (parsePandasFloat(cell) !== null || parseInfinityToken(cell) !== null) return 'number'
+  if (BOOLEAN_TOKENS.has(cell)) return 'boolean'
+  return null
+}
 
 /**
  * Would `pd.read_csv` have given this column a numeric dtype?
@@ -136,27 +167,11 @@ const BOOLEAN_TOKENS: ReadonlySet<string> = new Set(['True', 'TRUE', 'true', 'Fa
  * Booleans count as numeric too, because `is_numeric_dtype(bool)` is `True`.
  */
 export function isNumericColumn(column: CsvColumn): boolean {
-  let sawBoolean = false
-  let sawMissing = false
-  let sawNumber = false
-  for (const cell of column.cells) {
-    if (isMissingToken(cell)) {
-      sawMissing = true
-      continue
-    }
-    if (parsePandasFloat(cell) !== null || parseInfinityToken(cell) !== null) {
-      sawNumber = true
-      continue
-    }
-    if (BOOLEAN_TOKENS.has(cell)) {
-      sawBoolean = true
-      continue
-    }
-    return false
-  }
+  const kinds = new Set(column.cells.map(cellNumericKind))
+  if (kinds.has(null)) return false
   // bool dtype can hold no NaN, so a boolean column with a missing cell — like
   // one mixing booleans and numbers — is object dtype, which is not numeric.
-  return !(sawBoolean && (sawNumber || sawMissing))
+  return !(kinds.has('boolean') && (kinds.has('number') || kinds.has('missing')))
 }
 
 export interface NumericColumn {
@@ -178,45 +193,53 @@ export interface NumericColumn {
  * analysing an all-NaN series.
  */
 export function toNumericColumn(column: CsvColumn): NumericColumn {
+  const booleans = booleanColumnValues(column)
+  if (booleans !== null) {
+    return { values: booleans, missingCount: 0, coercedCount: 0 }
+  }
+  return coerceNumericCells(column)
+}
+
+/**
+ * The all-boolean fast path: a column of pure boolean tokens is bool dtype to
+ * pandas, and `pd.to_numeric` leaves it as 1.0/0.0 rather than coercing it to
+ * NaN. Returns null when any cell is not a boolean token; an empty column is
+ * vacuously all-boolean, which returns the same empty result the coercion path
+ * would.
+ */
+function booleanColumnValues(column: CsvColumn): Float64Array | null {
   const length = column.cells.length
-
-  // A column of pure boolean tokens is bool dtype to pandas, and
-  // `pd.to_numeric` leaves it as 1.0/0.0 rather than coercing it to NaN.
-  let allBoolean = length > 0
-  for (const cell of column.cells) {
-    if (!BOOLEAN_TOKENS.has(cell)) {
-      allBoolean = false
-      break
-    }
-  }
-  if (allBoolean) {
-    const values = new Float64Array(length)
-    for (let index = 0; index < length; index++) {
-      const cell = column.cells[index] as string
-      values[index] = cell === 'True' || cell === 'TRUE' || cell === 'true' ? 1 : 0
-    }
-    return { values, missingCount: 0, coercedCount: 0 }
-  }
-
   const values = new Float64Array(length)
-  let missingCount = 0
-  let coercedCount = 0
-  let numericCount = 0
+  for (let index = 0; index < length; index++) {
+    const cell = column.cells[index] as string
+    if (!BOOLEAN_TOKENS.has(cell)) return null
+    values[index] = cell === 'True' || cell === 'TRUE' || cell === 'true' ? 1 : 0
+  }
+  return values
+}
+
+/**
+ * `pd.to_numeric(column, errors='coerce')` on a mixed column: every cell goes
+ * through `parseCell`, and unconvertible text is counted and coerced to a
+ * missing value. A column with no numeric value at all is an error.
+ */
+function coerceNumericCells(column: CsvColumn): NumericColumn {
+  const length = column.cells.length
+  const values = new Float64Array(length)
+  const counts: Record<CellKind, number> = { number: 0, missing: 0, invalid: 0 }
 
   for (let index = 0; index < length; index++) {
     const parsed = parseCell(column.cells[index] as string)
     values[index] = parsed.value
-    if (parsed.kind === 'missing') missingCount++
-    else if (parsed.kind === 'invalid') coercedCount++
-    else numericCount++
+    counts[parsed.kind]++
   }
 
-  if (length > 0 && numericCount === 0) {
+  if (length > 0 && counts.number === 0) {
     throw new DataProcessingError('COLUMN_NOT_NUMERIC', `Column '${column.name}' contains no numeric data.`, {
       column: column.name,
       rows: length,
     })
   }
 
-  return { values, missingCount, coercedCount }
+  return { values, missingCount: counts.missing, coercedCount: counts.invalid }
 }

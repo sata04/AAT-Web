@@ -37,14 +37,25 @@ import {
   decodeCsv,
   detectColumns,
   EMPTY_WINDOW_STATISTICS,
+  type AnalysisConfig as EngineConfig,
+  type FilterResult,
   filterData,
+  type GQualityResult,
+  type LoadedData,
   loadAndProcessData,
   parseCsvText,
+  type WindowStatistics,
 } from '@aat/analysis-core'
 import type { AnalysisConfig } from '@aat/shared'
 import { configHash, sha256Hex } from '@aat/shared'
 import { ANALYSIS_ENGINE_VERSION } from '../app/version.ts'
-import { cacheBudgetBytes, evictToBudget, readCache, writeCache } from '../cache/analysis-cache.ts'
+import {
+  type CacheKeyParts,
+  cacheBudgetBytes,
+  evictToBudget,
+  readCache,
+  writeCache,
+} from '../cache/analysis-cache.ts'
 import { toEngineConfig } from './engine-config.ts'
 import { proposeMapping } from './mapping.ts'
 import type {
@@ -282,60 +293,38 @@ function emptySensor(): SensorResult {
   }
 }
 
-async function handleAnalyse(request: AnalyseRequest): Promise<void> {
-  const entry = retained.get(request.sourceSha256)
-  if (entry === undefined) {
-    scope.postMessage({
-      type: 'error',
-      requestId: request.requestId,
-      code: 'SOURCE_NOT_RETAINED',
-      message: 'The parsed source is no longer held by the worker; reopen the file.',
-    } satisfies ErrorMessage)
-    return
+/**
+ * Answer `analyse` from the IndexedDB cache when a usable entry exists.
+ *
+ * Returns true when the request was answered from cache. The read itself yields
+ * to the event loop, where a queued `cancel` runs — a hit is not allowed to
+ * answer over a cancellation just because it was fast.
+ */
+async function respondFromCache(request: AnalyseRequest, cacheParts: CacheKeyParts): Promise<boolean> {
+  if (!request.useCache) return false
+  const cached = await readCache<AnalysisPayload>(cacheParts)
+  throwIfCancelled(request.requestId)
+  if (cached === null) return false
+  // A cached entry computed without the sweep must not satisfy a request that
+  // needs it; the reverse is fine, extra rows are simply ignored.
+  if (!request.skipGQuality && !cached.payload.gQualityComputed) return false
+  const message: AnalysedMessage = {
+    type: 'analysed',
+    requestId: request.requestId,
+    payload: cached.payload,
+    fromCache: true,
   }
-  // Map insertion order is the LRU order; reinsert so a table in active use is
-  // not evicted under a burst of opens for other datasets.
-  retain(request.sourceSha256, entry)
+  scope.postMessage(message, payloadTransfers(cached.payload))
+  return true
+}
 
-  const identity = await analysisIdentityHash(request.config, request.mapping)
-  const cacheParts = {
-    sourceSha256: request.sourceSha256,
-    configHash: identity,
-    engineVersion: ANALYSIS_ENGINE_VERSION,
-  }
-
-  if (request.useCache) {
-    const cached = await readCache<AnalysisPayload>(cacheParts)
-    // The IndexedDB read yielded to the event loop, where a queued `cancel` ran —
-    // a hit is not allowed to answer over a cancellation just because it was fast.
-    throwIfCancelled(request.requestId)
-    // A cached entry computed without the sweep must not satisfy a request that
-    // needs it; the reverse is fine, extra rows are simply ignored.
-    if (cached !== null && (request.skipGQuality || cached.payload.gQualityComputed)) {
-      const message: AnalysedMessage = {
-        type: 'analysed',
-        requestId: request.requestId,
-        payload: cached.payload,
-        fromCache: true,
-      }
-      scope.postMessage(message, payloadTransfers(cached.payload))
-      return
-    }
-  }
-
-  const { table } = entry
-  const engineConfig = toEngineConfig(request.config, request.mapping)
-
-  await checkpoint(request.requestId)
-  progress(request.requestId, 'loading', 50)
-  const loaded = loadAndProcessData(table, engineConfig)
-
-  progress(request.requestId, 'filtering', 58)
-  const filtered = filterData(loaded, engineConfig)
-
-  progress(request.requestId, 'statistics', 64)
+/** Per-sensor minimum-window statistics over the filtered segment. */
+function sensorStatistics(
+  filtered: FilterResult,
+  engineConfig: EngineConfig,
+): { inner: WindowStatistics; drag: WindowStatistics } {
   const statisticsConfig = { windowSize: engineConfig.windowSize, samplingRate: engineConfig.samplingRate }
-  const statistics = {
+  return {
     inner:
       filtered.inner.gravity.length > 0
         ? calculateStatistics(filtered.inner.gravity, filtered.inner.time, statisticsConfig)
@@ -345,7 +334,14 @@ async function handleAnalyse(request: AnalyseRequest): Promise<void> {
         ? calculateStatistics(filtered.drag.gravity, filtered.drag.time, statisticsConfig)
         : EMPTY_WINDOW_STATISTICS,
   }
+}
 
+/** The two sensor slots of the payload; a disabled sensor gets an empty result. */
+function sensorResults(
+  request: AnalyseRequest,
+  loaded: LoadedData,
+  filtered: FilterResult,
+): { inner: SensorResult; drag: SensorResult } {
   const inner: SensorResult = request.mapping.useInner
     ? {
         present: filtered.inner.gravity.length > 0,
@@ -372,40 +368,92 @@ async function handleAnalyse(request: AnalyseRequest): Promise<void> {
       }
     : emptySensor()
 
+  return { inner, drag }
+}
+
+/**
+ * The G-quality sweep with its cooperative-cancel checkpoint.
+ *
+ * Checking the flag costs nothing per window; yielding to the event loop costs
+ * a millisecond-scale turn, so only pay it when this sweep is taking long
+ * enough that a user could plausibly reach for the cancel button.
+ */
+async function runGQualitySweep(
+  request: AnalyseRequest,
+  filtered: FilterResult,
+  engineConfig: EngineConfig,
+): Promise<GQualityResult> {
+  if (request.skipGQuality) return { rows: [], warnings: [] }
+  let lastYield = 0
+  return calculateGQuality(filtered, engineConfig, {
+    onProgress: (update) => {
+      // The sweep dominates the wall clock, so it owns the tail of the bar.
+      progress(request.requestId, 'gquality', 65 + Math.round(update.percent * 0.3))
+    },
+    checkpoint: async () => {
+      const now = Date.now()
+      if (now - lastYield >= 50) {
+        lastYield = now
+        await yieldToEventLoop()
+      }
+      throwIfCancelled(request.requestId)
+    },
+  })
+}
+
+/** Everything the numerical pipeline produced for one request. */
+interface ComputedAnalysis {
+  loaded: LoadedData
+  filtered: FilterResult
+  statistics: { inner: WindowStatistics; drag: WindowStatistics }
+  gQuality: GQualityResult
+}
+
+/**
+ * Run the numerical pipeline: load, filter, statistics, then the sweep.
+ *
+ * The checkpoints bracket the two longest un-interruptible stretches — the
+ * synchronous stages, and the sweep itself, which can take minutes on a large
+ * file (its own per-window checkpoint covers the interior).
+ */
+async function computeAnalysis(
+  request: AnalyseRequest,
+  table: CsvTable,
+  engineConfig: EngineConfig,
+): Promise<ComputedAnalysis> {
+  await checkpoint(request.requestId)
+  progress(request.requestId, 'loading', 50)
+  const loaded = loadAndProcessData(table, engineConfig)
+
+  progress(request.requestId, 'filtering', 58)
+  const filtered = filterData(loaded, engineConfig)
+
+  progress(request.requestId, 'statistics', 64)
+  const statistics = sensorStatistics(filtered, engineConfig)
+
   // The last chance to see a cancel before the sweep starts — the run of
   // synchronous stages above is the longest un-interruptible stretch of the
   // pipeline, and the sweep itself can take minutes on a large file.
   await checkpoint(request.requestId)
 
-  // Checking the flag costs nothing per window; yielding to the event loop
-  // costs a millisecond-scale turn, so only pay it when this sweep is taking
-  // long enough that a user could plausibly reach for the cancel button.
-  let lastYield = 0
-  const sweepCheckpoint = async (): Promise<void> => {
-    const now = Date.now()
-    if (now - lastYield >= 50) {
-      lastYield = now
-      await yieldToEventLoop()
-    }
-    throwIfCancelled(request.requestId)
-  }
+  const gQuality = await runGQualitySweep(request, filtered, engineConfig)
+  return { loaded, filtered, statistics, gQuality }
+}
 
-  const gQuality = request.skipGQuality
-    ? { rows: [], warnings: [] }
-    : await calculateGQuality(filtered, engineConfig, {
-        onProgress: (update) => {
-          // The sweep dominates the wall clock, so it owns the tail of the bar.
-          progress(request.requestId, 'gquality', 65 + Math.round(update.percent * 0.3))
-        },
-        checkpoint: sweepCheckpoint,
-      })
-
-  const payload: AnalysisPayload = {
+/** Assemble the `analysed` payload from the finished pipeline stages. */
+function assemblePayload(
+  request: AnalyseRequest,
+  entry: RetainedTable,
+  computed: ComputedAnalysis,
+): AnalysisPayload {
+  const { loaded, filtered, statistics, gQuality } = computed
+  const { inner, drag } = sensorResults(request, loaded, filtered)
+  return {
     sourceSha256: request.sourceSha256,
     filename: request.filename,
     encoding: entry.encoding,
-    columnNames: [...table.columnNames],
-    detected: detectColumns(table),
+    columnNames: [...entry.table.columnNames],
+    detected: detectColumns(entry.table),
     mapping: request.mapping,
     inner,
     drag,
@@ -418,33 +466,71 @@ async function handleAnalyse(request: AnalyseRequest): Promise<void> {
     sampleCount: loaded.sampleCount,
     analysisTimestamp: new Date().toISOString(),
   }
+}
 
-  if (request.useCache) {
-    progress(request.requestId, 'caching', 97)
-    const payloadBytes = approximateBytes(payload)
-    const budget = await cacheBudgetBytes()
-    // A payload larger than the whole budget would evict every other entry to make room for a
-    // record it can never share the cache with — skip it rather than empty the store for nothing.
-    if (payloadBytes <= budget) {
-      // Written before the transfer: after `postMessage` the buffers are detached
-      // and there is nothing left here to store.
-      let stored = await writeCache(cacheParts, request.filename, payload, payloadBytes)
-      if (!stored) {
-        // The write failed under pressure, so the store is over budget even before
-        // this payload: evict to a budget that excludes it, then try once more.
-        await evictToBudget(Math.max(0, budget - payloadBytes))
-        stored = await writeCache(cacheParts, request.filename, payload, payloadBytes)
-      }
-      if (stored) {
-        // Whichever write landed, bring the store back under its real budget now rather than
-        // letting it sit over the cap until a later write happens to fail.
-        await evictToBudget(budget)
-      }
-      // Every await above yields to the event loop, where a queued `cancel` finally runs —
-      // check it before the result is posted, or a cancel during eviction still reports success.
-      throwIfCancelled(request.requestId)
-    }
+/**
+ * Store a computed payload under the cache's quota budget.
+ *
+ * Runs before the result is transferred: after `postMessage` the payload's
+ * buffers are detached and there is nothing left here to store.
+ */
+async function writeResultToCache(
+  request: AnalyseRequest,
+  cacheParts: CacheKeyParts,
+  payload: AnalysisPayload,
+): Promise<void> {
+  if (!request.useCache) return
+  progress(request.requestId, 'caching', 97)
+  const payloadBytes = approximateBytes(payload)
+  const budget = await cacheBudgetBytes()
+  // A payload larger than the whole budget would evict every other entry to make room for a
+  // record it can never share the cache with — skip it rather than empty the store for nothing.
+  if (payloadBytes > budget) return
+  let stored = await writeCache(cacheParts, request.filename, payload, payloadBytes)
+  if (!stored) {
+    // The write failed under pressure, so the store is over budget even before
+    // this payload: evict to a budget that excludes it, then try once more.
+    await evictToBudget(Math.max(0, budget - payloadBytes))
+    stored = await writeCache(cacheParts, request.filename, payload, payloadBytes)
   }
+  if (stored) {
+    // Whichever write landed, bring the store back under its real budget now rather than
+    // letting it sit over the cap until a later write happens to fail.
+    await evictToBudget(budget)
+  }
+  // Every await above yields to the event loop, where a queued `cancel` finally runs —
+  // check it before the result is posted, or a cancel during eviction still reports success.
+  throwIfCancelled(request.requestId)
+}
+
+async function handleAnalyse(request: AnalyseRequest): Promise<void> {
+  const entry = retained.get(request.sourceSha256)
+  if (entry === undefined) {
+    scope.postMessage({
+      type: 'error',
+      requestId: request.requestId,
+      code: 'SOURCE_NOT_RETAINED',
+      message: 'The parsed source is no longer held by the worker; reopen the file.',
+    } satisfies ErrorMessage)
+    return
+  }
+  // Map insertion order is the LRU order; reinsert so a table in active use is
+  // not evicted under a burst of opens for other datasets.
+  retain(request.sourceSha256, entry)
+
+  const cacheParts: CacheKeyParts = {
+    sourceSha256: request.sourceSha256,
+    configHash: await analysisIdentityHash(request.config, request.mapping),
+    engineVersion: ANALYSIS_ENGINE_VERSION,
+  }
+
+  if (await respondFromCache(request, cacheParts)) return
+
+  const engineConfig = toEngineConfig(request.config, request.mapping)
+  const computed = await computeAnalysis(request, entry.table, engineConfig)
+  const payload = assemblePayload(request, entry, computed)
+
+  await writeResultToCache(request, cacheParts, payload)
 
   throwIfCancelled(request.requestId)
   const message: AnalysedMessage = {
