@@ -41,7 +41,7 @@
 import { ApiError } from '@aat/shared'
 import { and, eq, lte, sql } from 'drizzle-orm'
 import { type Database, rowsAffected } from '../db/client.ts'
-import { cloudObjects, quotaReservations, quotaUsage } from '../db/schema.ts'
+import { cloudObjects, quotaReservations, quotaUsage, runs } from '../db/schema.ts'
 import { newId } from '../lib/ids.ts'
 
 export type ReservationPurpose = 'snapshot' | 'poster' | 'source'
@@ -216,6 +216,88 @@ export async function releaseUsage(
       updatedAt: now,
     })
     .where(eq(quotaUsage.userId, userId))
+}
+
+/**
+ * Release whatever accounting a deleted object still holds.
+ *
+ * A deleter cannot assume the object it is reclaiming ever finished uploading. The object's
+ * reservation may still be `pending` — the uploader is mid-flight between writing to R2 and
+ * converting its reservation — and subtracting `bytesUsed` for it would take quota away from
+ * bytes that were never charged. So the reservation is claimed first: if it was still pending
+ * it is released, and if the uploader's finalise already ran, the recorded usage is released
+ * instead. Either way the account ends up exactly as charged for the bytes that exist.
+ */
+export async function releaseObjectAccounting(
+  db: Database,
+  object: { r2Key: string; ownerUserId: string; byteSize: number },
+  now: Date = new Date(),
+): Promise<void> {
+  const claimed = await db
+    .update(quotaReservations)
+    .set({ status: 'released' })
+    .where(and(eq(quotaReservations.r2Key, object.r2Key), eq(quotaReservations.status, 'pending')))
+  if (rowsAffected(claimed) === 1) {
+    const [reservation] = await db
+      .select({ bytes: quotaReservations.bytes })
+      .from(quotaReservations)
+      .where(eq(quotaReservations.r2Key, object.r2Key))
+      .limit(1)
+    if (reservation) {
+      await db
+        .update(quotaUsage)
+        .set({
+          bytesReserved: sql`MAX(${quotaUsage.bytesReserved} - ${reservation.bytes}, 0)`,
+          updatedAt: now,
+        })
+        .where(eq(quotaUsage.userId, object.ownerUserId))
+    }
+    return
+  }
+  await releaseUsage(db, object.ownerUserId, object.byteSize, now)
+}
+
+/**
+ * Commit an uploaded object: prove the run it belongs to is still alive, then convert the
+ * reservation into usage.
+ *
+ * The liveness check runs *after* the object row exists, on purpose — the `requireRun` at the
+ * top of the handler predates the body read by seconds. A run deleted while the body streamed
+ * in walked its object list before this row existed, so committing anyway would leave live
+ * bytes under a dead run that nothing can reach or reclaim. The run delete tombstones
+ * `runs.deleted_at` *before* walking objects, so a row inserted before this read is guaranteed
+ * to be inside a delete that lands later — and this read is what forces the upload to unwind
+ * when it is not.
+ *
+ * The reservation check is the mirror image: a stale-reservation sweep or a deleter may have
+ * already claimed it, in which case nothing was charged and nothing may remain. On either
+ * failure the object row and the R2 bytes are rolled back before the error propagates.
+ */
+export async function commitUploadedObject(
+  db: Database,
+  bucket: R2Bucket,
+  object: { id: string; r2Key: string; ownerUserId: string; byteSize: number },
+  reservation: Reservation,
+  runId: string,
+  now: Date = new Date(),
+): Promise<void> {
+  const [live] = await db.select({ deletedAt: runs.deletedAt }).from(runs).where(eq(runs.id, runId)).limit(1)
+  const runGone = !live || live.deletedAt !== null
+
+  const finalised = runGone
+    ? false
+    : await finaliseReservation(db, reservation, object.byteSize, object.ownerUserId, now)
+  if (finalised) return
+
+  await db.delete(cloudObjects).where(eq(cloudObjects.id, object.id))
+  await bucket.delete(object.r2Key)
+  if (runGone) {
+    // The reservation may already have been released by the deleter — releasing again is a
+    // no-op on a settled row — so this is safe from either side of that race.
+    await releaseReservation(db, reservation, object.ownerUserId, now)
+    throw new ApiError('RESOURCE_NOT_FOUND', { details: { reason: 'run_deleted_mid_upload' } })
+  }
+  throw new ApiError('INTERNAL', { details: { reason: 'reservation_settled_early' } })
 }
 
 export interface SweepResult {

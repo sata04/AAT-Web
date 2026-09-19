@@ -129,6 +129,21 @@ describe('analysis revisions', () => {
     expect(body.revisions).toHaveLength(1)
   })
 
+  it('records the same bytes and config under a different column mapping as a new revision', async () => {
+    const user = await createUser()
+    const runId = await createRun(user)
+
+    const first = await createRevision(user, runId, { mappingHash: 'f'.repeat(64) })
+    const second = await createRevision(user, runId, { mappingHash: '0'.repeat(64) })
+    // The columns ARE the data: identical bytes under a different column assignment are a
+    // different analysis, and reusing the first revision would file that analysis under a
+    // snapshot that describes the other columns.
+    expect(second).not.toBe(first)
+
+    const repeat = await createRevision(user, runId, { mappingHash: 'f'.repeat(64) })
+    expect(repeat).toBe(first)
+  })
+
   it('records a different configuration as a new revision, numbered in order', async () => {
     const user = await createUser()
     const runId = await createRun(user)

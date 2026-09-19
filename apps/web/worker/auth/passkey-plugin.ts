@@ -532,6 +532,24 @@ export function aatPasskeyPolicy({ db }: AatPasskeyOptions) {
         },
 
         /**
+         * One registration must leave exactly one session row.
+         *
+         * `verify-registration` accepts `createSession: true` and the plugin then mints a session
+         * itself — on top of the one `afterVerification` already creates via `setSessionCookie`.
+         * A caller who passes it gets two live sessions for one ceremony. AAT never wants the
+         * plugin's own session: deleting the flag keeps the single-session invariant in AAT's
+         * code rather than in an upstream default.
+         */
+        {
+          matcher: (ctx: { path?: string }) => ctx.path === PATHS.verifyRegistration,
+          handler: createAuthMiddleware(async (ctx) => {
+            if (ctx.body !== null && typeof ctx.body === 'object') {
+              delete (ctx.body as Record<string, unknown>).createSession
+            }
+          }),
+        },
+
+        /**
          * A user may not delete their last passkey.
          *
          * With no password, no email and no social login, the last passkey *is* the account.

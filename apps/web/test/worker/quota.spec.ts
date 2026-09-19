@@ -9,7 +9,7 @@
  */
 
 import { env } from 'cloudflare:test'
-import { and, eq } from 'drizzle-orm'
+import { and, eq, isNull } from 'drizzle-orm'
 import { describe, expect, it } from 'vitest'
 import { cloudObjects, quotaReservations, quotaUsage } from '../../worker/db/schema.ts'
 import { newId } from '../../worker/lib/ids.ts'
@@ -79,6 +79,31 @@ async function uploadSnapshot(
 async function snapshotSize(): Promise<number> {
   const encoded = await encodeForUpload(buildSnapshot({ sourceSha256: SOURCE_SHA, configHash: CONFIG_HASH }))
   return encoded.bytes.length
+}
+
+/** SHA-256 hex of `bytes`, the way the upload endpoints demand it. */
+async function sha256Hex(bytes: Uint8Array): Promise<string> {
+  const digest = await crypto.subtle.digest('SHA-256', bytes as BufferSource)
+  return [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, '0')).join('')
+}
+
+/** PUT /api/v1/runs/:runId/source — the opt-in raw-CSV backup path. */
+async function uploadSource(user: TestUser, runId: string, bytes: Uint8Array): Promise<Response> {
+  const query = new URLSearchParams({
+    declaredBytes: String(bytes.length),
+    sha256: await sha256Hex(bytes),
+    filename: 'src.csv',
+  })
+  return apiFetch(`/api/v1/runs/${runId}/source?${query}`, {
+    method: 'PUT',
+    cookie: user.cookie,
+    headers: {
+      'content-type': 'text/csv',
+      // The backup is opt-in: the upload is refused without the explicit request marker.
+      'x-aat-source-backup': 'requested-by-user',
+    },
+    body: bytes as BodyInit,
+  })
 }
 
 describe('snapshot upload', () => {
@@ -272,5 +297,86 @@ describe('quota enforcement', () => {
 
     const quota = await quotaOf(user)
     expect(quota.bytesReserved).toBe(0)
+  })
+
+  it('releases quota exactly once when two source deletes race', async () => {
+    const user = await createUser()
+    const runId = await createRun(user)
+    const revisionId = await createRevision(user, runId)
+
+    // A snapshot alongside the source: if a racing delete subtracted the source's bytes twice,
+    // this is the usage figure it would eat into — the clamp at zero would hide a single
+    // over-release but cannot hide one that consumes a second object's accounting.
+    const { size } = await uploadSnapshot(user, revisionId)
+    expect(size).toBeGreaterThan(8)
+
+    const sourceBytes = new TextEncoder().encode('a,b\n1,2\n')
+    const uploaded = await uploadSource(user, runId, sourceBytes)
+    expect(uploaded.status).toBe(201)
+    expect((await quotaOf(user)).bytesUsed).toBe(size + sourceBytes.length)
+
+    const [a, b] = await Promise.all([
+      apiFetch(`/api/v1/runs/${runId}/source`, { method: 'DELETE', cookie: user.cookie }),
+      apiFetch(`/api/v1/runs/${runId}/source`, { method: 'DELETE', cookie: user.cookie }),
+    ])
+    expect([a.status, b.status]).toEqual([200, 200])
+
+    // The tombstone is the claim: exactly one delete owns the transition, so the reported count
+    // is the truth and the bytes are subtracted once — not once per request.
+    const deletedCounts = [
+      ((await a.json()) as { objectsDeleted: number }).objectsDeleted,
+      ((await b.json()) as { objectsDeleted: number }).objectsDeleted,
+    ]
+    expect(deletedCounts.reduce((sum, count) => sum + count, 0)).toBe(1)
+
+    const quota = await quotaOf(user)
+    expect(quota.bytesUsed).toBe(size)
+    expect(quota.objectCount).toBe(1)
+  })
+
+  it('never orphans a committed object when its run is deleted mid-upload', async () => {
+    const user = await createUser()
+    const runId = await createRun(user)
+    const revisionId = await createRevision(user, runId)
+    const encoded = await encodeForUpload(
+      buildSnapshot({ sourceSha256: SOURCE_SHA, configHash: CONFIG_HASH }),
+    )
+
+    // Race the upload's commit against the run's delete. Which one lands first is timing, not
+    // contract — the contract is what must hold afterwards either way.
+    const query = new URLSearchParams({
+      declaredBytes: String(encoded.bytes.length),
+      sha256: encoded.sha256,
+      format: 'json',
+    })
+    const upload = apiFetch(`/api/v1/revisions/${revisionId}/snapshot?${query}`, {
+      method: 'PUT',
+      cookie: user.cookie,
+      headers: { 'content-type': 'application/json' },
+      body: encoded.bytes as BodyInit,
+    })
+    const deleted = await apiFetch(`/api/v1/runs/${runId}`, { method: 'DELETE', cookie: user.cookie })
+    const response = await upload
+
+    expect(deleted.status).toBe(200)
+    // 404: the delete won and the upload unwound itself. 201: the commit landed inside the
+    // delete's object walk and the delete reclaimed it. Both answers are honest.
+    expect([201, 404]).toContain(response.status)
+
+    // Whatever the order, the ledger agrees with reality: no live row, no bytes without one,
+    // no charge for storage that is gone. (R2 is shared across the file, so the check is scoped
+    // to this user's key prefix.)
+    const live = await db()
+      .select()
+      .from(cloudObjects)
+      .where(and(eq(cloudObjects.ownerUserId, user.userId), isNull(cloudObjects.deletedAt)))
+    expect(live).toHaveLength(0)
+    const stored = await env.AAT_OBJECTS.list({ prefix: `snapshots/${user.userId}/` })
+    expect(stored.objects).toHaveLength(0)
+
+    const quota = await quotaOf(user)
+    expect(quota.bytesUsed).toBe(0)
+    expect(quota.bytesReserved).toBe(0)
+    expect(quota.objectCount).toBe(0)
   })
 })

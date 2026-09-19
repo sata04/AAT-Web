@@ -36,6 +36,13 @@
       "when": 1786675295719,
       "tag": "0004_make_run_code_unique_per_live_run",
       "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "6",
+      "when": 1789842154299,
+      "tag": "0005_revision_identity_and_claim_index",
+      "breakpoints": true
     }
   ]
 }

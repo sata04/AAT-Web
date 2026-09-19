@@ -212,11 +212,16 @@ export async function resolveRegistrationContext(
     .where(eq(registrationInvites.claimContextHash, contextHash))
     .limit(1)
 
-  if (!invitation || invitation.revokedAt !== null || invitation.status !== 'claimed') {
+  if (!invitation || invitation.revokedAt !== null) {
     throw new ApiError('INVITE_INVALID')
   }
-  if (invitation.usedAt !== null) {
+  // `used` before `claimed`: a consumed invitation is `status = 'used'`, so checking the status
+  // first would misreport a spent invitation as merely invalid.
+  if (invitation.usedAt !== null || invitation.status === 'used') {
     throw new ApiError('INVITE_USED')
+  }
+  if (invitation.status !== 'claimed') {
+    throw new ApiError('INVITE_INVALID')
   }
   if (!invitation.claimExpiresAt || invitation.claimExpiresAt.getTime() <= now.getTime()) {
     throw new ApiError('INVITE_EXPIRED')

@@ -270,7 +270,20 @@ adminRoutes.delete('/passkeys/:passkeyId', requireCapability('user:manage'), asy
 const createInvitationSchema = z.object({
   kind: z.enum(['registration', 'recovery']),
   role: z.enum(ROLES),
-  displayName: z.string().min(1).max(120),
+  // The same control-character rule as the run tag schema: this string is rendered verbatim in
+  // the gallery, /me and the admin console.
+  displayName: z
+    .string()
+    .min(1)
+    .max(120)
+    .refine(
+      (value) =>
+        ![...value].some((char) => {
+          const code = char.codePointAt(0) ?? 0
+          return code < 0x20 || code === 0x7f
+        }),
+      'Display names cannot contain control characters',
+    ),
   note: z.string().max(500).optional(),
   /** Required for a recovery invitation: the existing user regaining access. */
   targetUserId: z.string().min(1).max(64).optional(),

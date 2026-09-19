@@ -35,7 +35,7 @@ import type { AppEnv } from '../middleware/authorize.ts'
 import { requireCapability, requireRun, requireSession, withDatabase } from '../middleware/authorize.ts'
 import { validate } from '../middleware/validate.ts'
 import { writeAuditLog } from '../services/audit.ts'
-import { releaseUsage } from '../services/quota.ts'
+import { releaseObjectAccounting } from '../services/quota.ts'
 
 export const runRoutes = new Hono<AppEnv>()
 
@@ -383,6 +383,12 @@ runRoutes.delete('/:runId', requireCapability('analysis:delete'), async (context
   const run = await requireRun(context, context.req.param('runId'), 'destroy')
   const now = new Date()
 
+  // Tombstone the run BEFORE walking its objects: `deleted_at` is the admission gate. Every
+  // upload path re-checks it after inserting its object row (see commitUploadedObject), so a
+  // tombstone that lands first guarantees a commit that races this delete either unwinds itself
+  // or is visible to the walk below — it cannot land under a dead run unnoticed.
+  await db.update(runs).set({ deletedAt: now, updatedAt: now }).where(eq(runs.id, run.id))
+
   // Delete the bytes first and correct the quota as each object goes, so a failure partway through
   // leaves the account charged for objects that still exist rather than for objects that do not.
   const objects = await db
@@ -413,7 +419,9 @@ runRoutes.delete('/:runId', requireCapability('analysis:delete'), async (context
       .set({ deletedAt: now })
       .where(and(eq(cloudObjects.id, object.id), isNull(cloudObjects.deletedAt)))
     if (rowsAffected(claimed) === 1) {
-      await releaseUsage(db, object.ownerUserId, object.byteSize, now)
+      // The object may still be mid-upload — its reservation pending, its usage never charged.
+      // releaseObjectAccounting releases whichever side of the ledger the bytes are on.
+      await releaseObjectAccounting(db, object, now)
     }
   }
 
@@ -429,8 +437,6 @@ runRoutes.delete('/:runId', requireCapability('analysis:delete'), async (context
       ),
     )
   }
-
-  await db.update(runs).set({ deletedAt: now, updatedAt: now }).where(eq(runs.id, run.id))
 
   await writeAuditLog(db, {
     actorUserId: actor.userId,

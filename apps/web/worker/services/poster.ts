@@ -112,18 +112,43 @@ export async function assertRenderCapacity(
   }
 }
 
+export interface RenderClaimOptions {
+  /**
+   * Render slots. The claim refuses atomically while this many non-stale renders exist — the
+   * count check inside the UPDATE's WHERE is what makes the limit hold under concurrency,
+   * where an earlier assertRenderCapacity only makes the common case fail fast.
+   */
+  maxConcurrent: number
+  /** How old a render may be before it stops counting as live — the stale-claim threshold. */
+  staleSeconds: number
+  /**
+   * The spec about to be drawn. A retry may carry a different spec than the figure was inserted
+   * with, so the claim records it: `specHash` must always name the spec that produced the PNG.
+   */
+  spec?: { specHash: string; presetVersion: string }
+}
+
+/** Render slots still occupied — a self-subquery usable inside an UPDATE's WHERE clause. */
+function liveRenderCount(staleBeforeSeconds: number) {
+  return sql<number>`(select count(*) from ${posterFigures} where ${posterFigures.status} = 'rendering' and ${posterFigures.startedAt} > ${staleBeforeSeconds})`
+}
+
 /**
  * Move a figure into `rendering`, but only from a status it may legally leave.
  *
  * Conditional on the current status, so two requests that both read `queued` cannot both start a
- * render: one transitions, the other sees zero rows affected and backs off.
+ * render: one transitions, the other sees zero rows affected and backs off. The capacity clause
+ * rides inside the same UPDATE, so two requests that both saw a free slot cannot both claim the
+ * last one either.
  */
 export async function claimForRender(
   db: Database,
   posterId: string,
   fromStatuses: readonly PosterStatus[],
+  options: RenderClaimOptions,
   now: Date = new Date(),
 ): Promise<boolean> {
+  const staleBefore = Math.floor((now.getTime() - options.staleSeconds * 1000) / 1000)
   const result = await db
     .update(posterFigures)
     .set({
@@ -132,8 +157,17 @@ export async function claimForRender(
       updatedAt: now,
       attemptCount: sql`${posterFigures.attemptCount} + 1`,
       errorCode: null,
+      ...(options.spec === undefined
+        ? {}
+        : { specHash: options.spec.specHash, presetVersion: options.spec.presetVersion }),
     })
-    .where(and(eq(posterFigures.id, posterId), inArray(posterFigures.status, [...fromStatuses])))
+    .where(
+      and(
+        eq(posterFigures.id, posterId),
+        inArray(posterFigures.status, [...fromStatuses]),
+        sql`${liveRenderCount(staleBefore)} < ${options.maxConcurrent}`,
+      ),
+    )
   return rowsAffected(result) === 1
 }
 
@@ -141,10 +175,10 @@ export async function claimForRender(
 export async function takeOverStaleRender(
   db: Database,
   posterId: string,
-  staleSeconds: number,
+  options: RenderClaimOptions,
   now: Date = new Date(),
 ): Promise<boolean> {
-  const staleBefore = new Date(now.getTime() - staleSeconds * 1000)
+  const staleBefore = Math.floor((now.getTime() - options.staleSeconds * 1000) / 1000)
   const result = await db
     .update(posterFigures)
     .set({
@@ -152,12 +186,18 @@ export async function takeOverStaleRender(
       startedAt: now,
       updatedAt: now,
       attemptCount: sql`${posterFigures.attemptCount} + 1`,
+      ...(options.spec === undefined
+        ? {}
+        : { specHash: options.spec.specHash, presetVersion: options.spec.presetVersion }),
     })
     .where(
       and(
         eq(posterFigures.id, posterId),
         eq(posterFigures.status, 'rendering'),
-        sql`${posterFigures.startedAt} <= ${Math.floor(staleBefore.getTime() / 1000)}`,
+        // The figure being reclaimed does not count itself: its own started_at is at or below
+        // the stale bound, and the capacity subquery counts only strictly-newer renders.
+        sql`${posterFigures.startedAt} <= ${staleBefore}`,
+        sql`${liveRenderCount(staleBefore)} < ${options.maxConcurrent}`,
       ),
     )
   return rowsAffected(result) === 1
