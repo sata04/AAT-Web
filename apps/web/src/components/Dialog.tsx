@@ -93,13 +93,24 @@ export function useTopmostDialogKeys(
 // but not to the keyboard unless something holds the cycle closed.
 function keepTabInsideDialog(panel: HTMLElement, event: KeyboardEvent): void {
   const focusable = [...panel.querySelectorAll<HTMLElement>(FOCUSABLE)]
-  if (focusable.length === 0) return
+  const active = document.activeElement
+  if (focusable.length === 0) {
+    // A dialog with nothing tabbable — the tour's loading scrim is one —
+    // still owns the keyboard: never let Tab walk into the page behind it.
+    event.preventDefault()
+    return
+  }
   const first = focusable[0] as HTMLElement
   const last = focusable[focusable.length - 1] as HTMLElement
-  if (event.shiftKey && document.activeElement === first) {
+  if (event.shiftKey && active === first) {
     event.preventDefault()
     last.focus()
-  } else if (!event.shiftKey && document.activeElement === last) {
+  } else if (!event.shiftKey && active === last) {
+    event.preventDefault()
+    first.focus()
+  } else if (active === null || (active instanceof Node && !panel.contains(active))) {
+    // Focus drifted outside a modal that is still up — pull it back rather
+    // than letting Tab continue through the inert page.
     event.preventDefault()
     first.focus()
   }

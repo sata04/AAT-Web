@@ -561,7 +561,7 @@ export function AnalyzerScreen(): React.JSX.Element {
         actions={{ ...actions, ...onboardingActions, dismissAllNotices }}
       />
       {tourOpen ? (
-        <Suspense fallback={<TourLoadingScrim />}>
+        <Suspense fallback={<TourLoadingScrim onSkip={() => finishTour('skip', false)} />}>
           <OnboardingStage driver={tourDriver} onFinish={finishTour} />
         </Suspense>
       ) : null}
@@ -575,11 +575,12 @@ export function AnalyzerScreen(): React.JSX.Element {
  * interactive through the fetch — a started import or opened dialog would
  * land *under* a modal that mounts seconds later.
  */
-function TourLoadingScrim(): React.JSX.Element {
+function TourLoadingScrim(props: { onSkip: () => void }): React.JSX.Element {
   const ref = useRef<HTMLDivElement | null>(null)
-  // Registers in the topmost-panel set so Escape/Tab hear the same rules the
-  // stage will — while it is topmost, the trap has nothing to cycle to.
-  useTopmostDialogKeys(ref, () => {})
+  // Registers in the topmost-panel set, and Escape skips the tour just as the
+  // loaded stage's would — dismissal must not depend on chunk timing. The
+  // scrim holds no tabbable child; the shared trap now owns Tab even then.
+  useTopmostDialogKeys(ref, props.onSkip)
   useEffect(() => {
     ref.current?.focus()
   }, [])
