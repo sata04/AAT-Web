@@ -50,6 +50,13 @@
       "when": 1789844886475,
       "tag": "0006_object_reservation_link",
       "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "6",
+      "when": 1789862400000,
+      "tag": "0007_claim_correlated_settlement",
+      "breakpoints": true
     }
   ]
 }

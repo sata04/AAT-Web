@@ -679,20 +679,22 @@ revisionRoutes.delete('/runs/:runId/source', requireCapability('raw:delete'), as
   // owner's objects on exactly the administrative path this route exists to serve, and would
   // leave the bytes in R2 while reporting a successful delete.
   //
-  // The quota release is gated on winning the tombstone — the same rule as run deletion. Two
-  // concurrent source deletes both walk this list; `AND deleted_at IS NULL` makes the UPDATE the
-  // claim, so only the winner subtracts the bytes. The R2 delete stays outside it: deleting bytes
-  // twice is harmless where releasing them twice is free quota.
+  // Settlement runs before the tombstone — the same rule as run deletion.
+  // `releaseObjectAccounting` is self-claiming and once-only, so a delete that fails partway can
+  // be retried: the settlement replays as a no-op and the tombstone lands. Tombstone-first would
+  // strand a release failure permanently, because a retried walk only sees live rows. The R2
+  // delete stays outside both claims: deleting bytes twice is harmless where releasing them
+  // twice is free quota.
   let objectsDeleted = 0
   for (const record of records) {
     await context.env.AAT_OBJECTS.delete(record.r2Key)
+    await releaseObjectAccounting(db, record, now)
     const claimed = await db
       .update(cloudObjects)
       .set({ deletedAt: now })
       .where(and(eq(cloudObjects.id, record.id), isNull(cloudObjects.deletedAt)))
     if (rowsAffected(claimed) === 1) {
       objectsDeleted += 1
-      await releaseObjectAccounting(db, record, now)
     }
   }
 

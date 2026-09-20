@@ -39,10 +39,25 @@
  */
 
 import { ApiError } from '@aat/shared'
-import { and, eq, lte, sql } from 'drizzle-orm'
+import { and, eq, isNull, lte, sql } from 'drizzle-orm'
 import { type Database, rowsAffected } from '../db/client.ts'
 import { cloudObjects, quotaReservations, quotaUsage, runs } from '../db/schema.ts'
 import { newId } from '../lib/ids.ts'
+
+/*
+ * Claim-correlated settlement.
+ *
+ * Every quota transition is a claim followed by a ledger write. Running them as two loose
+ * statements leaves a hole: the claim commits, the ledger write fails, and the settled marker
+ * is what a retry would have used to know the write was still owed — so the bytes leak
+ * permanently. The two therefore go in one `db.batch`, with the ledger write correlated to a
+ * unique `claim_token` the claim just wrote: the pair is atomic, and a claim a concurrent
+ * caller already won makes the whole batch a no-op rather than a second decrement.
+ *
+ * `claim_token` on quota_reservations and `settled_claim` on cloud_objects are those markers.
+ */
+const claimedBy = (reservationId: string, token: string) =>
+  sql`EXISTS (SELECT 1 FROM quota_reservations WHERE id = ${reservationId} AND claim_token = ${token})`
 
 export type ReservationPurpose = 'snapshot' | 'poster' | 'source'
 
@@ -169,20 +184,24 @@ export async function finaliseReservation(
     })
     .where(eq(quotaUsage.userId, userId))
 
-  const claimed = await db
-    .update(quotaReservations)
-    .set({ status: 'finalised' })
-    .where(and(eq(quotaReservations.id, reservation.id), eq(quotaReservations.status, 'pending')))
-  if (rowsAffected(claimed) === 1) {
-    // We own the settlement, so the hold is ours to release: nobody else subtracts it now.
-    // Clamped at zero in case the row drifted while the charge was in flight.
-    await db
+  const token = newId()
+  const [claimed] = await db.batch([
+    db
+      .update(quotaReservations)
+      .set({ status: 'finalised', claimToken: token })
+      .where(and(eq(quotaReservations.id, reservation.id), eq(quotaReservations.status, 'pending'))),
+    // The hold release fires only if the claim above won — a deleter or sweeper that took the
+    // reservation first already released `bytesReserved`, and subtracting it again would drift
+    // the account.
+    db
       .update(quotaUsage)
       .set({
         bytesReserved: sql`MAX(${quotaUsage.bytesReserved} - ${reservation.bytes}, 0)`,
         updatedAt: now,
       })
-      .where(eq(quotaUsage.userId, userId))
+      .where(and(eq(quotaUsage.userId, userId), claimedBy(reservation.id, token))),
+  ])
+  if (rowsAffected(claimed) === 1) {
     return true
   }
 
@@ -207,36 +226,22 @@ export async function releaseReservation(
   userId: string,
   now: Date = new Date(),
 ): Promise<void> {
-  const claimed = await db
-    .update(quotaReservations)
-    .set({ status: 'released' })
-    .where(and(eq(quotaReservations.id, reservation.id), eq(quotaReservations.status, 'pending')))
-  if (rowsAffected(claimed) !== 1) return
-
-  await db
-    .update(quotaUsage)
-    .set({
-      bytesReserved: sql`MAX(${quotaUsage.bytesReserved} - ${reservation.bytes}, 0)`,
-      updatedAt: now,
-    })
-    .where(eq(quotaUsage.userId, userId))
-}
-
-/** Subtract a deleted object from recorded usage. */
-export async function releaseUsage(
-  db: Database,
-  userId: string,
-  bytes: number,
-  now: Date = new Date(),
-): Promise<void> {
-  await db
-    .update(quotaUsage)
-    .set({
-      bytesUsed: sql`MAX(${quotaUsage.bytesUsed} - ${bytes}, 0)`,
-      objectCount: sql`MAX(${quotaUsage.objectCount} - 1, 0)`,
-      updatedAt: now,
-    })
-    .where(eq(quotaUsage.userId, userId))
+  const token = newId()
+  // Claim and release atomically: the decrement is correlated to the token the claim writes,
+  // so a reservation someone else settled contributes nothing here.
+  await db.batch([
+    db
+      .update(quotaReservations)
+      .set({ status: 'released', claimToken: token })
+      .where(and(eq(quotaReservations.id, reservation.id), eq(quotaReservations.status, 'pending'))),
+    db
+      .update(quotaUsage)
+      .set({
+        bytesReserved: sql`MAX(${quotaUsage.bytesReserved} - ${reservation.bytes}, 0)`,
+        updatedAt: now,
+      })
+      .where(and(eq(quotaUsage.userId, userId), claimedBy(reservation.id, token))),
+  ])
 }
 
 /**
@@ -253,48 +258,102 @@ export async function releaseUsage(
  * have several historical reservation rows (a finalised one from the upload that landed plus a
  * swept one from a retry that never did); only the object's own reservation says what this row's
  * bytes were charged as.
+ *
+ * This runs BEFORE the object's tombstone in the delete loops, which inverts the old order
+ * deliberately: every settlement write is self-claiming and once-only, so a delete that fails
+ * after settlement still converges on retry — the settlement no-ops and the tombstone lands. The
+ * previous order (tombstone, then release) made a release failure permanent, because a retried
+ * delete could no longer see the tombstoned object.
  */
 export async function releaseObjectAccounting(
   db: Database,
-  object: { r2Key: string; ownerUserId: string; byteSize: number; reservationId: string | null },
+  object: {
+    id: string
+    r2Key: string
+    ownerUserId: string
+    byteSize: number
+    reservationId: string | null
+  },
   now: Date = new Date(),
 ): Promise<void> {
-  // Rows committed before `reservation_id` existed have NULL — those bytes were always charged.
+  const token = newId()
+
+  // Rows committed before `reservation_id` existed have NULL — those bytes were always charged,
+  // and there is no reservation row to carry the claim, so the object itself carries it: the
+  // `settled_claim` write is the once-only marker a retry or a racing delete consults.
   if (object.reservationId === null) {
-    await releaseUsage(db, object.ownerUserId, object.byteSize, now)
+    await db.batch([
+      db
+        .update(cloudObjects)
+        .set({ settledClaim: token })
+        .where(and(eq(cloudObjects.id, object.id), isNull(cloudObjects.settledClaim))),
+      db
+        .update(quotaUsage)
+        .set({
+          bytesUsed: sql`MAX(${quotaUsage.bytesUsed} - ${object.byteSize}, 0)`,
+          objectCount: sql`MAX(${quotaUsage.objectCount} - 1, 0)`,
+          updatedAt: now,
+        })
+        .where(
+          and(
+            eq(quotaUsage.userId, object.ownerUserId),
+            sql`EXISTS (SELECT 1 FROM cloud_objects WHERE id = ${object.id} AND settled_claim = ${token})`,
+          ),
+        ),
+    ])
     return
   }
 
-  // Claim the reservation only while it is still pending: a reservation that is still open belongs
-  // to an upload that never charged usage, so the release comes out of `bytesReserved`.
-  const claimed = await db
-    .update(quotaReservations)
-    .set({ status: 'released' })
-    .where(and(eq(quotaReservations.id, object.reservationId), eq(quotaReservations.status, 'pending')))
-    .returning({ bytes: quotaReservations.bytes })
-  const [claimedReservation] = claimed
-  if (claimedReservation !== undefined) {
-    await db
-      .update(quotaUsage)
-      .set({
-        bytesReserved: sql`MAX(${quotaUsage.bytesReserved} - ${claimedReservation.bytes}, 0)`,
-        updatedAt: now,
-      })
-      .where(eq(quotaUsage.userId, object.ownerUserId))
-    return
-  }
-
+  // The reservation's bytes are fixed at insert, so the amount the pending-path release owes is
+  // readable before the batch; the claims inside remain conditional on the row's *current* status.
   const [reservation] = await db
-    .select({ status: quotaReservations.status })
+    .select({ bytes: quotaReservations.bytes })
     .from(quotaReservations)
     .where(eq(quotaReservations.id, object.reservationId))
     .limit(1)
-  // `finalised` is the only state that ever incremented usage. A reservation the stale-reservation
-  // sweeper claimed is `released` — nothing was charged, and subtracting `bytesUsed` now would take
-  // quota away from objects that still exist.
-  if (reservation?.status === 'finalised') {
-    await releaseUsage(db, object.ownerUserId, object.byteSize, now)
-  }
+  if (reservation === undefined) return
+
+  const rid = object.reservationId
+  await db.batch([
+    // A reservation still open belongs to an upload that never charged usage — its release comes
+    // out of `bytesReserved`.
+    db
+      .update(quotaReservations)
+      .set({ status: 'released', claimToken: token })
+      .where(and(eq(quotaReservations.id, rid), eq(quotaReservations.status, 'pending'))),
+    // `finalised` is the only state that ever incremented usage; `settled` is its released twin,
+    // distinct from `released` so a never-charged hold and a charged-then-released usage are not
+    // confusable on a retry.
+    db
+      .update(quotaReservations)
+      .set({ status: 'settled', claimToken: token })
+      .where(and(eq(quotaReservations.id, rid), eq(quotaReservations.status, 'finalised'))),
+    db
+      .update(quotaUsage)
+      .set({
+        bytesReserved: sql`MAX(${quotaUsage.bytesReserved} - ${reservation.bytes}, 0)`,
+        updatedAt: now,
+      })
+      .where(
+        and(
+          eq(quotaUsage.userId, object.ownerUserId),
+          sql`EXISTS (SELECT 1 FROM quota_reservations WHERE id = ${rid} AND claim_token = ${token} AND status = 'released')`,
+        ),
+      ),
+    db
+      .update(quotaUsage)
+      .set({
+        bytesUsed: sql`MAX(${quotaUsage.bytesUsed} - ${object.byteSize}, 0)`,
+        objectCount: sql`MAX(${quotaUsage.objectCount} - 1, 0)`,
+        updatedAt: now,
+      })
+      .where(
+        and(
+          eq(quotaUsage.userId, object.ownerUserId),
+          sql`EXISTS (SELECT 1 FROM quota_reservations WHERE id = ${rid} AND claim_token = ${token} AND status = 'settled')`,
+        ),
+      ),
+  ])
 }
 
 /**
@@ -372,20 +431,22 @@ export async function sweepStaleReservations(
   let orphanedObjectsDeleted = 0
 
   for (const row of stale) {
-    const claimed = await db
-      .update(quotaReservations)
-      .set({ status: 'released' })
-      .where(and(eq(quotaReservations.id, row.id), eq(quotaReservations.status, 'pending')))
+    const token = newId()
+    const [claimed] = await db.batch([
+      db
+        .update(quotaReservations)
+        .set({ status: 'released', claimToken: token })
+        .where(and(eq(quotaReservations.id, row.id), eq(quotaReservations.status, 'pending'))),
+      db
+        .update(quotaUsage)
+        .set({
+          bytesReserved: sql`MAX(${quotaUsage.bytesReserved} - ${row.bytes}, 0)`,
+          updatedAt: now,
+        })
+        .where(and(eq(quotaUsage.userId, row.userId), claimedBy(row.id, token))),
+    ])
     if (rowsAffected(claimed) !== 1) continue
     reservationsReleased++
-
-    await db
-      .update(quotaUsage)
-      .set({
-        bytesReserved: sql`MAX(${quotaUsage.bytesReserved} - ${row.bytes}, 0)`,
-        updatedAt: now,
-      })
-      .where(eq(quotaUsage.userId, row.userId))
 
     if (row.r2Key) {
       // Only delete when no committed object claims the key: a finalised upload owns its bytes,

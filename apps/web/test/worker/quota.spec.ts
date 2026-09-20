@@ -279,6 +279,28 @@ describe('quota enforcement', () => {
     expect(await env.AAT_OBJECTS.get(object?.r2Key ?? '')).toBeNull()
   })
 
+  it('releases nothing when a run delete is retried', async () => {
+    const user = await createUser()
+    const runA = await createRun(user)
+    const revisionA = await createRevision(user, runA)
+    await uploadSnapshot(user, revisionA)
+
+    // A sibling run keeps real usage on the account: a delete that released the first run's
+    // bytes a second time would subtract below what is actually stored, not just clamp at zero.
+    const runB = await createRun(user, '260812a_data.csv')
+    const revisionB = await createRevision(user, runB)
+    const { size } = await uploadSnapshot(user, revisionB)
+
+    const first = await apiFetch(`/api/v1/runs/${runA}`, { method: 'DELETE', cookie: user.cookie })
+    expect(first.status).toBe(200)
+    const second = await apiFetch(`/api/v1/runs/${runA}`, { method: 'DELETE', cookie: user.cookie })
+    expect(second.status).toBe(200)
+
+    const quota = await quotaOf(user)
+    expect(quota.bytesUsed).toBe(size)
+    expect(quota.objectCount).toBe(1)
+  })
+
   it('refuses a snapshot larger than the configured maximum before reserving anything', async () => {
     const user = await createUser()
     const runId = await createRun(user)

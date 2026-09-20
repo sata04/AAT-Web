@@ -566,6 +566,14 @@ export const cloudObjects = sqliteTable(
      * NULL means "committed under the old accounting" — those were always charged.
      */
     reservationId: text('reservation_id').references(() => quotaReservations.id),
+    /**
+     * Unique token written by the delete that settled this object's accounting. NULL means
+     * unsettled; the conditional claim (`SET ... WHERE settled_claim IS NULL`) is what makes a
+     * retried or racing delete release the object's bytes exactly once. Only meaningful for rows
+     * without a reservation link — reservation-linked objects carry the marker on the reservation
+     * instead.
+     */
+    settledClaim: text('settled_claim'),
     createdAt: integer('created_at', { mode: 'timestamp' }).notNull(),
     deletedAt: integer('deleted_at', { mode: 'timestamp' }),
   },
@@ -615,8 +623,14 @@ export const quotaReservations = sqliteTable(
     purpose: text('purpose').notNull(),
     /** The R2 key this reservation is for, so the sweeper can delete an orphaned object. */
     r2Key: text('r2_key'),
-    /** 'pending' | 'finalised' | 'released'. */
+    /** 'pending' | 'finalised' | 'released' | 'settled' (charged, then released by a delete). */
     status: text('status').notNull().default('pending'),
+    /**
+     * Unique token written by whichever transition won the claim. Ledger statements batched after
+     * the claim correlate on this token (`WHERE EXISTS ... claim_token = @tok`), so a racing claim
+     * that lost cannot fire its own decrement — and the pair commits or fails atomically.
+     */
+    claimToken: text('claim_token'),
     createdAt: integer('created_at', { mode: 'timestamp' }).notNull(),
     expiresAt: integer('expires_at', { mode: 'timestamp' }).notNull(),
   },

@@ -28,7 +28,6 @@ import { ApiError, parseRunFilename } from '@aat/shared'
 import { and, asc, desc, eq, gte, inArray, isNull, like, lt, lte, or, type SQL, sql } from 'drizzle-orm'
 import { Hono } from 'hono'
 import { z } from 'zod'
-import { rowsAffected } from '../db/client.ts'
 import { analysisRevisions, cloudObjects, posterFigures, runs, runTags, user } from '../db/schema.ts'
 import { newId } from '../lib/ids.ts'
 import type { AppEnv } from '../middleware/authorize.ts'
@@ -409,32 +408,32 @@ runRoutes.delete('/:runId', requireCapability('analysis:delete'), async (context
     .where(and(eq(cloudObjects.runId, run.id), isNull(cloudObjects.deletedAt)))
 
   /*
-   * The quota release is gated on winning the tombstone, not on having read the row.
+   * The quota settlement runs *before* the tombstone, which inverts an earlier version of this
+   * loop deliberately.
    *
-   * `requireRun` and this loop are several statements apart, so two concurrent deletes of the same
-   * run can both pass the ownership check and both walk the same object list. An unconditional
-   * decrement would then release the same bytes twice, drifting the account's usage below what it
-   * actually stores — and quota is enforced against that number, so the drift is free storage.
+   * Every settlement write in `releaseObjectAccounting` is self-claiming and once-only (the
+   * reservation's `claim_token` / the object's `settled_claim` make a second call a no-op), so a
+   * delete that dies between settlement and tombstone still converges on retry: the settlement
+   * replays as nothing and the tombstone lands. The old order — tombstone, then release — made a
+   * release failure permanent: a retried walk only sees live rows and the tombstoned object's
+   * bytes stayed charged forever.
    *
-   * `AND deleted_at IS NULL` in the UPDATE makes the tombstone the claim: exactly one caller sees
-   * a row affected, and only that caller releases. This is the same shape as every other race in
-   * this codebase — the invitation claim, the quota reservation, the poster render claim — a
-   * conditional UPDATE whose WHERE clause carries the entire precondition.
+   * Concurrent deletes are likewise safe without ordering: each object's settlement is claimed
+   * by exactly one caller regardless of which one wins the tombstone that drives the count below.
    *
-   * The R2 delete stays unconditional and outside the claim, because it is idempotent and because
+   * The R2 delete stays unconditional and outside both claims, because it is idempotent and
    * deleting bytes twice is harmless where releasing them twice is not.
    */
   for (const object of objects) {
     await context.env.AAT_OBJECTS.delete(object.r2Key)
-    const claimed = await db
+    // The object may still be mid-upload — its reservation pending, its usage never charged.
+    // releaseObjectAccounting releases whichever side of the ledger the bytes are on.
+    await releaseObjectAccounting(db, object, now)
+    // Still conditional: a concurrent delete must not stamp its own timestamp over the first.
+    await db
       .update(cloudObjects)
       .set({ deletedAt: now })
       .where(and(eq(cloudObjects.id, object.id), isNull(cloudObjects.deletedAt)))
-    if (rowsAffected(claimed) === 1) {
-      // The object may still be mid-upload — its reservation pending, its usage never charged.
-      // releaseObjectAccounting releases whichever side of the ledger the bytes are on.
-      await releaseObjectAccounting(db, object, now)
-    }
   }
 
   const revisionIds = await db
