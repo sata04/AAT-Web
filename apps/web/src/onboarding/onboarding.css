@@ -1,0 +1,230 @@
+/**
+ * The first-run tour's stage styles.
+ *
+ * Loaded with the lazy onboarding chunk — a returning researcher never pays
+ * for any of this. The palette and rhythm come from the app's own tokens, so
+ * the stage looks like the tool it is introducing, not a marketing layer, and
+ * it follows the dark theme for free.
+ *
+ * Motion rules match the rest of the app: everything animates only under
+ * `prefers-reduced-motion: no-preference`. The spotlight's scrim is a giant
+ * box-shadow on the ring itself — one element gives both the dim and the
+ * cutout, and its left/top/width/height transition is what makes the ring
+ * glide from the drop zone to the sidebar between scenes.
+ */
+
+.onboarding-stage {
+  position: fixed;
+  inset: 0;
+  z-index: 30;
+  /* The whole layer intercepts input — the analyzer behind it is read-only
+     while the tour is up. */
+  cursor: default;
+}
+
+/* The ring and the scrim are one element: an oversized shadow dims everything
+   except the window the border frames. */
+.onboarding-stage__spot {
+  position: fixed;
+  left: 0;
+  top: 0;
+  width: 0;
+  height: 0;
+  border-radius: var(--radius-pill);
+  box-shadow: 0 0 0 400vmax var(--scrim);
+  outline: 2px solid var(--accent);
+  outline-offset: 4px;
+  pointer-events: none;
+}
+
+/* Card scenes dim everything — no ring to paint. */
+.onboarding-stage__spot--none {
+  outline-color: transparent;
+}
+
+.onboarding-stage__hud {
+  position: fixed;
+  left: 50%;
+  bottom: var(--space-lg);
+  transform: translateX(-50%);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-sm);
+  width: min(46rem, calc(100vw - 2 * var(--space-lg)));
+  padding: var(--space-md) var(--space-lg);
+  background: var(--bg-primary);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-panel);
+  box-shadow: 0 12px 32px rgb(0 0 0 / 24%);
+}
+
+.onboarding-stage__rail {
+  display: flex;
+  gap: var(--space-lg);
+}
+
+.onboarding-stage__phase {
+  font-size: var(--size-small);
+  font-weight: var(--weight-medium);
+  color: var(--text-disabled);
+  letter-spacing: 0.04em;
+}
+
+.onboarding-stage__phase--active {
+  color: var(--accent);
+}
+
+.onboarding-stage__caption {
+  margin: 0;
+  min-height: 2.4em;
+  font-size: var(--size-body);
+  line-height: 1.4;
+  color: var(--text-primary);
+}
+
+.onboarding-stage__note {
+  display: block;
+  margin-top: var(--space-2xs);
+  font-size: var(--size-small);
+  color: var(--text-secondary);
+}
+
+.onboarding-stage__controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-sm);
+}
+
+.onboarding-stage__progress {
+  font-size: var(--size-small);
+  font-variant-numeric: tabular-nums;
+  color: var(--text-secondary);
+}
+
+/* The two cards — same geometry and elevation language as `Dialog`, centred
+   higher so the HUD below keeps its footing. */
+.onboarding-card {
+  position: fixed;
+  left: 50%;
+  top: 44%;
+  transform: translate(-50%, -50%);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-md);
+  width: min(36rem, calc(100vw - 2 * var(--space-lg)));
+  max-height: min(70vh, 30rem);
+  overflow-y: auto;
+  padding: var(--space-2xl);
+  background: var(--bg-primary);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-panel);
+  box-shadow: 0 12px 32px rgb(0 0 0 / 24%);
+}
+
+.onboarding-card__eyebrow {
+  margin: 0;
+  font-size: var(--size-small);
+  font-weight: var(--weight-bold);
+  letter-spacing: 0.08em;
+  color: var(--accent);
+}
+
+.onboarding-card__lede {
+  margin: 0;
+  font-size: var(--size-header);
+  font-weight: var(--weight-bold);
+  color: var(--text-primary);
+}
+
+.onboarding-card__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-sm);
+}
+
+/* The demo cursor — a pointer that glides between controls. Position lives in
+   the transform so the sweep can be updated every frame without layout. */
+.onboarding-cursor {
+  position: fixed;
+  left: -4px;
+  top: -4px;
+  z-index: 31;
+  pointer-events: none;
+}
+
+.onboarding-cursor--hidden {
+  visibility: hidden;
+}
+
+.onboarding-cursor__arrow {
+  display: block;
+  width: 24px;
+  height: 24px;
+  fill: var(--accent);
+  stroke: var(--on-accent);
+  stroke-width: 1.5px;
+  filter: drop-shadow(0 1px 3px rgb(0 0 0 / 40%));
+}
+
+/* Motion only under no-preference, exactly like the rest of the app. */
+@media (prefers-reduced-motion: no-preference) {
+  .onboarding-stage {
+    animation: aat-fade-in var(--transition) ease-out;
+  }
+
+  .onboarding-card {
+    animation: aat-dialog-in 240ms ease-out;
+  }
+
+  /* The glide between scene targets — the one flourish the app never shows
+     anywhere else, earned here because it *is* the lesson. */
+  .onboarding-stage__spot {
+    transition:
+      left 320ms ease,
+      top 320ms ease,
+      width 320ms ease,
+      height 320ms ease,
+      outline-color 200ms ease;
+  }
+
+  .onboarding-cursor {
+    transition:
+      transform 260ms ease,
+      visibility 0s;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  /* Instant is still correct: the ring and the cursor jump to where they
+     belong instead of travelling — same information, no motion. */
+  .onboarding-stage__spot,
+  .onboarding-cursor {
+    transition: none;
+  }
+}
+
+/* The HUD becomes a bottom sheet once the caption cannot share a row of
+   breathing room with the controls. */
+@media (max-width: 640px) {
+  .onboarding-stage__hud {
+    left: 0;
+    bottom: 0;
+    transform: none;
+    width: auto;
+    right: 0;
+    border-radius: var(--radius-panel) var(--radius-panel) 0 0;
+    border-inline: none;
+    border-bottom: none;
+  }
+
+  .onboarding-stage__rail {
+    gap: var(--space-md);
+  }
+
+  .onboarding-card {
+    top: var(--space-lg);
+    transform: translateX(-50%);
+    max-height: calc(100vh - 12rem);
+  }
+}

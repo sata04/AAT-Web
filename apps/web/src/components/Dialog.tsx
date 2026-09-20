@@ -9,6 +9,7 @@
  */
 
 import { useEffect, useId, useRef } from 'react'
+import { FOCUSABLE, keepTabInsideDialog } from './focus-trap.ts'
 
 export interface DialogProps {
   title: string
@@ -19,11 +20,9 @@ export interface DialogProps {
   description?: string | undefined
 }
 
-const FOCUSABLE =
-  'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])'
-
-/** An explicit `data-autofocus` wins over DOM order. */
-function initialFocusTarget(panel: HTMLElement | null): HTMLElement | null {
+/** An explicit `data-autofocus` wins over DOM order. Exported for modals that
+ *  don't render `Dialog` — the onboarding stage traps focus the same way. */
+export function initialFocusTarget(panel: HTMLElement | null): HTMLElement | null {
   if (panel === null) return null
   return panel.querySelector<HTMLElement>('[data-autofocus]') ?? panel.querySelector<HTMLElement>(FOCUSABLE)
 }
@@ -56,7 +55,15 @@ function topmostDialogPanel(): HTMLElement | null {
  * Panel registration folds in here so a dialog participates in the stacking
  * order for exactly its lifetime; the panel element itself is stable.
  */
-function useTopmostDialogKeys(panelRef: React.RefObject<HTMLDivElement | null>, onClose: () => void): void {
+/**
+ * Exported for `OnboardingStage`, which is modal chrome that is not a `Dialog`:
+ * it must join the same topmost-panel registry so Escape and Tab reach
+ * whichever surface is painted last — not every listener at once.
+ */
+export function useTopmostDialogKeys(
+  panelRef: React.RefObject<HTMLDivElement | null>,
+  onClose: () => void,
+): void {
   useEffect(() => {
     const panel = panelRef.current
     if (panel === null) return
@@ -78,22 +85,6 @@ function useTopmostDialogKeys(panelRef: React.RefObject<HTMLDivElement | null>, 
       document.removeEventListener('keydown', onKeyDown, true)
     }
   }, [panelRef, onClose])
-}
-
-// Keep Tab inside the dialog: the content behind it is inert to the mouse
-// but not to the keyboard unless something holds the cycle closed.
-function keepTabInsideDialog(panel: HTMLElement, event: KeyboardEvent): void {
-  const focusable = [...panel.querySelectorAll<HTMLElement>(FOCUSABLE)]
-  if (focusable.length === 0) return
-  const first = focusable[0] as HTMLElement
-  const last = focusable[focusable.length - 1] as HTMLElement
-  if (event.shiftKey && document.activeElement === first) {
-    event.preventDefault()
-    last.focus()
-  } else if (!event.shiftKey && document.activeElement === last) {
-    event.preventDefault()
-    first.focus()
-  }
 }
 
 export function Dialog(props: DialogProps): React.JSX.Element {

@@ -1,6 +1,10 @@
 /**
- * The onboarding surfaces: the once-only welcome, the re-openable help, the
+ * The onboarding surfaces: the first-run tour stage, the re-openable help, the
  * inline `?` explainers, and the dismissible graph hint.
+ *
+ * The stage is rendered against a fake `TourDriver` — its verbs are the seam
+ * where the tour meets the real analyzer, and asserting on them is asserting
+ * the whole contract the screen wires up.
  */
 
 import { fireEvent, screen } from '@testing-library/react'
@@ -9,69 +13,172 @@ import { describe, expect, it, vi } from 'vitest'
 import { HelpDialog } from '../../src/components/HelpDialog.tsx'
 import { HintBar } from '../../src/components/HintBar.tsx'
 import { InfoTip } from '../../src/components/InfoTip.tsx'
-import { WelcomeDialog } from '../../src/components/WelcomeDialog.tsx'
+import OnboardingStage from '../../src/onboarding/OnboardingStage.tsx'
+import type { TourDriver, TourSnapshot } from '../../src/onboarding/tour-driver.ts'
 import { renderComponent } from './harness.tsx'
 
-describe('welcome dialog', () => {
-  it('offers open/help/start and reports a dismissal', async () => {
-    const user = userEvent.setup()
-    const onDismiss = vi.fn()
-    const onShowHelp = vi.fn()
-    const onOpenCsv = vi.fn()
-    renderComponent(<WelcomeDialog onDismiss={onDismiss} onShowHelp={onShowHelp} onOpenCsv={onOpenCsv} />)
+function fakeDriver(overrides: Partial<TourDriver> = {}): TourDriver {
+  const snapshot: TourSnapshot = {
+    datasets: [],
+    mode: 'NORMAL',
+    activeName: null,
+    selection: null,
+    viewport: null,
+    analysisReady: false,
+    dataRange: null,
+    geometry: null,
+    gestureLayer: null,
+  }
+  return {
+    snapshot: () => snapshot,
+    openFiles: vi.fn(async () => {}),
+    openDemo: vi.fn(async (which) => `sample-${which}.csv`),
+    closeTourDatasets: vi.fn(),
+    discardPending: vi.fn(),
+    activateDemo: vi.fn(),
+    applyModeEvent: vi.fn(),
+    setNormalMode: vi.fn(),
+    setSelection: vi.fn(),
+    setViewport: vi.fn(),
+    restoreBaseline: vi.fn(),
+    openFilePicker: vi.fn(),
+    ...overrides,
+  }
+}
 
-    const dialog = screen.getByRole('dialog')
-    expect(dialog.getAttribute('aria-modal')).toBe('true')
-    expect(screen.getByText(/ブラウザ内で行われ/)).toBeTruthy()
+describe('tour stage — intro', () => {
+  it('carries the welcome copy verbatim with the transport underneath', () => {
+    renderComponent(<OnboardingStage driver={fakeDriver()} onFinish={() => {}} />)
 
-    await user.click(screen.getByRole('button', { name: 'CSVを開く' }))
-    expect(onOpenCsv).toHaveBeenCalledOnce()
+    const stage = screen.getByRole('dialog', { name: 'AAT Web のはじめてガイド' })
+    expect(stage.getAttribute('aria-modal')).toBe('true')
+    expect(stage.textContent).toContain('微小重力実験の加速度データを、ブラウザ上で解析します。')
+    expect(stage.textContent).toContain('クラウドへ送信されることはありません')
+    const caption = stage.querySelector('[data-scene]')
+    expect(caption?.getAttribute('data-scene')).toBe('intro')
+    expect(caption?.getAttribute('aria-live')).toBe('polite')
 
-    await user.click(screen.getByRole('button', { name: '操作方法を見る' }))
-    expect(onShowHelp).toHaveBeenCalledOnce()
-
-    await user.click(screen.getByRole('button', { name: 'そのまま始める' }))
-    expect(onDismiss).toHaveBeenCalledOnce()
+    for (const name of ['次へ', '一時停止', '最初から', 'スキップ']) {
+      expect(screen.getByRole('button', { name })).toBeTruthy()
+    }
+    expect((screen.getByRole('button', { name: '戻る' }) as HTMLButtonElement).disabled).toBe(true)
   })
 
-  it('closes on Escape', async () => {
+  it('focuses デモを見る on entry and reports each way out', async () => {
     const user = userEvent.setup()
-    const onDismiss = vi.fn()
-    renderComponent(<WelcomeDialog onDismiss={onDismiss} onShowHelp={() => {}} onOpenCsv={() => {}} />)
+    const driver = fakeDriver()
+    const onFinish = vi.fn()
+    renderComponent(<OnboardingStage driver={driver} onFinish={onFinish} />)
+
+    expect(screen.getByRole('button', { name: 'デモを見る' })).toBe(document.activeElement)
+
+    await user.click(screen.getByRole('button', { name: 'サンプルデータで試す' }))
+    expect(onFinish).toHaveBeenCalledWith('keep', false)
+  })
+
+  it('opens the generated CSV through the tracked demo verb', async () => {
+    const user = userEvent.setup()
+    const driver = fakeDriver()
+    renderComponent(<OnboardingStage driver={driver} onFinish={() => {}} />)
+
+    await user.click(screen.getByRole('button', { name: 'サンプルデータで試す' }))
+    expect(driver.openDemo).toHaveBeenCalledWith('a')
+  })
+
+  it('hands CSVを開く to the toolbar picker', async () => {
+    const user = userEvent.setup()
+    const driver = fakeDriver()
+    const onFinish = vi.fn()
+    renderComponent(<OnboardingStage driver={driver} onFinish={onFinish} />)
+
+    await user.click(screen.getByRole('button', { name: 'CSVを開く' }))
+    expect(driver.openFilePicker).toHaveBeenCalledOnce()
+    expect(onFinish).toHaveBeenCalledWith('keep', false)
+  })
+
+  it('そのまま始める and Escape are both skips that drove nothing', async () => {
+    const user = userEvent.setup()
+    const onFinish = vi.fn()
+    const view = renderComponent(<OnboardingStage driver={fakeDriver()} onFinish={onFinish} />)
+
+    await user.click(screen.getByRole('button', { name: 'そのまま始める' }))
+    expect(onFinish).toHaveBeenLastCalledWith('skip', false)
+
+    view.unmount()
+    onFinish.mockClear()
+    renderComponent(<OnboardingStage driver={fakeDriver()} onFinish={onFinish} />)
     await user.keyboard('{Escape}')
-    expect(onDismiss).toHaveBeenCalledOnce()
+    expect(onFinish).toHaveBeenCalledWith('skip', false)
   })
 })
 
-describe('dialog file-drag guard', () => {
-  it('swallows a file drag so the browser cannot navigate away from the app', () => {
-    renderComponent(<WelcomeDialog onDismiss={() => {}} onShowHelp={() => {}} onOpenCsv={() => {}} />)
-    const backdrop = document.querySelector('.dialog-backdrop')
-    expect(backdrop).toBeTruthy()
+describe('tour stage — driving', () => {
+  it('opens the sample through the pipeline when the demo starts', async () => {
+    const user = userEvent.setup()
+    const driver = fakeDriver()
+    renderComponent(<OnboardingStage driver={driver} onFinish={() => {}} />)
 
-    // `fireEvent` returns false when a handler called `preventDefault`, and the
-    // browser only lets `drop` be cancelled when `dragover` was cancelled too —
-    // so both matter. Uncancelled, the default action opens the dropped file as
-    // a document and every open dataset goes with it.
-    const dataTransfer = { types: ['Files'], files: [], items: [] }
-    expect(fireEvent.dragOver(backdrop as Element, { dataTransfer })).toBe(false)
-    expect(fireEvent.drop(backdrop as Element, { dataTransfer })).toBe(false)
+    await user.click(screen.getByRole('button', { name: 'デモを見る' }))
+    const caption = document.querySelector('[data-scene]')
+    expect(caption?.getAttribute('data-scene')).toBe('ingest')
+    expect(driver.openDemo).toHaveBeenCalledWith('a')
+  })
+
+  it('hands focus back to the stage when the intro card unmounts', async () => {
+    const user = userEvent.setup()
+    renderComponent(<OnboardingStage driver={fakeDriver()} onFinish={() => {}} />)
+
+    const demo = screen.getByRole('button', { name: 'デモを見る' })
+    demo.focus()
+    await user.keyboard('{Enter}')
+    // The focused button left the DOM with the intro card — the stage must
+    // take focus back itself rather than drop it to the body, from where the
+    // next Tab would reach the analyzer behind the modal.
+    const stage = document.querySelector('.onboarding-stage')
+    expect(stage?.contains(document.activeElement)).toBe(true)
+  })
+
+  it('marks a mid-tour skip as driven, so the screen cleans up after it', async () => {
+    const user = userEvent.setup()
+    const onFinish = vi.fn()
+    renderComponent(<OnboardingStage driver={fakeDriver()} onFinish={onFinish} />)
+
+    await user.click(screen.getByRole('button', { name: 'デモを見る' }))
+    await user.keyboard('{Escape}')
+    expect(onFinish).toHaveBeenCalledWith('skip', true)
+  })
+})
+
+describe('stage file-drag guard', () => {
+  it('accepts a dropped CSV as the real answer to the tour', () => {
+    const driver = fakeDriver()
+    const onFinish = vi.fn()
+    renderComponent(<OnboardingStage driver={driver} onFinish={onFinish} />)
+    const stage = document.querySelector('.onboarding-stage')
+    expect(stage).toBeTruthy()
+
+    const file = new File(['a,b\n0,1,2'], 'own.csv', { type: 'text/csv' })
+    const dataTransfer = { types: ['Files'], files: [file], items: [] }
+    expect(fireEvent.dragOver(stage as Element, { dataTransfer })).toBe(false)
+    expect(fireEvent.drop(stage as Element, { dataTransfer })).toBe(false)
+    expect(driver.openFiles).toHaveBeenCalledWith([file])
+    expect(onFinish).toHaveBeenCalledWith('keep', false)
   })
 
   it('leaves a non-file drag alone', () => {
-    renderComponent(<WelcomeDialog onDismiss={() => {}} onShowHelp={() => {}} onOpenCsv={() => {}} />)
-    const backdrop = document.querySelector('.dialog-backdrop') as Element
+    renderComponent(<OnboardingStage driver={fakeDriver()} onFinish={() => {}} />)
+    const stage = document.querySelector('.onboarding-stage') as Element
     const dataTransfer = { types: ['text/plain'], files: [], items: [] }
-    expect(fireEvent.dragOver(backdrop, { dataTransfer })).toBe(true)
+    expect(fireEvent.dragOver(stage, { dataTransfer })).toBe(true)
   })
 })
 
 describe('help dialog', () => {
-  it('lists the required topics and can reopen the welcome', async () => {
+  it('lists the required topics and can re-run the tour', async () => {
     const user = userEvent.setup()
     const onClose = vi.fn()
-    const onShowWelcome = vi.fn()
-    renderComponent(<HelpDialog onClose={onClose} onShowWelcome={onShowWelcome} />)
+    const onShowTour = vi.fn()
+    renderComponent(<HelpDialog onClose={onClose} onShowTour={onShowTour} />)
 
     for (const heading of [
       'CSVの読み込み',
@@ -87,7 +194,7 @@ describe('help dialog', () => {
     }
 
     await user.click(screen.getByRole('button', { name: '初回の案内をもう一度見る' }))
-    expect(onShowWelcome).toHaveBeenCalledOnce()
+    expect(onShowTour).toHaveBeenCalledOnce()
   })
 })
 

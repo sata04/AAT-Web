@@ -80,6 +80,12 @@ interface AnalysisJob {
   /** Set when this attempt is already a re-open, so it cannot recurse. */
   reopenedOnce?: boolean | undefined
   /**
+   * Tour-generated files open local-only: the tour's own caption promises
+   * nothing leaves the browser, so its samples must not create a cloud
+   * revision or poster job even when the session is signed in.
+   */
+  localOnly?: boolean | undefined
+  /**
    * The cancellation epoch the caller captured. Absent, the current epoch is
    * used — the caller is the request's own epoch authority by definition.
    */
@@ -92,15 +98,30 @@ interface InstalledAnalysis {
   result: Awaited<ReturnType<AnalysisClient['analyse']>>
   effectiveConfig: AnalysisConfig
   epoch: number
+  localOnly: boolean
 }
 
 /**
- * Install a finished analysis.
- *
- * Two arrivals are dropped instead: one whose file the user closed while the
- * worker was computing, and one whose epoch went stale — a user cancel, or a
- * newer settings application whose own re-analysis supersedes it. Both still
- * release the retained table so it cannot linger.
+ * A result the workspace no longer wants — the user closed the file while
+ * the worker computed it, or the epoch went stale (cancel, or a newer
+ * settings application whose own re-analysis supersedes it). Either way the
+ * retained table is released so it cannot linger.
+ */
+function dropUnwantedInstall(
+  deps: AnalyzerLoopDeps,
+  client: AnalysisClient,
+  source: OpenedSource,
+  epoch: number,
+): boolean {
+  if (!deps.closedSources.current.delete(source.filename) && epoch === deps.cancelEpoch.current) {
+    return false
+  }
+  void client.release(source.sourceSha256).catch(() => {})
+  return true
+}
+
+/**
+ * Install a finished analysis — unless `dropUnwantedInstall` claims it.
  */
 async function installAnalysisResult(
   deps: AnalyzerLoopDeps,
@@ -108,15 +129,8 @@ async function installAnalysisResult(
   installed: InstalledAnalysis,
 ): Promise<void> {
   const { source, result, effectiveConfig, epoch } = installed
-  if (deps.closedSources.current.delete(source.filename)) {
-    void client.release(source.sourceSha256).catch(() => {})
-    return
-  }
+  if (dropUnwantedInstall(deps, client, source, epoch)) return
   const dataset = datasetFromPayload(result.payload, effectiveConfig, result.fromCache)
-  if (epoch !== deps.cancelEpoch.current) {
-    void client.release(source.sourceSha256).catch(() => {})
-    return
-  }
   deps.setDatasets((current) => {
     // Re-analysing or re-opening a file must not move it to the end of the
     // list — the comparison graph draws in list order.
@@ -140,7 +154,7 @@ async function installAnalysisResult(
 
   // The local analysis is finished and usable at this point. Everything below
   // is optional and must never gate it.
-  if (deps.signedIn) void deps.syncToCloud(dataset)
+  if (deps.signedIn && !installed.localOnly) void deps.syncToCloud(dataset)
 }
 
 /**
@@ -249,7 +263,13 @@ export async function runAnalysisFor(deps: AnalyzerLoopDeps, job: AnalysisJob): 
       },
       onProgress,
     )
-    await installAnalysisResult(deps, client, { source, result, effectiveConfig, epoch })
+    await installAnalysisResult(deps, client, {
+      source,
+      result,
+      effectiveConfig,
+      epoch,
+      localOnly: job.localOnly === true,
+    })
   } catch (error) {
     await reportAnalysisError(deps, client, error, { ...job, epoch })
   }
@@ -287,8 +307,9 @@ async function openSingleFile(
   deps: AnalyzerLoopDeps,
   client: AnalysisClient,
   file: File,
-  epoch: number,
+  batch: { epoch: number; localOnly: boolean },
 ): Promise<'done' | 'columns' | 'stop'> {
+  const { epoch, localOnly } = batch
   try {
     const bytes = await file.arrayBuffer()
     if (deps.cancelEpoch.current !== epoch) return 'stop'
@@ -320,14 +341,14 @@ async function openSingleFile(
       deps.setStatuses((current) => ({ ...current, analysis: { kind: 'idle' } }))
       return 'columns'
     }
-    await runAnalysisFor(deps, { source, mapping: source.suggestedMapping, epoch })
+    await runAnalysisFor(deps, { source, mapping: source.suggestedMapping, epoch, localOnly })
     return 'done'
   } catch (error) {
     return reportOpenError(deps, file.name, error) === 'cancelled' ? 'stop' : 'done'
   }
 }
 
-export async function openFilesFor(deps: AnalyzerLoopDeps, files: File[]): Promise<void> {
+export async function openFilesFor(deps: AnalyzerLoopDeps, files: File[], localOnly = false): Promise<void> {
   const client = deps.getAnalysisClient()
   const epoch = deps.cancelEpoch.current
   for (let index = 0; index < files.length; index++) {
@@ -337,7 +358,7 @@ export async function openFilesFor(deps: AnalyzerLoopDeps, files: File[]): Promi
       ...current,
       analysis: { kind: 'running', stage: 'decoding', percent: 0 },
     }))
-    const outcome = await openSingleFile(deps, client, file, epoch)
+    const outcome = await openSingleFile(deps, client, file, { epoch, localOnly })
     if (outcome === 'stop') return
     if (outcome === 'columns') {
       // The dialog is modal; the rest of the batch resumes when it
@@ -502,7 +523,7 @@ export interface AnalyzerLoop {
     reopenedOnce?: boolean,
     epoch?: number,
   ) => Promise<void>
-  openFiles: (files: File[]) => Promise<void>
+  openFiles: (files: File[], options?: { localOnly?: boolean }) => Promise<void>
   confirmPendingColumns: (mapping: ColumnMapping) => void
   cancelPendingColumns: () => void
   cancelAnalysis: () => void
@@ -578,7 +599,11 @@ function useLoopCallbacks(
       }),
     [deps],
   )
-  const openFiles = useCallback((files: File[]) => openFilesFor(deps, files), [deps])
+  const openFiles = useCallback(
+    (files: File[], options?: { localOnly?: boolean }) =>
+      openFilesFor(deps, files, options?.localOnly === true),
+    [deps],
+  )
   const confirmPendingColumns = useCallback(
     (mapping: ColumnMapping) => confirmPendingColumnsFor(deps, mapping),
     [deps],
