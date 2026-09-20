@@ -124,6 +124,20 @@ describe('tour stage — driving', () => {
     expect(driver.openDemo).toHaveBeenCalledWith('a')
   })
 
+  it('hands focus back to the stage when the intro card unmounts', async () => {
+    const user = userEvent.setup()
+    renderComponent(<OnboardingStage driver={fakeDriver()} onFinish={() => {}} />)
+
+    const demo = screen.getByRole('button', { name: 'デモを見る' })
+    demo.focus()
+    await user.keyboard('{Enter}')
+    // The focused button left the DOM with the intro card — the stage must
+    // take focus back itself rather than drop it to the body, from where the
+    // next Tab would reach the analyzer behind the modal.
+    const stage = document.querySelector('.onboarding-stage')
+    expect(stage?.contains(document.activeElement)).toBe(true)
+  })
+
   it('marks a mid-tour skip as driven, so the screen cleans up after it', async () => {
     const user = userEvent.setup()
     const onFinish = vi.fn()

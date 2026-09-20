@@ -257,6 +257,9 @@ function StageHud({
           type="button"
           className="button button--flat"
           aria-pressed={tour.paused}
+          // Pause only means something while autoplay is live — manual steps
+          // run their own instant enter and nothing is left to hold.
+          disabled={!tour.playing}
           onClick={tour.togglePause}
         >
           {tour.paused ? '再生' : '一時停止'}
@@ -297,6 +300,23 @@ export default function OnboardingStage(props: OnboardingStageProps): React.JSX.
 
   useTopmostDialogKeys(panelRef, () => finish('skip'))
   useSpotlight(panelRef, scene.spotlight)
+
+  // A scene change can unmount the element holding focus — the intro card's
+  // buttons leave with it — and the browser drops focus to the body, from
+  // where the next Tab reaches the analyzer behind this modal. Refocus the
+  // stage, but only when focus was inside it to begin with: an idle pointer
+  // user's autoplay must not yank focus on every scene cut.
+  const focusWasInsideRef = useRef(true)
+  useEffect(() => {
+    const panel = panelRef.current
+    if (panel === null) return
+    const active = document.activeElement
+    const inside = active !== null && panel.contains(active)
+    if (focusWasInsideRef.current && !inside) initialFocusTarget(panel)?.focus()
+    // Read after the refocus: staying `inside` is what lets the next scene
+    // change recapture again.
+    focusWasInsideRef.current = panel.contains(document.activeElement)
+  }, [scene.id])
 
   // A file dropped on the scrim is a researcher answering the tour's first
   // question with their own data — open it for real and let them keep it.
