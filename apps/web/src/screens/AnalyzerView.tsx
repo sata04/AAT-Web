@@ -4,20 +4,15 @@ import type { ColumnMapping, OpenedSource } from '../analysis/protocol.ts'
 import type { Dataset } from '../app/dataset.ts'
 import { openedSourceForDataset } from '../app/dataset.ts'
 import type { RangeStatisticsResult } from '../app/range-statistics.ts'
-import { clearCache } from '../cache/analysis-cache.ts'
 import type { PosterFigure } from '../cloud/gateway.ts'
 import type { CloudStatuses } from '../cloud/status.ts'
 import { CloudStatusBar } from '../components/CloudStatusBar.tsx'
-import { ColumnSelectorDialog } from '../components/ColumnSelectorDialog.tsx'
 import { csvFilesFrom, FileDropZone } from '../components/FileDropZone.tsx'
-import { HelpDialog } from '../components/HelpDialog.tsx'
 import { HintBar, Kbd } from '../components/HintBar.tsx'
 import { type NoticeItem, NoticeStack } from '../components/NoticeStack.tsx'
 import { RangeStatisticsPanel } from '../components/RangeStatisticsPanel.tsx'
-import { SettingsDialog } from '../components/SettingsDialog.tsx'
 import { StatisticsPanel } from '../components/StatisticsPanel.tsx'
 import { TABLE_SCROLL_PROPS } from '../components/table-scroll.ts'
-import { WelcomeDialog } from '../components/WelcomeDialog.tsx'
 import type { ChartGeometry } from '../graph/geometry.ts'
 import type { PlotModel } from '../graph/plot-model.ts'
 import { SelectionOverlay } from '../graph/SelectionOverlay.tsx'
@@ -27,6 +22,7 @@ import { type ChartViewport, UPlotChart } from '../graph/UPlotChart.tsx'
 import { isComparing, type ViewMode } from '../graph/view-mode.ts'
 import { PosterPanel } from '../poster/PosterPanel.tsx'
 import type { PosterContext } from '../poster/requests.ts'
+import { AnalyzerDialogs } from './AnalyzerDialogs.tsx'
 import { AnalyzerToolbar } from './AnalyzerToolbar.tsx'
 
 export interface PendingColumnChoice {
@@ -404,58 +400,6 @@ function AnalyzerSidebar({
       />
       <FileInfoPanel state={state} actions={actions} />
     </aside>
-  )
-}
-
-function AnalyzerDialogs({
-  state,
-  actions,
-}: Pick<AnalyzerViewProps, 'state' | 'actions'>): React.JSX.Element {
-  const applySettings = (next: AnalysisConfig) => {
-    // Save + possible re-analysis are the screen's business; see applyConfig.
-    actions.applyConfig(next)
-  }
-  return (
-    <>
-      {state.pendingColumns === null ? null : (
-        <ColumnSelectorDialog
-          source={state.pendingColumns.source}
-          initial={state.pendingColumns.initial}
-          reason={state.pendingColumns.reason}
-          onCancel={actions.cancelPendingColumns}
-          onConfirm={actions.confirmPendingColumns}
-        />
-      )}
-      {state.settingsOpen ? (
-        <SettingsDialog
-          config={state.config}
-          onCancel={() => actions.setSettingsOpen(false)}
-          onApply={applySettings}
-          onClearCache={() =>
-            void clearCache().then(() => actions.notify('info', 'ローカルキャッシュを削除しました。'))
-          }
-        />
-      ) : null}
-      {state.welcomeOpen ? (
-        <WelcomeDialog
-          onDismiss={actions.dismissWelcome}
-          onShowHelp={actions.openHelp}
-          // There is exactly one CSV picker on the page — the toolbar's — so
-          // the welcome borrows it rather than hiding a second input inside a
-          // modal, where a hidden input would only confuse the focus trap.
-          // Dismissing first keeps the picker, progress and any column dialog
-          // unblocked; closing only on a finished analysis would leave the
-          // welcome modal above the column selector.
-          onOpenCsv={() => {
-            actions.dismissWelcome()
-            document.getElementById('aat-file-open')?.click()
-          }}
-        />
-      ) : null}
-      {state.helpOpen ? (
-        <HelpDialog onClose={actions.closeHelp} onShowWelcome={actions.reopenWelcome} />
-      ) : null}
-    </>
   )
 }
 
