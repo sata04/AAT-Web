@@ -126,13 +126,18 @@ function scanFraction(text: string, length: number, mantissa: Mantissa): Mantiss
 
   let { number, digits } = mantissa
   let decimals = 0
-  while (position < length && digits < MAX_DIGITS && isAsciiDigit(text.charCodeAt(position))) {
+  while (position < length && isAsciiDigit(text.charCodeAt(position))) {
+    // The significand is full — the rest of the fraction only moves the
+    // decimal point, so skip it and report the kept digits.
+    if (digits >= MAX_DIGITS) {
+      position = skipAsciiDigits(text, position, length)
+      return { number, digits, exponent: mantissa.exponent - decimals, position }
+    }
     number = number * 10 + (text.charCodeAt(position) - CHAR_ZERO)
     position++
     digits++
     decimals++
   }
-  if (digits >= MAX_DIGITS) position = skipAsciiDigits(text, position, length)
 
   return { number, digits, exponent: mantissa.exponent - decimals, position }
 }
@@ -276,13 +281,18 @@ export function isMissingToken(text: string): boolean {
  * the numeric conversion has failed (`cinf` / `cposinf` / `cneginf` and the
  * `Infinity` forms in `pandas/_libs/parsers.pyx`).
  */
+const INFINITY_TOKENS: ReadonlyMap<string, number> = new Map([
+  ['inf', Number.POSITIVE_INFINITY],
+  ['+inf', Number.POSITIVE_INFINITY],
+  ['infinity', Number.POSITIVE_INFINITY],
+  ['+infinity', Number.POSITIVE_INFINITY],
+  ['-inf', Number.NEGATIVE_INFINITY],
+  ['-infinity', Number.NEGATIVE_INFINITY],
+])
+
 export function parseInfinityToken(text: string): number | null {
   // `strcasecmp` against the whole cell — no trimming, exactly as pandas does it.
-  const normalised = text.toLowerCase()
-  if (normalised === 'inf' || normalised === '+inf') return Number.POSITIVE_INFINITY
-  if (normalised === 'infinity' || normalised === '+infinity') return Number.POSITIVE_INFINITY
-  if (normalised === '-inf' || normalised === '-infinity') return Number.NEGATIVE_INFINITY
-  return null
+  return INFINITY_TOKENS.get(text.toLowerCase()) ?? null
 }
 
 /** How pandas classified one raw cell. */

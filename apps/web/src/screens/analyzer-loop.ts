@@ -157,7 +157,11 @@ async function reopenFromFile(
   const file = deps.sourceFiles.current.get(job.source.sourceSha256)
   if (file === undefined) return false
   try {
-    const reopened = await client.open(file.name, await file.arrayBuffer())
+    // The stored `File` supplies only bytes — equal hashes mean equal content,
+    // so which file occupies the slot is immaterial. The name is not: two
+    // datasets can share one hash entry, and the job's filename is the dataset
+    // identity this analysis is for.
+    const reopened = await client.open(job.source.filename, await file.arrayBuffer())
     await runAnalysisFor(deps, { ...job, source: reopened, reopenedOnce: true })
     return true
   } catch {

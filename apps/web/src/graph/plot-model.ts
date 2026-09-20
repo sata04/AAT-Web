@@ -15,7 +15,7 @@ import { asFullResolution, type FullResolutionArray } from '../analysis/series.t
 import type { Dataset, SensorMode } from '../app/dataset.ts'
 import { hasAllData, hasFilteredData, resolveSensorVisibility } from '../app/dataset.ts'
 import { comparisonColour, type GraphPalette } from './theme.ts'
-import { isGQuality, isShowingAll, usesFixedDuration, type ViewMode } from './view-mode.ts'
+import { isComparing, isGQuality, isShowingAll, usesFixedDuration, type ViewMode } from './view-mode.ts'
 
 export interface PlotTrace {
   key: string
@@ -287,26 +287,23 @@ function sensorComparisonTraces(inputs: PlotInputs): PlotTrace[] {
   return traces
 }
 
-function comparisonModel(inputs: PlotInputs): PlotModel {
-  const { datasets, mode, palette } = inputs
-  const showingAll = isShowingAll(mode)
-  const gQuality = isGQuality(mode)
-  const traces = gQuality ? gQualityComparisonTraces(datasets, palette) : sensorComparisonTraces(inputs)
-
-  if (gQuality) {
-    return {
-      traces,
-      title: 'G-quality Analysis Comparison',
-      xLabel: 'Window Size (s)',
-      yLabel: 'Mean Gravity Level (G)',
-      y2Label: null,
-      xRange: null,
-      yRange: null,
-      bands: [],
-      emptyMessage: traces.length === 0 ? '比較できるデータがありません。' : null,
-    }
+function gQualityComparisonModel(inputs: PlotInputs): PlotModel {
+  const traces = gQualityComparisonTraces(inputs.datasets, inputs.palette)
+  return {
+    traces,
+    title: 'G-quality Analysis Comparison',
+    xLabel: 'Window Size (s)',
+    yLabel: 'Mean Gravity Level (G)',
+    y2Label: null,
+    xRange: null,
+    yRange: null,
+    bands: [],
+    emptyMessage: traces.length === 0 ? '比較できるデータがありません。' : null,
   }
+}
 
+function sensorComparisonModel(inputs: PlotInputs): PlotModel {
+  const traces = sensorComparisonTraces(inputs)
   return {
     traces,
     title: 'Gravity Level Comparison',
@@ -317,10 +314,14 @@ function comparisonModel(inputs: PlotInputs): PlotModel {
     // show-all must not be clipped, because revealing what filtering removed is
     // the entire point of it.
     xRange: usesFixedDuration(inputs.mode) ? [0, inputs.defaultGraphDuration] : null,
-    yRange: showingAll ? null : [inputs.ylimMin, inputs.ylimMax],
+    yRange: isShowingAll(inputs.mode) ? null : [inputs.ylimMin, inputs.ylimMax],
     bands: [],
     emptyMessage: traces.length === 0 ? '比較できるデータがありません。' : null,
   }
+}
+
+function comparisonModel(inputs: PlotInputs): PlotModel {
+  return isGQuality(inputs.mode) ? gQualityComparisonModel(inputs) : sensorComparisonModel(inputs)
 }
 
 /** Show-all marks what filtering kept, so the trimmed segment can be seen in context. */
@@ -330,14 +331,14 @@ function keptRangeBands(
   showDrag: boolean,
   palette: GraphPalette,
 ): PlotBand[] {
+  const kept = [
+    { show: showInner, sensor: active.inner, colour: palette.innerMean, label: 'Inner Capsule Range' },
+    { show: showDrag, sensor: active.drag, colour: palette.dragMean, label: 'Drag Shield Range' },
+  ]
   const bands: PlotBand[] = []
-  const innerEnd = active.inner.filteredTime.at(-1)
-  const dragEnd = active.drag.filteredTime.at(-1)
-  if (showInner && innerEnd !== undefined) {
-    bands.push({ from: 0, to: innerEnd, colour: palette.innerMean, label: 'Inner Capsule Range' })
-  }
-  if (showDrag && dragEnd !== undefined) {
-    bands.push({ from: 0, to: dragEnd, colour: palette.dragMean, label: 'Drag Shield Range' })
+  for (const { show, sensor, colour, label } of kept) {
+    const end = sensor.filteredTime.at(-1)
+    if (show && end !== undefined) bands.push({ from: 0, to: end, colour, label })
   }
   return bands
 }
@@ -371,19 +372,23 @@ function singleDatasetModel(inputs: PlotInputs): PlotModel {
   const { showInner, showDrag } = visibleSensors(active, showingAll, sensorMode)
   const traces = sensorTraces(active, showingAll, sensorMode, singleSensorSpecs(active, showingAll, palette))
 
-  const title = showingAll
-    ? `The Gravity Level ${active.name} (All Data)`
-    : `The Gravity Level ${active.name}`
-  const xRange: PlotModel['xRange'] = showingAll ? null : [0, inputs.defaultGraphDuration]
-  const yRange: PlotModel['yRange'] = showingAll ? null : [inputs.ylimMin, inputs.ylimMax]
+  // Show-all keeps the data's own extent and marks the kept range; the filtered
+  // modes pin the fixed window and the configured y limits.
+  const framing = showingAll
+    ? { suffix: ' (All Data)', xRange: null, yRange: null }
+    : {
+        suffix: '',
+        xRange: [0, inputs.defaultGraphDuration] as const,
+        yRange: [inputs.ylimMin, inputs.ylimMax] as const,
+      }
   return {
     traces,
-    title,
+    title: `The Gravity Level ${active.name}${framing.suffix}`,
     xLabel: 'Time (s)',
     yLabel: 'Gravity Level (G)',
     y2Label: null,
-    xRange,
-    yRange,
+    xRange: framing.xRange,
+    yRange: framing.yRange,
     bands: showingAll ? keptRangeBands(active, showInner, showDrag, palette) : [],
     emptyMessage: traces.length === 0 ? '表示できる加速度データがありません。' : null,
   }
@@ -391,11 +396,7 @@ function singleDatasetModel(inputs: PlotInputs): PlotModel {
 
 /** Decide what the current mode should draw. */
 export function buildPlotModel(inputs: PlotInputs): PlotModel {
-  const comparing =
-    inputs.mode === 'COMPARING' ||
-    inputs.mode === 'COMPARING_SHOW_ALL' ||
-    inputs.mode === 'COMPARING_G_QUALITY'
-  if (comparing) return comparisonModel(inputs)
+  if (isComparing(inputs.mode)) return comparisonModel(inputs)
   if (isGQuality(inputs.mode)) return gQualityModel(inputs)
   return singleDatasetModel(inputs)
 }

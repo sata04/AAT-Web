@@ -66,13 +66,42 @@ export interface GQualityOptions {
 }
 
 /**
- * `np.arange(start, end + tolerance, step)`, filtered to `<= end + tolerance`
- * and clamped to `end`.
- *
- * NumPy fills the buffer as `start, start + step, then start + i * delta` where
+ * The `np.arange` fill: `start`, `start + step`, then `start + i * delta` where
  * `delta = (start + step) - start` — a value that is generally *not* `step`
  * once rounding is involved. Using `step` directly produces a ladder that
  * differs from the reference at the third element onward.
+ */
+function arangeLadder(start: number, step: number, count: number): Float64Array {
+  const ladder = new Float64Array(count)
+  ladder[0] = start
+  if (count === 1) return ladder
+  ladder[1] = start + step
+  const delta = (ladder[1] as number) - start
+  for (let index = 2; index < count; index++) ladder[index] = start + index * delta
+  return ladder
+}
+
+/**
+ * How many steps `arange` takes and the inclusive bound its tolerance admits.
+ * Floating-point slack around `end` is deliberate — it is how `arange` keeps a
+ * last element that lands on `end` after rounding.
+ */
+function sweepBounds(start: number, end: number, step: number): { count: number; stop: number } {
+  const tolerance = Number.EPSILON * Math.max(1, Math.abs(start), Math.abs(end), Math.abs(step)) * 8
+  const stop = end + tolerance
+  const count = Math.max(0, Math.ceil((stop - start) / step))
+  if (!Number.isFinite(count)) {
+    throw new AnalysisParameterError(
+      `The G-quality sweep range [${start}, ${end}] at step ${step} is unbounded.`,
+      'g_quality_step',
+    )
+  }
+  return { count, stop }
+}
+
+/**
+ * `np.arange(start, end + tolerance, step)`, filtered to `<= end + tolerance`
+ * and clamped to `end`.
  */
 export function gQualityWindowSizes(start: number, end: number, step: number): Float64Array {
   // A non-positive step allocates `Float64Array(Infinity)` below and crashes
@@ -84,28 +113,11 @@ export function gQualityWindowSizes(start: number, end: number, step: number): F
     )
   }
 
-  const tolerance = Number.EPSILON * Math.max(1, Math.abs(start), Math.abs(end), Math.abs(step)) * 8
-  const stop = end + tolerance
-  const count = Math.max(0, Math.ceil((stop - start) / step))
-  if (!Number.isFinite(count)) {
-    throw new AnalysisParameterError(
-      `The G-quality sweep range [${start}, ${end}] at step ${step} is unbounded.`,
-      'g_quality_step',
-    )
-  }
+  const { count, stop } = sweepBounds(start, end, step)
   if (count === 0) return new Float64Array(0)
 
-  const ladder = new Float64Array(count)
-  ladder[0] = start
-  if (count > 1) {
-    ladder[1] = start + step
-    const delta = (ladder[1] as number) - start
-    for (let index = 2; index < count; index++) ladder[index] = start + index * delta
-  }
-
   const kept: number[] = []
-  for (let index = 0; index < count; index++) {
-    const value = ladder[index] as number
+  for (const value of arangeLadder(start, step, count)) {
     if (value <= stop) kept.push(Math.min(value, end))
   }
   return Float64Array.from(kept)
