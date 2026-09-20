@@ -380,10 +380,7 @@ export function AnalyzerScreen(): React.JSX.Element {
     keep: new Set<DemoDataset>(),
     // In-flight opens per chosen filename: how many are still resolving, and
     // the newest request — whose epoch and role the visible install obeys.
-    pending: new Map<
-      string,
-      { inFlight: number; latest: { which: DemoDataset; epoch: number } }
-    >(),
+    pending: new Map<string, { inFlight: number; latest: { which: DemoDataset; epoch: number } }>(),
     // Installs already matched to a request — the same dataset object still
     // visible on the next commit must not consume another open.
     reconciled: new WeakSet<Dataset>(),
