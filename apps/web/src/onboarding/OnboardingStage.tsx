@@ -22,7 +22,8 @@ import { csvFilesFrom } from '../components/FileDropZone.tsx'
 import './onboarding.css'
 import { DemoCursor } from './DemoCursor.tsx'
 import type { TourDriver } from './tour-driver.ts'
-import { type TourFinish, useTour } from './use-tour.ts'
+import type { SceneDef } from './tour-scenes.ts'
+import { type TourFinish, type TourMachine, useTour } from './use-tour.ts'
 
 export interface OnboardingStageProps {
   readonly driver: TourDriver
@@ -200,6 +201,77 @@ function OutroCard({
   )
 }
 
+/**
+ * The phase rail, live caption and transport — the chrome that stays put while
+ * scenes change underneath it.
+ */
+function StageHud({
+  scene,
+  tour,
+  reducedMotion,
+  onFinish,
+}: {
+  scene: SceneDef
+  tour: TourMachine
+  reducedMotion: boolean
+  onFinish: (kind: TourFinish) => void
+}): React.JSX.Element {
+  return (
+    <div className="onboarding-stage__hud">
+      <div className="onboarding-stage__rail" aria-hidden="true">
+        {PHASES.map((phase) => (
+          <span
+            key={phase.id}
+            className={
+              phase.id === scene.phase
+                ? 'onboarding-stage__phase onboarding-stage__phase--active'
+                : 'onboarding-stage__phase'
+            }
+          >
+            {phase.label}
+          </span>
+        ))}
+      </div>
+      <p className="onboarding-stage__caption" aria-live="polite" data-scene={scene.id}>
+        {scene.caption}
+        {reducedMotion ? (
+          <span className="onboarding-stage__note">自動再生はオフです。「次へ」で一つずつ進めます。</span>
+        ) : null}
+      </p>
+      <div className="onboarding-stage__controls">
+        <button type="button" className="button button--flat" disabled={tour.index === 0} onClick={tour.back}>
+          戻る
+        </button>
+        <span className="onboarding-stage__progress" aria-hidden="true">
+          {tour.index + 1} / {tour.count}
+        </span>
+        <button
+          type="button"
+          className="button button--flat"
+          disabled={tour.index === tour.count - 1}
+          onClick={tour.next}
+        >
+          次へ
+        </button>
+        <button
+          type="button"
+          className="button button--flat"
+          aria-pressed={tour.paused}
+          onClick={tour.togglePause}
+        >
+          {tour.paused ? '再生' : '一時停止'}
+        </button>
+        <button type="button" className="button button--flat" onClick={tour.restart}>
+          最初から
+        </button>
+        <button type="button" className="button" onClick={() => onFinish('skip')}>
+          スキップ
+        </button>
+      </div>
+    </div>
+  )
+}
+
 export default function OnboardingStage(props: OnboardingStageProps): React.JSX.Element {
   const titleId = useId()
   const panelRef = useRef<HTMLDivElement | null>(null)
@@ -271,63 +343,7 @@ export default function OnboardingStage(props: OnboardingStageProps): React.JSX.
         <OutroCard driver={props.driver} onRestart={tour.restart} onFinish={finish} />
       ) : null}
 
-      <div className="onboarding-stage__hud">
-        <div className="onboarding-stage__rail" aria-hidden="true">
-          {PHASES.map((phase) => (
-            <span
-              key={phase.id}
-              className={
-                phase.id === scene.phase
-                  ? 'onboarding-stage__phase onboarding-stage__phase--active'
-                  : 'onboarding-stage__phase'
-              }
-            >
-              {phase.label}
-            </span>
-          ))}
-        </div>
-        <p className="onboarding-stage__caption" aria-live="polite" data-scene={scene.id}>
-          {scene.caption}
-          {reducedMotion ? (
-            <span className="onboarding-stage__note">自動再生はオフです。「次へ」で一つずつ進めます。</span>
-          ) : null}
-        </p>
-        <div className="onboarding-stage__controls">
-          <button
-            type="button"
-            className="button button--flat"
-            disabled={tour.index === 0}
-            onClick={tour.back}
-          >
-            戻る
-          </button>
-          <span className="onboarding-stage__progress" aria-hidden="true">
-            {tour.index + 1} / {tour.count}
-          </span>
-          <button
-            type="button"
-            className="button button--flat"
-            disabled={tour.index === tour.count - 1}
-            onClick={tour.next}
-          >
-            次へ
-          </button>
-          <button
-            type="button"
-            className="button button--flat"
-            aria-pressed={tour.paused}
-            onClick={tour.togglePause}
-          >
-            {tour.paused ? '再生' : '一時停止'}
-          </button>
-          <button type="button" className="button button--flat" onClick={tour.restart}>
-            最初から
-          </button>
-          <button type="button" className="button" onClick={() => finish('skip')}>
-            スキップ
-          </button>
-        </div>
-      </div>
+      <StageHud scene={scene} tour={tour} reducedMotion={reducedMotion} onFinish={finish} />
     </div>
   )
 }

@@ -166,42 +166,52 @@ function gauss(next: () => number): number {
 }
 
 /**
+ * One sensor's per-file shape — everything `sensorSample` needs that differs
+ * between Inner Capsule and Drag Shield. Bundled because passing these nine
+ * values positionally was an argument-list smell, and they are assembled once
+ * per file anyway.
+ */
+interface SensorShape {
+  /** Standstill reading — the sensor's 1 G. */
+  readonly level: number
+  /** Free-fall residual. */
+  readonly plateau: number
+  /** Signed recovery-spike magnitude, m/s². */
+  readonly peak: number
+  readonly wobbleAmp: number
+  readonly plateauNoise: number
+  /** Seeded per-sensor phase, drawn once per file. */
+  readonly phase: number
+}
+
+/**
  * One sensor's raw acceleration at time `t`, pre-correction m/s².
  *
- * `level` is the standstill reading (the sensor's 1 G), `plateau` the free-fall
- * residual, `peak` the signed recovery magnitude. The ring constants are shared:
- * the release decays in ~0.1 s and the spike settles back to standstill.
+ * The ring constants are shared: the release decays in ~0.1 s and the spike
+ * settles back to standstill.
  */
-function sensorSample(
-  t: number,
-  profile: DemoProfile,
-  level: number,
-  plateau: number,
-  peak: number,
-  wobbleAmp: number,
-  plateauNoise: number,
-  wobblePhase: number,
-  noise: number,
-): number {
+function sensorSample(t: number, profile: DemoProfile, sensor: SensorShape, noise: number): number {
   const sinceRelease = t - profile.releaseAt
   if (sinceRelease < 0) {
-    return level + REST_VIBRATION * Math.sin(TAU * profile.vibHz * t + wobblePhase) + REST_NOISE * noise
+    return (
+      sensor.level + REST_VIBRATION * Math.sin(TAU * profile.vibHz * t + sensor.phase) + REST_NOISE * noise
+    )
   }
 
   const sinceImpact = t - profile.impactAt
   if (sinceImpact < 0) {
     const ring = Math.exp(-sinceRelease / RELEASE_DECAY_S) * Math.cos(TAU * profile.ringHz * sinceRelease)
-    const wobble = wobbleAmp * Math.sin(TAU * profile.wobbleHz * t + wobblePhase)
-    return plateau + (level - plateau) * ring + wobble + plateauNoise * noise
+    const wobble = sensor.wobbleAmp * Math.sin(TAU * profile.wobbleHz * t + sensor.phase)
+    return sensor.plateau + (sensor.level - sensor.plateau) * ring + wobble + sensor.plateauNoise * noise
   }
 
   if (sinceImpact < RISE_S) {
-    return plateau + (peak - plateau) * (sinceImpact / RISE_S) + RECOVERY_NOISE * noise
+    return sensor.plateau + (sensor.peak - sensor.plateau) * (sinceImpact / RISE_S) + RECOVERY_NOISE * noise
   }
 
   const u = sinceImpact - RISE_S
   const ring = Math.exp(-u / BRAKE_DECAY_S) * (BRAKE_RING * Math.cos(TAU * profile.brakeHz * u) + BRAKE_BASE)
-  return level + (peak - level) * ring + RECOVERY_NOISE * noise
+  return sensor.level + (sensor.peak - sensor.level) * ring + RECOVERY_NOISE * noise
 }
 
 /** Six decimals keeps the files compact and pins the bytes against fp noise. */
@@ -211,34 +221,28 @@ function formatAcceleration(value: number): string {
 
 function buildCsv(profile: DemoProfile): string {
   const next = mulberry32(profile.seed)
-  const innerPhase = next() * TAU
-  const dragPhase = next() * TAU
+  const innerShape: SensorShape = {
+    level: profile.restInner,
+    plateau: profile.innerPlateau,
+    peak: -profile.peakAccel,
+    wobbleAmp: INNER_PLATEAU_WOBBLE,
+    plateauNoise: INNER_PLATEAU_NOISE,
+    phase: next() * TAU,
+  }
+  const dragShape: SensorShape = {
+    level: profile.restDrag,
+    plateau: profile.dragPlateau,
+    peak: profile.peakAccel,
+    wobbleAmp: DRAG_PLATEAU_WOBBLE,
+    plateauNoise: DRAG_PLATEAU_NOISE,
+    phase: next() * TAU,
+  }
   const lines: string[] = [HEADER]
 
   for (let index = 0; index < SAMPLE_COUNT; index++) {
     const t = index / SAMPLE_HZ
-    const inner = sensorSample(
-      t,
-      profile,
-      profile.restInner,
-      profile.innerPlateau,
-      -profile.peakAccel,
-      INNER_PLATEAU_WOBBLE,
-      INNER_PLATEAU_NOISE,
-      innerPhase,
-      gauss(next),
-    )
-    const drag = sensorSample(
-      t,
-      profile,
-      profile.restDrag,
-      profile.dragPlateau,
-      profile.peakAccel,
-      DRAG_PLATEAU_WOBBLE,
-      DRAG_PLATEAU_NOISE,
-      dragPhase,
-      gauss(next),
-    )
+    const inner = sensorSample(t, profile, innerShape, gauss(next))
+    const drag = sensorSample(t, profile, dragShape, gauss(next))
     lines.push(`${t},${formatAcceleration(inner)},${formatAcceleration(drag)}`)
   }
 

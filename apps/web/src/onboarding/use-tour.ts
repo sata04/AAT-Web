@@ -51,24 +51,21 @@ function isAbort(error: unknown): boolean {
   return error === ABORTED
 }
 
-/**
- * Wait `ms` of *running* clock. When `gate()` is false the accumulator does
- * not advance — the deadline just stays ahead — which is what pausing and
- * background tabs both want. `instant` lands immediately.
- */
-function clockWait(ms: number, signal: AbortSignal, gate: () => boolean, instant: boolean): Promise<void> {
-  if (instant || ms <= 0) return signal.aborted ? Promise.reject(ABORTED) : Promise.resolve()
+/** What a running-clock wait needs besides its length. */
+interface GatedClock {
+  readonly signal: AbortSignal
+  /** False freezes accrual — a pause; a hidden tab stops rAF outright. */
+  readonly gate: () => boolean
+  /** Land on the end state in one step — reduced motion, manual stepping. */
+  readonly instant: boolean
+}
+
+/** The one rAF loop the gated clocks share: frame → `onFrame`; true resolves. */
+function rafLoop(signal: AbortSignal, onFrame: (now: number) => boolean): Promise<void> {
   return new Promise((resolve, reject) => {
-    let accrued = 0
-    let last = -1
     const step = (now: number) => {
       if (signal.aborted) return reject(ABORTED)
-      // The first frame after a hidden tab resumes carries the whole hidden
-      // span in `now - last`; clamping the delta freezes the timeline instead
-      // of letting the tour fast-forward through it.
-      if (last >= 0 && gate()) accrued += Math.min(now - last, MAX_FRAME_MS)
-      last = now
-      if (accrued >= ms) return resolve()
+      if (onFrame(now)) return resolve()
       requestAnimationFrame(step)
     }
     requestAnimationFrame(step)
@@ -76,37 +73,50 @@ function clockWait(ms: number, signal: AbortSignal, gate: () => boolean, instant
 }
 
 /**
+ * A running-clock accrual over rAF timestamps: gated, and each frame adds at
+ * most `MAX_FRAME_MS` — the first frame after a hidden tab resumes carries
+ * the whole hidden span in `now - last`, and the cap freezes the timeline
+ * instead of letting the tour fast-forward through it.
+ */
+function accrual(gate: () => boolean): (now: number) => number {
+  let accrued = 0
+  let last = -1
+  return (now) => {
+    if (last >= 0 && gate()) accrued += Math.min(now - last, MAX_FRAME_MS)
+    last = now
+    return accrued
+  }
+}
+
+/**
+ * Wait `ms` of *running* clock. When `gate()` is false the accumulator does
+ * not advance — the deadline just stays ahead — which is what pausing and
+ * background tabs both want. `instant` lands immediately.
+ */
+function clockWait(ms: number, clock: GatedClock): Promise<void> {
+  const { signal, gate, instant } = clock
+  if (instant || ms <= 0) return signal.aborted ? Promise.reject(ABORTED) : Promise.resolve()
+  const accrue = accrual(gate)
+  return rafLoop(signal, (now) => accrue(now) >= ms)
+}
+
+/**
  * Drive `apply(t)` from 0 to 1 across `ms` of running clock — the primitive
  * the selection sweep and the zoom gesture are built from. Gated like
  * `clockWait`; `instant` applies the end state in one step.
  */
-function clockTween(
-  ms: number,
-  apply: (t: number) => void,
-  signal: AbortSignal,
-  gate: () => boolean,
-  instant: boolean,
-): Promise<void> {
+function clockTween(ms: number, apply: (t: number) => void, clock: GatedClock): Promise<void> {
+  const { signal, gate, instant } = clock
   if (instant || ms <= 0) {
     if (signal.aborted) return Promise.reject(ABORTED)
     apply(1)
     return Promise.resolve()
   }
-  return new Promise((resolve, reject) => {
-    let accrued = 0
-    let last = -1
-    const step = (now: number) => {
-      if (signal.aborted) return reject(ABORTED)
-      if (last >= 0 && gate()) accrued += Math.min(now - last, MAX_FRAME_MS)
-      last = now
-      if (accrued >= ms) {
-        apply(1)
-        return resolve()
-      }
-      apply(accrued / ms)
-      requestAnimationFrame(step)
-    }
-    requestAnimationFrame(step)
+  const accrue = accrual(gate)
+  return rafLoop(signal, (now) => {
+    const accrued = accrue(now)
+    apply(Math.min(accrued / ms, 1))
+    return accrued >= ms
   })
 }
 
@@ -175,14 +185,15 @@ export function useTour(input: {
     // hidden tab freezes everything regardless because rAF stops.
     const gate = () => !(playingRef.current && pausedRef.current)
     const instant = reducedMotion
+    const clock: GatedClock = { signal, gate, instant }
     const ctx: TourCtx = {
       driver: driverRef.current,
       signal,
       instant,
-      wait: (ms) => clockWait(ms, signal, gate, instant),
+      wait: (ms) => clockWait(ms, clock),
       waitFor: (pred, timeoutMs = 20_000) =>
         clockWaitFor(() => pred(driverRef.current.snapshot()), timeoutMs, signal),
-      tween: (ms, apply) => clockTween(ms, apply, signal, gate, instant),
+      tween: (ms, apply) => clockTween(ms, apply, clock),
       cursor: {
         moveTo: (target) => {
           if (target === null) {
