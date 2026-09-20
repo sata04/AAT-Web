@@ -26,7 +26,9 @@
  * would make a bookmarked URL silently do something else.
  */
 
+import { useMemo, useState } from 'react'
 import { RouteErrorBoundary } from '../components/RouteErrorBoundary.tsx'
+import { RichOnboarding } from '../onboarding/index.ts'
 import { RouterProvider, useRoute } from '../router/Router.tsx'
 import { AdminAuditScreen } from '../screens/AdminAuditScreen.tsx'
 import { AdminInvitationsScreen } from '../screens/AdminInvitationsScreen.tsx'
@@ -46,13 +48,14 @@ import { RunsScreen } from '../screens/RunsScreen.tsx'
 import { SecurityScreen } from '../screens/SecurityScreen.tsx'
 import { SignInScreen } from '../screens/SignInScreen.tsx'
 import { SessionProvider } from '../session/SessionProvider.tsx'
+import { loadOnboarding, saveOnboarding } from './onboarding.ts'
 
 function CurrentScreen(): React.JSX.Element {
   const route = useRoute()
 
   switch (route.name) {
     case 'analyzer':
-      return <AnalyzerScreen />
+      return <AnalyzerRoute search={route.search} />
     case 'sign-in':
       return <SignInScreen />
     case 'register':
@@ -82,6 +85,24 @@ function CurrentScreen(): React.JSX.Element {
     case 'not-found':
       return <NotFoundScreen />
   }
+}
+
+function AnalyzerRoute(props: { search: URLSearchParams }): React.JSX.Element {
+  const demo = props.search.get('onboarding') === 'demo'
+  const [demoDone, setDemoDone] = useState(false)
+  // The demo *is* the welcome: mark it seen before the analyzer mounts so the
+  // top-layer <dialog> can never surface over the stage — or right after it.
+  useMemo(() => {
+    if (!demo) return
+    const flags = loadOnboarding()
+    if (!flags.welcomeSeen) saveOnboarding({ ...flags, welcomeSeen: true })
+  }, [demo])
+  return (
+    <>
+      <AnalyzerScreen />
+      {demo && !demoDone ? <RichOnboarding onDone={() => setDemoDone(true)} /> : null}
+    </>
+  )
 }
 
 function RoutedScreen(): React.JSX.Element {
