@@ -1,8 +1,8 @@
 {
   "version": "6",
   "dialect": "sqlite",
-  "id": "114fab8b-734e-43f3-9656-82f499324ccd",
-  "prevId": "7774d6b1-310f-4ca9-86ff-623359649074",
+  "id": "09a34c3d-439d-4dd4-8bc7-15b2993f5145",
+  "prevId": "114fab8b-734e-43f3-9656-82f499324ccd",
   "tables": {
     "account": {
       "name": "account",
@@ -610,6 +610,13 @@
           "notNull": false,
           "autoincrement": false
         },
+        "settled_claim": {
+          "name": "settled_claim",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
         "created_at": {
           "name": "created_at",
           "type": "integer",
@@ -1075,6 +1082,13 @@
           "notNull": true,
           "autoincrement": false,
           "default": "'pending'"
+        },
+        "claim_token": {
+          "name": "claim_token",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
         },
         "created_at": {
           "name": "created_at",

@@ -133,7 +133,10 @@ const METHODS_WITH_BODY = new Set(['POST', 'PUT', 'PATCH'])
 v1.use('*', async (context, next) => {
   const contentType = context.req.header('content-type') ?? ''
   if (contentType.includes('application/json') && METHODS_WITH_BODY.has(context.req.method)) {
-    const declared = Number(context.req.header('content-length') ?? '')
+    // An absent or blank header is the lengthless case, not a zero-byte body: `Number('')` is 0,
+    // which would sail under the ceiling and buffer the very request this gate exists to refuse.
+    const header = context.req.header('content-length')?.trim()
+    const declared = header === undefined || header === '' ? Number.NaN : Number(header)
     if (!Number.isFinite(declared) || declared > MAX_JSON_BODY_BYTES) {
       throw new ApiError('REQUEST_TOO_LARGE', { details: { maxBytes: MAX_JSON_BODY_BYTES } })
     }

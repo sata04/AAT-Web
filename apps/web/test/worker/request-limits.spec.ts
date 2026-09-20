@@ -22,6 +22,27 @@ describe('request size ceiling', () => {
     expect(body.error.code).toBe('REQUEST_TOO_LARGE')
   })
 
+  it('refuses a JSON body that declares no size at all', async () => {
+    // A streamed body carries no Content-Length, so nothing bounds it before the isolate buffers
+    // it whole. `Number('')` is 0, so the ceiling has to test for the absent header rather than
+    // coerce it — otherwise the one request shape this gate exists to stop is the one it admits.
+    const stream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode('{"pad":"x"}'))
+        controller.close()
+      },
+    })
+    const response = await apiFetch('/api/v1/runs', {
+      method: 'POST',
+      body: stream as unknown as BodyInit,
+      // Required by fetch for a streamed request body.
+      duplex: 'half',
+    } as RequestInit & { duplex: string })
+    expect(response.status).toBe(413)
+    const body = (await response.json()) as { error: { code: string } }
+    expect(body.error.code).toBe('REQUEST_TOO_LARGE')
+  })
+
   it('does not apply the JSON ceiling to the raw upload paths', async () => {
     // Source backups and snapshot bodies are bounded by their own quota reservation, not by the
     // JSON ceiling — a content-type that is not application/json must not trip the check.
