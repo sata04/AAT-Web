@@ -527,11 +527,12 @@ describe('passkey authentication', () => {
   })
 
   /**
-   * REGRESSION TEST FOR A PROVEN DEFECT — currently RED. Added by the V1 security review; the
-   * orchestrator owns the fix.
+   * REGRESSION TEST FOR A FORMER DEFECT — now green; it pins the fix in place.
    *
-   * The ban only refuses a *new* ceremony (the test above). A session that already exists is
-   * unaffected, because nothing on the request path ever consults `user.banned`:
+   * The ban only refuses a *new* ceremony (the test above). A session that already exists must
+   * die with it, which requires two mechanisms the defect lacked: `requireSession` consulting
+   * `user.banned` on every request, and `PATCH /admin/users` deleting the banned user's session
+   * rows. The defect's mechanics, for context:
    *
    *  - `worker/middleware/authorize.ts:117` calls `auth.api.getSession`, which reads the session
    *    row and returns its user without a ban test — `banned` appears nowhere in better-auth
@@ -542,12 +543,8 @@ describe('passkey authentication', () => {
    *  - `PATCH /api/v1/admin/users/:userId` (`worker/routes/admin.ts:96`) sets the column and
    *    deletes no session rows, and there is no other route in this Worker that does.
    *
-   * So a banned researcher keeps full access — including `GET /workspace/runs`, every colleague's
-   * snapshot and `POST /runs` — for the remaining life of their cookie, up to fourteen days.
-   *
-   * Three statements in the repository assert the opposite and are wrong today:
-   * `worker/middleware/authorize.ts:113-116`, `src/screens/AdminUsersScreen.tsx:22-25`, and
-   * `docs/auth-security.md` ("Sessions").
+   * Left unfixed, a banned researcher kept full access — including `GET /workspace/runs`, every
+   * colleague's snapshot and `POST /runs` — for the remaining life of their cookie.
    */
   it('ends an existing session when the user is banned', async () => {
     const admin = await createUser({ role: 'Admin' })
@@ -719,11 +716,11 @@ describe('recovery', () => {
 })
 
 /**
- * REGRESSION TESTS FOR A PROVEN DEFECT - currently RED. Added by the V1 security review; the
- * orchestrator owns the fix.
+ * REGRESSION TESTS FOR A FORMER DEFECT - now green; they pin the fix in place.
  *
- * Better Auth's core `POST /api/auth/update-user` is mounted by `app.all('/api/auth/*')`
- * (`worker/index.ts:41`) and is reachable by any signed-in user. Its body schema is
+ * The defect: Better Auth's core `POST /api/auth/update-user` was mounted by
+ * `app.all('/api/auth/*')` (`worker/index.ts:41`; now refused by `AUTH_PATHS_NOT_OFFERED`) and was
+ * reachable by any signed-in user. Its body schema is
  * `z.record(z.string(), z.any())` (`better-auth/dist/api/routes/update-user.mjs:11`), so `name`
  * is accepted with no length bound and no character filter, and it is written straight to
  * `user.name`.

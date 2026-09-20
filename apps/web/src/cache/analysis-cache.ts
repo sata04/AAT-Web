@@ -58,14 +58,6 @@ export interface CachedAnalysis<T> {
   payload: T
 }
 
-/** SHA-256 of arbitrary bytes as lowercase hex, via Web Crypto. */
-export async function sha256Hex(bytes: BufferSource): Promise<string> {
-  const digest = await crypto.subtle.digest('SHA-256', bytes)
-  return Array.from(new Uint8Array(digest))
-    .map((byte) => byte.toString(16).padStart(2, '0'))
-    .join('')
-}
-
 /** Compose the cache key. Order is fixed so the key is stable across releases. */
 export function cacheKey(parts: CacheKeyParts): string {
   return [`v${CACHE_FORMAT_VERSION}`, parts.engineVersion, parts.configHash, parts.sourceSha256].join(':')
@@ -91,6 +83,22 @@ function promisify<T>(request: IDBRequest<T>): Promise<T> {
   return new Promise((resolve, reject) => {
     request.onsuccess = () => resolve(request.result)
     request.onerror = () => reject(request.error ?? new Error('Cache request failed'))
+  })
+}
+
+/**
+ * Resolves when a readwrite transaction commits. Attach it before the first
+ * await — a transaction that finishes before its handlers are registered has
+ * already fired `complete`, and a promise attached late never resolves. A
+ * request's `onsuccess` alone is not durability: the transaction can still
+ * abort afterwards, and `close()` on the database is allowed to preempt queued
+ * work that has not committed.
+ */
+function committed(transaction: IDBTransaction): Promise<void> {
+  return new Promise((resolve, reject) => {
+    transaction.oncomplete = () => resolve()
+    transaction.onerror = () => reject(transaction.error ?? new Error('Cache transaction failed'))
+    transaction.onabort = () => reject(transaction.error ?? new Error('Cache transaction aborted'))
   })
 }
 
@@ -165,13 +173,40 @@ export async function writeCache<T>(
       payload,
     }
     const transaction = database.transaction(STORE_NAME, 'readwrite')
+    const done = committed(transaction)
+    // A failed `put` jumps straight to `catch`, leaving `done` to reject unheard —
+    // silence that path; the request's own error is what becomes `false`.
+    void done.catch(() => {})
     await promisify(transaction.objectStore(STORE_NAME).put(record))
+    await done
     return true
   } catch {
     return false
   } finally {
     database?.close()
   }
+}
+
+/**
+ * How large the cache may grow before `evictToBudget` starts dropping entries.
+ *
+ * A quarter of the origin's quota when the browser will say what that is —
+ * sharing the budget is what makes this cache a good neighbour to the rest of
+ * the application — and a flat 256 MiB when it will not, capped at 512 MiB so
+ * a workstation's generous quota does not turn the cache into a second heap.
+ */
+export async function cacheBudgetBytes(): Promise<number> {
+  const FALLBACK_BYTES = 256 * 1024 * 1024
+  const MAX_BUDGET_BYTES = 512 * 1024 * 1024
+  try {
+    const quota = (await globalThis.navigator?.storage?.estimate?.())?.quota
+    if (typeof quota === 'number' && quota > 0) {
+      return Math.min(MAX_BUDGET_BYTES, Math.floor(quota / 4))
+    }
+  } catch {
+    // StorageManager may be absent or refused — the fallback still bounds growth.
+  }
+  return FALLBACK_BYTES
 }
 
 /**
@@ -186,6 +221,10 @@ export async function evictToBudget(budgetBytes: number): Promise<number> {
   try {
     database = await openDatabase()
     const transaction = database.transaction(STORE_NAME, 'readwrite')
+    const done = committed(transaction)
+    // If a request above throws, the transaction aborts without anyone awaiting
+    // `done` — swallow that rejection here; the request's own error is reported.
+    void done.catch(() => {})
     const store = transaction.objectStore(STORE_NAME)
     const records = (await promisify(store.getAll())) as Array<CachedAnalysis<unknown>>
 
@@ -200,6 +239,9 @@ export async function evictToBudget(budgetBytes: number): Promise<number> {
       total -= record.approximateBytes || 0
       evicted++
     }
+    // The deletes only count once the transaction commits — reporting `evicted`
+    // before then lets the caller write under the assumption the budget is free.
+    await done
     return evicted
   } catch {
     return 0

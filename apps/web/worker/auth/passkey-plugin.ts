@@ -410,6 +410,267 @@ export function aatPasskey({ db, config }: AatPasskeyOptions) {
 /* ------------------------------------------------------------------------------------------- */
 
 /**
+ * Exchange an invitation token for a registration context.
+ *
+ * The response is the only place the registration context ever appears in plaintext; only a
+ * hash of it is stored. The client passes it straight to the plugin's
+ * `generate-register-options?context=…`.
+ */
+function redeemInvitationEndpoint(db: Database) {
+  return createAuthEndpoint(
+    '/aat/invitation/redeem',
+    { method: 'POST', body: z.object({ token: z.string().min(1).max(512) }) },
+    async (ctx) => {
+      const headers = ctx.headers ?? new Headers()
+      await consumeRateLimit(
+        db,
+        rateLimitKey('inviteRedeem', clientAddress(headers)),
+        RATE_LIMITS.inviteRedeem,
+      ).catch(rethrow)
+
+      let claimed: Awaited<ReturnType<typeof claimInvitation>>
+      try {
+        claimed = await claimInvitation(db, ctx.body.token, new Date())
+      } catch (error) {
+        await writeAuditLog(db, {
+          actorUserId: null,
+          action: 'invitation.redeem_failed',
+          // No token, no hash: the audit log records that a redemption failed and from where,
+          // never the secret that was presented.
+          details: { reason: error instanceof ApiError ? error.code : 'unknown' },
+          headers,
+        })
+        rethrow(error)
+      }
+
+      await writeAuditLog(db, {
+        actorUserId: null,
+        action: 'invitation.claim',
+        targetType: 'invitation',
+        targetId: claimed.invitationId,
+        details: { kind: claimed.kind },
+        headers,
+      })
+
+      return ctx.json({
+        registrationContext: claimed.registrationContext,
+        expiresAt: claimed.contextExpiresAt.toISOString(),
+        kind: claimed.kind,
+        // Enough for the page to say who it is welcoming. Everything the ceremony itself needs
+        // — challenge, RP, algorithms, excludeCredentials — comes from the plugin's own options
+        // endpoint; repeating an RP ID here is how a second source of truth for one starts.
+        displayName: claimed.displayName,
+      })
+    },
+  )
+}
+
+/**
+ * Rate limits on the credential paths.
+ *
+ * Both halves of a ceremony are counted, not just the verify: issuing options writes a
+ * verification row and sets a cookie, so an unlimited options endpoint is a cheap way to
+ * make a database expensive. Keyed by client address, never by the secret being presented
+ * — see ../services/rate-limit.ts.
+ */
+function credentialRateLimitHook(
+  db: Database,
+  scope: 'passkeyRegister' | 'passkeyAuthenticate',
+  optionsPath: string,
+  verifyPath: string,
+) {
+  return {
+    matcher: (ctx: { path?: string }) => ctx.path === optionsPath || ctx.path === verifyPath,
+    handler: createAuthMiddleware(async (ctx) => {
+      const headers = ctx.headers ?? new Headers()
+      await consumeRateLimit(db, rateLimitKey(scope, clientAddress(headers)), RATE_LIMITS[scope]).catch(
+        rethrow,
+      )
+    }),
+  }
+}
+
+/**
+ * Bound the one client-supplied string the plugin stores.
+ *
+ * `verify-registration` and `update-passkey` both accept a passkey `name` typed as an
+ * unbounded `z.string()`. Every schema AAT writes carries a `.max()`, because a value that
+ * is persisted and later rendered is a value whose size is the caller's choice unless
+ * somebody says otherwise. The limit is generous — this is a human label for a device.
+ */
+function passkeyNameLengthHook() {
+  return {
+    matcher: (ctx: { path?: string }) =>
+      ctx.path === PATHS.verifyRegistration || ctx.path === PATHS.updatePasskey,
+    handler: createAuthMiddleware(async (ctx) => {
+      const name = (ctx.body as { name?: unknown } | undefined)?.name
+      if (typeof name === 'string' && name.length > MAX_PASSKEY_NAME_LENGTH) {
+        throw toApiError('FORBIDDEN', { reason: 'passkey_name_too_long' })
+      }
+    }),
+  }
+}
+
+/**
+ * One registration must leave exactly one session row.
+ *
+ * `verify-registration` accepts `createSession: true` and the plugin then mints a session
+ * itself — on top of the one `afterVerification` already creates via `setSessionCookie`.
+ * A caller who passes it gets two live sessions for one ceremony. AAT never wants the
+ * plugin's own session: deleting the flag keeps the single-session invariant in AAT's
+ * code rather than in an upstream default.
+ */
+function singleSessionRegistrationHook() {
+  return {
+    matcher: (ctx: { path?: string }) => ctx.path === PATHS.verifyRegistration,
+    handler: createAuthMiddleware(async (ctx) => {
+      if (ctx.body !== null && typeof ctx.body === 'object') {
+        delete (ctx.body as Record<string, unknown>).createSession
+      }
+    }),
+  }
+}
+
+/** Refuse the delete when `passkeyId` is the session user's last credential. */
+async function refuseLastPasskeyDelete(db: Database, passkeyId: string, userId: string) {
+  const [target] = await db
+    .select({ userId: passkeyTable.userId })
+    .from(passkeyTable)
+    .where(eq(passkeyTable.id, passkeyId))
+    .limit(1)
+  if (!target || target.userId !== userId) return
+
+  const [counted] = await db
+    .select({ count: sql<number>`count(*)` })
+    .from(passkeyTable)
+    .where(eq(passkeyTable.userId, target.userId))
+  if ((counted?.count ?? 0) <= 1) {
+    throw toApiError('FORBIDDEN', { reason: 'cannot_delete_last_passkey' })
+  }
+}
+
+/**
+ * A user may not delete their last passkey.
+ *
+ * With no password, no email and no social login, the last passkey *is* the account.
+ * Removing it does not lock a user out temporarily; it destroys their access with no
+ * self-service way back. The plugin's endpoint enforces ownership but not this, so the
+ * rule is imposed before it runs. The same rule guards the administrative path in
+ * ../routes/admin.ts and the self-service one in ../routes/me.ts — three doors, one policy.
+ */
+function lastPasskeyGuardHook(db: Database) {
+  return {
+    matcher: (ctx: { path?: string }) => ctx.path === PATHS.deletePasskey,
+    handler: createAuthMiddleware(async (ctx) => {
+      const body = ctx.body as { id?: unknown } | undefined
+      const passkeyId = typeof body?.id === 'string' ? body.id : null
+      if (!passkeyId) return
+
+      const session = await getSessionFromCtx(ctx)
+      // No session, or somebody else's credential: the plugin's own middleware answers those
+      // cases, and answering them differently here would be a second authorization model.
+      if (!session) return
+
+      await refuseLastPasskeyDelete(db, passkeyId, session.user.id)
+    }),
+  }
+}
+
+/** The passkey row for a credential id carried in a ceremony body, when present. */
+async function findCredentialByPublicId(db: Database, credentialId: string | null) {
+  if (credentialId === null) return undefined
+  const [credential] = await db
+    .select({ id: passkeyTable.id, userId: passkeyTable.userId })
+    .from(passkeyTable)
+    .where(eq(passkeyTable.credentialID, credentialId))
+    .limit(1)
+  return credential
+}
+
+async function auditFailedAuthentication(db: Database, credentialId: string | null, headers: Headers) {
+  const credential = await findCredentialByPublicId(db, credentialId)
+  await writeAuditLog(db, {
+    actorUserId: credential?.userId ?? null,
+    action: 'passkey.authenticate_failed',
+    ...(credential ? { targetType: 'passkey', targetId: credential.id } : {}),
+    details: { reason: credential ? 'ceremony_failed' : 'unknown_credential' },
+    headers,
+  })
+}
+
+/**
+ * Audit the sign-in failures the plugin swallows.
+ *
+ * `after` hooks run on the failure path too — a thrown `APIError` is carried in
+ * `ctx.context.returned` rather than propagated past them — which is the only place a
+ * ceremony refused *inside* the plugin can still be recorded. A failed sign-in that leaves
+ * no trace is a failed sign-in nobody can investigate.
+ *
+ * Failures the authentication seam itself raised are skipped: it has already written a row
+ * naming the actual reason (a banned account, a missing user-verification flag), and a
+ * second row saying "ceremony_failed" would only make the log less true.
+ */
+function failedAuthenticationAuditHook(db: Database) {
+  return {
+    matcher: (ctx: { path?: string }) => ctx.path === PATHS.verifyAuthentication,
+    handler: createAuthMiddleware(async (ctx) => {
+      const returned = ctx.context.returned
+      if (!isAPIError(returned)) return
+      if (isAatErrorPayload(returned.body)) return
+
+      const response = (ctx.body as { response?: { id?: unknown } } | undefined)?.response
+      const credentialId = typeof response?.id === 'string' ? response.id : null
+      await auditFailedAuthentication(db, credentialId, ctx.headers ?? new Headers())
+    }),
+  }
+}
+
+function passkeyDeleteAuditHook(db: Database) {
+  return {
+    matcher: (ctx: { path?: string }) => ctx.path === PATHS.deletePasskey,
+    handler: createAuthMiddleware(async (ctx) => {
+      if (isAPIError(ctx.context.returned)) return
+      const session = await getSessionFromCtx(ctx)
+      const passkeyId = (ctx.body as { id?: unknown } | undefined)?.id
+      if (!session || typeof passkeyId !== 'string') return
+      await writeAuditLog(db, {
+        actorUserId: session.user.id,
+        action: 'passkey.delete',
+        targetType: 'passkey',
+        targetId: passkeyId,
+        headers: ctx.headers ?? new Headers(),
+      })
+    }),
+  }
+}
+
+/**
+ * A rejected ceremony is a client error, not a server one.
+ *
+ * The plugin wraps anything `@simplewebauthn/server` throws — a challenge that does not match,
+ * an origin that is not ours, an attestation signed for another relying party — in
+ * `INTERNAL_SERVER_ERROR`. Those are the *expected* answers on a credential endpoint: every one
+ * of them is reachable by an attacker at will, so leaving them as 500s means an alerting
+ * threshold that anybody on the internet can cross. The status is corrected on the way out; the
+ * plugin's body is left exactly as it was, so nothing downstream has to know this happened.
+ */
+async function demoteRejectedVerification(response: Response) {
+  if (response.status !== 500) return
+  const body = (await response
+    .clone()
+    .json()
+    .catch(() => null)) as { code?: unknown } | null
+  if (body?.code !== 'FAILED_TO_VERIFY_REGISTRATION') return
+  return {
+    response: new Response(response.body, {
+      status: 400,
+      statusText: 'Bad Request',
+      headers: response.headers,
+    }),
+  }
+}
+
+/**
  * The AAT-owned half: the invitation endpoint, the rate limits on the credential paths, the
  * last-passkey rule, and the audit of failures the plugin swallows.
  *
@@ -422,237 +683,31 @@ export function aatPasskeyPolicy({ db }: AatPasskeyOptions) {
   return {
     id: 'aat-passkey-policy',
     endpoints: {
-      /**
-       * Exchange an invitation token for a registration context.
-       *
-       * The response is the only place the registration context ever appears in plaintext; only a
-       * hash of it is stored. The client passes it straight to the plugin's
-       * `generate-register-options?context=…`.
-       */
-      aatRedeemInvitation: createAuthEndpoint(
-        '/aat/invitation/redeem',
-        { method: 'POST', body: z.object({ token: z.string().min(1).max(512) }) },
-        async (ctx) => {
-          const headers = ctx.headers ?? new Headers()
-          await consumeRateLimit(
-            db,
-            rateLimitKey('inviteRedeem', clientAddress(headers)),
-            RATE_LIMITS.inviteRedeem,
-          ).catch(rethrow)
-
-          let claimed: Awaited<ReturnType<typeof claimInvitation>>
-          try {
-            claimed = await claimInvitation(db, ctx.body.token, new Date())
-          } catch (error) {
-            await writeAuditLog(db, {
-              actorUserId: null,
-              action: 'invitation.redeem_failed',
-              // No token, no hash: the audit log records that a redemption failed and from where,
-              // never the secret that was presented.
-              details: { reason: error instanceof ApiError ? error.code : 'unknown' },
-              headers,
-            })
-            rethrow(error)
-          }
-
-          await writeAuditLog(db, {
-            actorUserId: null,
-            action: 'invitation.claim',
-            targetType: 'invitation',
-            targetId: claimed.invitationId,
-            details: { kind: claimed.kind },
-            headers,
-          })
-
-          return ctx.json({
-            registrationContext: claimed.registrationContext,
-            expiresAt: claimed.contextExpiresAt.toISOString(),
-            kind: claimed.kind,
-            // Enough for the page to say who it is welcoming. Everything the ceremony itself needs
-            // — challenge, RP, algorithms, excludeCredentials — comes from the plugin's own options
-            // endpoint; repeating an RP ID here is how a second source of truth for one starts.
-            displayName: claimed.displayName,
-          })
-        },
-      ),
+      aatRedeemInvitation: redeemInvitationEndpoint(db),
     },
 
     hooks: {
       before: [
-        /**
-         * Rate limits on the credential paths.
-         *
-         * Both halves of a ceremony are counted, not just the verify: issuing options writes a
-         * verification row and sets a cookie, so an unlimited options endpoint is a cheap way to
-         * make a database expensive. Keyed by client address, never by the secret being presented
-         * — see ../services/rate-limit.ts.
-         */
-        {
-          matcher: (ctx: { path?: string }) =>
-            ctx.path === PATHS.generateRegisterOptions || ctx.path === PATHS.verifyRegistration,
-          handler: createAuthMiddleware(async (ctx) => {
-            const headers = ctx.headers ?? new Headers()
-            await consumeRateLimit(
-              db,
-              rateLimitKey('passkeyRegister', clientAddress(headers)),
-              RATE_LIMITS.passkeyRegister,
-            ).catch(rethrow)
-          }),
-        },
-        {
-          matcher: (ctx: { path?: string }) =>
-            ctx.path === PATHS.generateAuthenticateOptions || ctx.path === PATHS.verifyAuthentication,
-          handler: createAuthMiddleware(async (ctx) => {
-            const headers = ctx.headers ?? new Headers()
-            await consumeRateLimit(
-              db,
-              rateLimitKey('passkeyAuthenticate', clientAddress(headers)),
-              RATE_LIMITS.passkeyAuthenticate,
-            ).catch(rethrow)
-          }),
-        },
-
-        /**
-         * Bound the one client-supplied string the plugin stores.
-         *
-         * `verify-registration` and `update-passkey` both accept a passkey `name` typed as an
-         * unbounded `z.string()`. Every schema AAT writes carries a `.max()`, because a value that
-         * is persisted and later rendered is a value whose size is the caller's choice unless
-         * somebody says otherwise. The limit is generous — this is a human label for a device.
-         */
-        {
-          matcher: (ctx: { path?: string }) =>
-            ctx.path === PATHS.verifyRegistration || ctx.path === PATHS.updatePasskey,
-          handler: createAuthMiddleware(async (ctx) => {
-            const name = (ctx.body as { name?: unknown } | undefined)?.name
-            if (typeof name === 'string' && name.length > MAX_PASSKEY_NAME_LENGTH) {
-              throw toApiError('FORBIDDEN', { reason: 'passkey_name_too_long' })
-            }
-          }),
-        },
-
-        /**
-         * A user may not delete their last passkey.
-         *
-         * With no password, no email and no social login, the last passkey *is* the account.
-         * Removing it does not lock a user out temporarily; it destroys their access with no
-         * self-service way back. The plugin's endpoint enforces ownership but not this, so the
-         * rule is imposed before it runs. The same rule guards the administrative path in
-         * ../routes/admin.ts and the self-service one in ../routes/me.ts — three doors, one policy.
-         */
-        {
-          matcher: (ctx: { path?: string }) => ctx.path === PATHS.deletePasskey,
-          handler: createAuthMiddleware(async (ctx) => {
-            const body = ctx.body as { id?: unknown } | undefined
-            const passkeyId = typeof body?.id === 'string' ? body.id : null
-            if (!passkeyId) return
-
-            const session = await getSessionFromCtx(ctx)
-            // No session, or somebody else's credential: the plugin's own middleware answers those
-            // cases, and answering them differently here would be a second authorization model.
-            if (!session) return
-
-            const [target] = await db
-              .select({ userId: passkeyTable.userId })
-              .from(passkeyTable)
-              .where(eq(passkeyTable.id, passkeyId))
-              .limit(1)
-            if (!target || target.userId !== session.user.id) return
-
-            const [counted] = await db
-              .select({ count: sql<number>`count(*)` })
-              .from(passkeyTable)
-              .where(eq(passkeyTable.userId, target.userId))
-            if ((counted?.count ?? 0) <= 1) {
-              throw toApiError('FORBIDDEN', { reason: 'cannot_delete_last_passkey' })
-            }
-          }),
-        },
+        credentialRateLimitHook(
+          db,
+          'passkeyRegister',
+          PATHS.generateRegisterOptions,
+          PATHS.verifyRegistration,
+        ),
+        credentialRateLimitHook(
+          db,
+          'passkeyAuthenticate',
+          PATHS.generateAuthenticateOptions,
+          PATHS.verifyAuthentication,
+        ),
+        passkeyNameLengthHook(),
+        singleSessionRegistrationHook(),
+        lastPasskeyGuardHook(db),
       ],
 
-      after: [
-        /**
-         * Audit the sign-in failures the plugin swallows.
-         *
-         * `after` hooks run on the failure path too — a thrown `APIError` is carried in
-         * `ctx.context.returned` rather than propagated past them — which is the only place a
-         * ceremony refused *inside* the plugin can still be recorded. A failed sign-in that leaves
-         * no trace is a failed sign-in nobody can investigate.
-         *
-         * Failures the authentication seam itself raised are skipped: it has already written a row
-         * naming the actual reason (a banned account, a missing user-verification flag), and a
-         * second row saying "ceremony_failed" would only make the log less true.
-         */
-        {
-          matcher: (ctx: { path?: string }) => ctx.path === PATHS.verifyAuthentication,
-          handler: createAuthMiddleware(async (ctx) => {
-            const returned = ctx.context.returned
-            if (!isAPIError(returned)) return
-            if (isAatErrorPayload(returned.body)) return
-
-            const headers = ctx.headers ?? new Headers()
-            const response = (ctx.body as { response?: { id?: unknown } } | undefined)?.response
-            const credentialId = typeof response?.id === 'string' ? response.id : null
-            const [credential] = credentialId
-              ? await db
-                  .select({ id: passkeyTable.id, userId: passkeyTable.userId })
-                  .from(passkeyTable)
-                  .where(eq(passkeyTable.credentialID, credentialId))
-                  .limit(1)
-              : []
-
-            await writeAuditLog(db, {
-              actorUserId: credential?.userId ?? null,
-              action: 'passkey.authenticate_failed',
-              ...(credential ? { targetType: 'passkey', targetId: credential.id } : {}),
-              details: { reason: credential ? 'ceremony_failed' : 'unknown_credential' },
-              headers,
-            })
-          }),
-        },
-        {
-          matcher: (ctx: { path?: string }) => ctx.path === PATHS.deletePasskey,
-          handler: createAuthMiddleware(async (ctx) => {
-            if (isAPIError(ctx.context.returned)) return
-            const session = await getSessionFromCtx(ctx)
-            const passkeyId = (ctx.body as { id?: unknown } | undefined)?.id
-            if (!session || typeof passkeyId !== 'string') return
-            await writeAuditLog(db, {
-              actorUserId: session.user.id,
-              action: 'passkey.delete',
-              targetType: 'passkey',
-              targetId: passkeyId,
-              headers: ctx.headers ?? new Headers(),
-            })
-          }),
-        },
-      ],
+      after: [failedAuthenticationAuditHook(db), passkeyDeleteAuditHook(db)],
     },
 
-    /**
-     * A rejected ceremony is a client error, not a server one.
-     *
-     * The plugin wraps anything `@simplewebauthn/server` throws — a challenge that does not match,
-     * an origin that is not ours, an attestation signed for another relying party — in
-     * `INTERNAL_SERVER_ERROR`. Those are the *expected* answers on a credential endpoint: every one
-     * of them is reachable by an attacker at will, so leaving them as 500s means an alerting
-     * threshold that anybody on the internet can cross. The status is corrected on the way out; the
-     * plugin's body is left exactly as it was, so nothing downstream has to know this happened.
-     */
-    async onResponse(response: Response) {
-      if (response.status !== 500) return
-      const body = (await response
-        .clone()
-        .json()
-        .catch(() => null)) as { code?: unknown } | null
-      if (body?.code !== 'FAILED_TO_VERIFY_REGISTRATION') return
-      return {
-        response: new Response(response.body, {
-          status: 400,
-          statusText: 'Bad Request',
-          headers: response.headers,
-        }),
-      }
-    },
+    onResponse: demoteRejectedVerification,
   } satisfies BetterAuthPlugin
 }

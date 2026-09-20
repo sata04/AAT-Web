@@ -1,0 +1,16 @@
+{
+  "usage": "Code Health rule overrides, scoped by glob. Weights: 1.0 default, 0.5 reduced, 0.0 disabled.",
+  "rule_sets": [
+    {
+      "matching_content_path": "packages/analysis-core/src/pandas-number.ts",
+      "matching_content_path_doc": "A byte-level port of pandas' C tokenizer: its scanner helpers necessarily pass (text, position, length) primitives because the code mirrors parser.c pointer arithmetic. Wrapping them in domain objects would obscure the correspondence the comments document, so Primitive Obsession is waived for this file only.",
+      "rules": [
+        {
+          "name": "Primitive Obsession",
+          "weight": 0.0
+        }
+      ],
+      "thresholds": []
+    }
+  ]
+}

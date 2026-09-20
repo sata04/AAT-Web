@@ -34,6 +34,10 @@ const AUTH_BASE = '/api/auth'
 
 /** Requests are abandoned after this; a hung fetch must not hold a status forever. */
 const REQUEST_TIMEOUT_MS = 15_000
+// Bulk-byte moves get the same allowance `src/runs/api.ts` already gives them:
+// a multi-MB upload over a conference link routinely crosses the JSON timeout,
+// and an aborted-but-complete upload reads as a spurious failure.
+const OBJECT_TIMEOUT_MS = 120_000
 
 /**
  * The structured half of a taxonomy error.
@@ -99,9 +103,14 @@ function readErrorBody(
   return { code: code ?? 'INTERNAL', message: message ?? '', details }
 }
 
-async function requestAt<T>(base: string, path: string, init: RequestInit): Promise<CloudOutcome<T>> {
+async function requestAt<T>(
+  base: string,
+  path: string,
+  init: RequestInit,
+  timeoutMs: number = REQUEST_TIMEOUT_MS,
+): Promise<CloudOutcome<T>> {
   const controller = new AbortController()
-  const timeout = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS)
+  const timeout = setTimeout(() => controller.abort(), timeoutMs)
   try {
     const response = await fetch(`${base}${path}`, {
       ...init,
@@ -160,8 +169,8 @@ async function requestAt<T>(base: string, path: string, init: RequestInit): Prom
   }
 }
 
-function request<T>(path: string, init: RequestInit): Promise<CloudOutcome<T>> {
-  return requestAt<T>(API_BASE, path, init)
+function request<T>(path: string, init: RequestInit, timeoutMs?: number): Promise<CloudOutcome<T>> {
+  return requestAt<T>(API_BASE, path, init, timeoutMs)
 }
 
 /**
@@ -430,6 +439,8 @@ export interface RevisionSummary {
   revisionNumber: number
   sourceSha256: string
   configHash: string
+  /** Null on revisions recorded before the mapping joined the identity. */
+  mappingHash: string | null
   engineVersion: string
   appVersion: string
   snapshotFormatVersion: number
@@ -475,6 +486,8 @@ export interface RevisionMetrics {
 export interface RevisionCreateRequest {
   sourceSha256: string
   configHash: string
+  /** Hash of the CSV-column mapping; part of the revision's analysis identity. */
+  mappingHash: string
   config: AnalysisConfig
   engineVersion: string
   appVersion?: string | undefined
@@ -486,12 +499,12 @@ export interface RevisionCreateRequest {
 /**
  * POST /api/v1/runs/:runId/revisions — create the immutable analysis record.
  *
- * Idempotent by analysis identity: the same source bytes, configuration and
- * engine version are one analysis, so a retried request answers 200 with
- * `created: false` and the revision that already exists rather than minting a
- * second one. A double-clicked button, a flaky network and the same file
- * analysed on two devices all converge on one revision — which is what makes
- * calling this on every completed analysis safe.
+ * Idempotent by analysis identity: the same source bytes, configuration,
+ * column mapping and engine version are one analysis, so a retried request
+ * answers 200 with `created: false` and the revision that already exists rather
+ * than minting a second one. A double-clicked button, a flaky network and the
+ * same file analysed on two devices all converge on one revision — which is
+ * what makes calling this on every completed analysis safe.
  */
 export function createRevision(
   runId: string,
@@ -898,12 +911,16 @@ export function uploadSnapshot(
   body: Uint8Array,
   query: SnapshotUploadQuery,
 ): Promise<CloudOutcome<SnapshotUploadResult>> {
-  return request<SnapshotUploadResult>(`/revisions/${id(revisionId)}/snapshot${queryString({ ...query })}`, {
-    method: 'PUT',
-    headers: { 'Content-Type': 'application/gzip' },
-    // A `Uint8Array` is a legal `BodyInit` at runtime; the DOM lib types it as
-    // `ArrayBufferView<ArrayBufferLike>`, which does not narrow to the
-    // `BufferSource` the signature wants.
-    body: body as unknown as BodyInit,
-  })
+  return request<SnapshotUploadResult>(
+    `/revisions/${id(revisionId)}/snapshot${queryString({ ...query })}`,
+    {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/gzip' },
+      // A `Uint8Array` is a legal `BodyInit` at runtime; the DOM lib types it as
+      // `ArrayBufferView<ArrayBufferLike>`, which does not narrow to the
+      // `BufferSource` the signature wants.
+      body: body as unknown as BodyInit,
+    },
+    OBJECT_TIMEOUT_MS,
+  )
 }

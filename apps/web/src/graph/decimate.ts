@@ -38,6 +38,58 @@ import type { FullResolutionArray } from '../analysis/series.ts'
  */
 const DISPLAY_SERIES = Symbol('aat.displaySeries')
 
+/**
+ * Whether an axis is safe to bisect, remembered per array so a pan/zoom redraw
+ * does not rescan it. Non-finite or backward steps both count as unordered —
+ * the bisect's comparisons silently misclassify either.
+ */
+const monotonicAxes = new WeakMap<FullResolutionArray, boolean>()
+
+function isMonotonic(time: FullResolutionArray): boolean {
+  const known = monotonicAxes.get(time)
+  if (known !== undefined) return known
+  let sorted = true
+  for (let index = 1; index < time.length; index++) {
+    const current = time[index] as number
+    const previous = time[index - 1] as number
+    if (!(current >= previous)) {
+      sorted = false
+      break
+    }
+  }
+  monotonicAxes.set(time, sorted)
+  return sorted
+}
+
+/** The bisected answer for an axis already proven ordered. */
+function bisectFirstVisible(series: SeriesWindow, xMin: number): number {
+  let lower = 0
+  let upper = series.length
+  while (lower < upper) {
+    const mid = (lower + upper) >>> 1
+    if ((series.time[mid] as number) < xMin) lower = mid + 1
+    else upper = mid
+  }
+  return lower
+}
+
+/** The linear answer for an unordered axis, where only input order is trustworthy. */
+function scanFirstVisible(series: SeriesWindow, xMin: number): number {
+  let cursor = 0
+  while (cursor < series.length && (series.time[cursor] as number) < xMin) cursor++
+  return cursor
+}
+
+/**
+ * First index whose sample is not before `xMin`. Bisected on a monotonic axis —
+ * at millions of samples a linear scan dominated every wheel tick's redraw —
+ * scanned linearly when the axis steps backward, where "the prefix" does not
+ * exist and only input order is trustworthy (the column loop's own assumption).
+ */
+function firstVisibleIndex(series: SeriesWindow, xMin: number): number {
+  return isMonotonic(series.time) ? bisectFirstVisible(series, xMin) : scanFirstVisible(series, xMin)
+}
+
 /** The shared x axis every trace on one plot is decimated onto. */
 export interface DisplayGrid {
   /** Two positions per column, so a column can show both its extremes. */
@@ -107,73 +159,133 @@ export function decimateToGrid(
   values: FullResolutionArray,
 ): DisplaySeries {
   const y = new Float64Array(grid.x.length).fill(Number.NaN)
-  const length = Math.min(time.length, values.length)
-  if (length === 0) return { [DISPLAY_SERIES]: true, y, grid, sourceLength: 0 }
+  const series: SeriesWindow = { time, values, length: Math.min(time.length, values.length) }
+  if (series.length === 0) return { [DISPLAY_SERIES]: true, y, grid, sourceLength: 0 }
 
   const step = (grid.xMax - grid.xMin) / grid.columns
-  let cursor = 0
   let counted = 0
 
   // Skip samples before the viewport, remembering the last one so the first
   // visible column can interpolate back to it instead of starting mid-air.
-  while (cursor < length && (time[cursor] as number) < grid.xMin) cursor++
+  let cursor = firstVisibleIndex(series, grid.xMin)
   let previousIndex = cursor > 0 ? cursor - 1 : -1
 
   for (let column = 0; column < grid.columns; column++) {
-    const columnEnd = grid.xMin + (column + 1) * step
+    const scan = scanColumnSamples(series, {
+      from: cursor,
+      columnEnd: grid.xMin + (column + 1) * step,
+      previousIndex,
+    })
+    cursor = scan.cursor
+    previousIndex = scan.previousIndex
+    counted += scan.counted
 
-    let minValue = Number.POSITIVE_INFINITY
-    let maxValue = Number.NEGATIVE_INFINITY
-    let found = false
-
-    while (cursor < length && (time[cursor] as number) < columnEnd) {
-      const value = values[cursor] as number
-      if (Number.isFinite(value)) {
-        if (value < minValue) minValue = value
-        if (value > maxValue) maxValue = value
-        found = true
-        counted++
-      }
-      previousIndex = cursor
-      cursor++
-    }
-
-    if (found) {
-      y[column * 2] = minValue
-      y[column * 2 + 1] = maxValue
+    if (scan.counted > 0) {
+      y[column * 2] = scan.minValue
+      y[column * 2 + 1] = scan.maxValue
       continue
     }
 
     // No sample landed here. Interpolate only between two real samples that
     // bracket the column — never extrapolate past the ends of the data.
-    const nextIndex = nextFiniteIndex(time, values, cursor, length)
-    const priorIndex = previousFiniteIndex(time, values, previousIndex)
+    const nextIndex = nextFiniteIndex(series, cursor)
+    const priorIndex = previousFiniteIndex(series, previousIndex)
     if (priorIndex < 0 || nextIndex < 0) continue
 
-    const x0 = time[priorIndex] as number
-    const x1 = time[nextIndex] as number
-    const v0 = values[priorIndex] as number
-    const v1 = values[nextIndex] as number
-    const denominator = x1 - x0
-    for (const slot of [0, 1] as const) {
-      const at = grid.x[column * 2 + slot] as number
-      y[column * 2 + slot] = denominator === 0 ? v0 : v0 + ((at - x0) / denominator) * (v1 - v0)
-    }
+    interpolateColumn(grid, column, y, {
+      x0: time[priorIndex] as number,
+      x1: time[nextIndex] as number,
+      v0: values[priorIndex] as number,
+      v1: values[nextIndex] as number,
+    })
   }
 
   return { [DISPLAY_SERIES]: true, y, grid, sourceLength: counted }
 }
 
-function nextFiniteIndex(time: Float64Array, values: Float64Array, from: number, length: number): number {
-  for (let index = from; index < length; index++) {
-    if (Number.isFinite(values[index] as number) && Number.isFinite(time[index] as number)) return index
+/** A slice of one sensor's series, bounded by the shorter of its two arrays. */
+interface SeriesWindow {
+  readonly time: FullResolutionArray
+  readonly values: FullResolutionArray
+  readonly length: number
+}
+
+/** Where one pixel column's scan starts, ends, and what precedes it. */
+interface ColumnScanBounds {
+  readonly from: number
+  readonly columnEnd: number
+  readonly previousIndex: number
+}
+
+/** What one pixel column's scan consumed and found. */
+interface ColumnScan {
+  readonly minValue: number
+  readonly maxValue: number
+  /** Finite samples claimed — the column's extremes are worth drawing. */
+  readonly counted: number
+  /** One past the last sample the column's range covered. */
+  readonly cursor: number
+  /** The last covered sample, finite or not — interpolation reads back to it. */
+  readonly previousIndex: number
+}
+
+function scanColumnSamples(series: SeriesWindow, bounds: ColumnScanBounds): ColumnScan {
+  let minValue = Number.POSITIVE_INFINITY
+  let maxValue = Number.NEGATIVE_INFINITY
+  let counted = 0
+  let cursor = bounds.from
+  let previousIndex = bounds.previousIndex
+  while (cursor < series.length && (series.time[cursor] as number) < bounds.columnEnd) {
+    const value = series.values[cursor] as number
+    if (Number.isFinite(value)) {
+      if (value < minValue) minValue = value
+      if (value > maxValue) maxValue = value
+      counted++
+    }
+    previousIndex = cursor
+    cursor++
+  }
+  return { minValue, maxValue, counted, cursor, previousIndex }
+}
+
+/** The two real samples an empty column interpolates between. */
+interface ColumnBracket {
+  readonly x0: number
+  readonly x1: number
+  readonly v0: number
+  readonly v1: number
+}
+
+/**
+ * Fill an empty column's two positions from the samples bracketing it.
+ * `denominator === 0` means the bracketing samples share one x — draw the
+ * earlier value rather than dividing through it.
+ */
+function interpolateColumn(grid: DisplayGrid, column: number, y: Float64Array, bracket: ColumnBracket): void {
+  const denominator = bracket.x1 - bracket.x0
+  for (const slot of [0, 1] as const) {
+    const at = grid.x[column * 2 + slot] as number
+    y[column * 2 + slot] =
+      denominator === 0
+        ? bracket.v0
+        : bracket.v0 + ((at - bracket.x0) / denominator) * (bracket.v1 - bracket.v0)
+  }
+}
+
+function nextFiniteIndex(series: SeriesWindow, from: number): number {
+  for (let index = from; index < series.length; index++) {
+    if (Number.isFinite(series.values[index] as number) && Number.isFinite(series.time[index] as number)) {
+      return index
+    }
   }
   return -1
 }
 
-function previousFiniteIndex(time: Float64Array, values: Float64Array, from: number): number {
+function previousFiniteIndex(series: SeriesWindow, from: number): number {
   for (let index = from; index >= 0; index--) {
-    if (Number.isFinite(values[index] as number) && Number.isFinite(time[index] as number)) return index
+    if (Number.isFinite(series.values[index] as number) && Number.isFinite(series.time[index] as number)) {
+      return index
+    }
   }
   return -1
 }

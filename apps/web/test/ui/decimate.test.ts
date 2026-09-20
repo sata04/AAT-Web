@@ -132,4 +132,19 @@ describe('gaps and coverage', () => {
     expect(series.sourceLength).toBe(0)
     expect(series.y.every((value) => Number.isNaN(value))).toBe(true)
   })
+
+  it('keeps input-order semantics on a disturbed axis — bisect must not skip past it', () => {
+    // The pipeline tolerates a non-monotonic axis (TIME_NOT_MONOTONIC is a
+    // warning, not a rejection). The viewport prefix is bisected only when the
+    // axis is sorted; here the leading 9 makes input order the only trustworthy
+    // scan — a bisect would land on index 4 and draw samples the linear scan
+    // never reaches, which is exactly the divergence this test pins down.
+    const time = asFullResolution(Float64Array.from([9, 0, 1, 2, 3, 4]))
+    const values = asFullResolution(Float64Array.from([9, 0, 1, 2, 3, 4]))
+    const grid = buildDisplayGrid(2.5, 4.5, 10)
+    const series = decimateToGrid(grid, time, values)
+    // Input-order semantics: the 9 blocks the walk, so nothing is drawn.
+    expect(series.sourceLength).toBe(0)
+    expect(series.y.every((value) => Number.isNaN(value))).toBe(true)
+  })
 })

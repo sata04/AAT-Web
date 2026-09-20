@@ -35,6 +35,7 @@
 import {
   AnalysisConfigSchema,
   ApiError,
+  columnMappingHash,
   decodeSnapshot,
   gzipDecompress,
   SNAPSHOT_FORMAT_VERSION,
@@ -43,6 +44,7 @@ import { and, asc, eq, isNull, sql } from 'drizzle-orm'
 import { Hono } from 'hono'
 import { z } from 'zod'
 import { APP_VERSION, resolveConfig } from '../config.ts'
+import { rowsAffected } from '../db/client.ts'
 import { analysisMetrics, analysisRevisions, cloudObjects } from '../db/schema.ts'
 import { newId } from '../lib/ids.ts'
 import type { AppEnv } from '../middleware/authorize.ts'
@@ -57,12 +59,14 @@ import {
 import { validate } from '../middleware/validate.ts'
 import { writeAuditLog } from '../services/audit.ts'
 import {
+  commitUploadedObject,
   ensureQuotaRow,
-  finaliseReservation,
+  insertObjectRowClaimingKey,
+  releaseObjectAccounting,
   releaseReservation,
-  releaseUsage,
   reserveQuota,
   sweepStaleReservations,
+  unwindUploadedObject,
 } from '../services/quota.ts'
 import { readBoundedBody, snapshotKey, sourceKey, streamObject } from '../services/storage.ts'
 
@@ -88,6 +92,7 @@ const windowStatisticsSchema = z.object({
 const createRevisionSchema = z.object({
   sourceSha256: z.string().regex(/^[0-9a-f]{64}$/),
   configHash: z.string().regex(/^[0-9a-f]{64}$/),
+  mappingHash: z.string().regex(/^[0-9a-f]{64}$/),
   config: AnalysisConfigSchema,
   engineVersion: z.string().min(1).max(64),
   appVersion: z.string().min(1).max(64).optional(),
@@ -135,6 +140,7 @@ function revisionResponse(revision: typeof analysisRevisions.$inferSelect) {
     revisionNumber: revision.revisionNumber,
     sourceSha256: revision.sourceSha256,
     configHash: revision.configHash,
+    mappingHash: revision.mappingHash,
     engineVersion: revision.engineVersion,
     appVersion: revision.appVersion,
     snapshotFormatVersion: revision.snapshotFormatVersion,
@@ -151,9 +157,11 @@ function revisionResponse(revision: typeof analysisRevisions.$inferSelect) {
 /**
  * Create an immutable revision of a run.
  *
- * Idempotent by analysis identity: a second call with the same source bytes, configuration and
- * engine version returns the first revision with 200 rather than creating a duplicate. That is
- * what makes a retried request — a flaky network, a double-clicked button — safe.
+ * Idempotent by analysis identity: a second call with the same source bytes, configuration,
+ * column mapping and engine version returns the first revision with 200 rather than creating a
+ * duplicate. That is what makes a retried request — a flaky network, a double-clicked button —
+ * safe. The mapping is part of the identity because re-analysing the same bytes with different
+ * columns is a different analysis, not a repeat of the first.
  *
  * `own`, and deliberately not widened by the workspace policy: a revision records who analysed a
  * measurement with which settings, and letting a colleague — or an administrator — append to
@@ -180,6 +188,7 @@ revisionRoutes.post(
           eq(analysisRevisions.runId, run.id),
           eq(analysisRevisions.sourceSha256, body.sourceSha256),
           eq(analysisRevisions.configHash, body.configHash),
+          eq(analysisRevisions.mappingHash, body.mappingHash),
           eq(analysisRevisions.engineVersion, body.engineVersion),
         ),
       )
@@ -210,6 +219,7 @@ revisionRoutes.post(
             revisionNumber,
             sourceSha256: body.sourceSha256,
             configHash: body.configHash,
+            mappingHash: body.mappingHash,
             configJson: JSON.stringify(body.config),
             engineVersion: body.engineVersion,
             appVersion: body.appVersion ?? APP_VERSION,
@@ -232,6 +242,7 @@ revisionRoutes.post(
               eq(analysisRevisions.runId, run.id),
               eq(analysisRevisions.sourceSha256, body.sourceSha256),
               eq(analysisRevisions.configHash, body.configHash),
+              eq(analysisRevisions.mappingHash, body.mappingHash),
               eq(analysisRevisions.engineVersion, body.engineVersion),
             ),
           )
@@ -266,7 +277,12 @@ revisionRoutes.post(
       targetType: 'analysis_revision',
       targetId: inserted.id,
       targetOwnerUserId: run.ownerUserId,
-      details: { runId: run.id, configHash: body.configHash, engineVersion: body.engineVersion },
+      details: {
+        runId: run.id,
+        configHash: body.configHash,
+        mappingHash: body.mappingHash,
+        engineVersion: body.engineVersion,
+      },
       headers: context.req.raw.headers,
     })
 
@@ -380,6 +396,7 @@ revisionRoutes.put(
       now,
     )
 
+    let uploaded: { id: string; byteSize: number; sha256: string } | null = null
     try {
       // Read at most what was reserved: a client that declares 100 bytes and sends 10 MB is cut
       // off at 100 and rejected, rather than storing 10 MB against a 100-byte reservation.
@@ -405,38 +422,70 @@ revisionRoutes.put(
       if (snapshot.sourceSha256 !== revision.sourceSha256 || snapshot.configHash !== revision.configHash) {
         throw new ApiError('SNAPSHOT_INVALID', { details: { reason: 'does_not_match_revision' } })
       }
-
-      const put = await context.env.AAT_OBJECTS.put(key, body.bytes as ArrayBufferView, {
-        httpMetadata: { contentType: 'application/json' },
-        // R2 verifies this itself and rejects the write on mismatch, so the stored bytes cannot
-        // differ from the bytes that were hashed.
-        sha256: body.sha256,
-        customMetadata: { revisionId: revision.id, runId: revision.runId, ownerUserId },
-      })
-
-      // R2 is the authority on how many bytes exist, not the counter kept while reading.
-      const actualBytes = put?.size ?? body.bytes.length
-      if (actualBytes > reservation.bytes) {
-        await context.env.AAT_OBJECTS.delete(key)
-        throw new ApiError('QUOTA_EXCEEDED', { details: { reason: 'object_larger_than_reserved' } })
+      // The mapping is part of the revision's identity, so the snapshot must prove it was computed
+      // under that mapping — hashing the column choice the snapshot itself declares, not a hash the
+      // client could copy. Legacy revisions (mapping_hash NULL, from before the identity included
+      // it) cannot demand the field; old snapshots never had one to check.
+      if (
+        revision.mappingHash !== null &&
+        (snapshot.columnMapping === undefined ||
+          (await columnMappingHash(snapshot.columnMapping)) !== revision.mappingHash)
+      ) {
+        throw new ApiError('SNAPSHOT_INVALID', { details: { reason: 'mapping_mismatch' } })
       }
 
+      const putObject = () =>
+        context.env.AAT_OBJECTS.put(key, body.bytes as ArrayBufferView, {
+          httpMetadata: { contentType: 'application/json' },
+          // R2 verifies this itself and rejects the write on mismatch, so the stored bytes cannot
+          // differ from the bytes that were hashed.
+          sha256: body.sha256,
+          customMetadata: { revisionId: revision.id, runId: revision.runId, ownerUserId },
+        })
+
+      // The row claims the deterministic key BEFORE the bytes are written: a second upload for
+      // the same revision now fails its insert before its put ever runs, so a losing contender
+      // cannot leave its bytes under the winner's checksum.
       const objectId = newId()
-      await db.insert(cloudObjects).values({
+      const objectValues = {
         id: objectId,
         ownerUserId,
-        kind: 'snapshot',
+        kind: 'snapshot' as const,
         r2Key: key,
-        byteSize: actualBytes,
+        // Provisional until R2 reports what it stored — corrected below before the commit.
+        byteSize: body.bytes.length,
         sha256: body.sha256,
         contentType: 'application/json',
         originalFilename: snapshot.originalFilename,
         runId: revision.runId,
         analysisRevisionId: revision.id,
+        reservationId: reservation.id,
         createdAt: now,
-      })
+      }
+      await insertObjectRowClaimingKey(db, key, objectValues, now)
+      uploaded = { id: objectId, byteSize: body.bytes.length, sha256: body.sha256 }
 
-      await finaliseReservation(db, reservation, actualBytes, ownerUserId, now)
+      const put = await putObject()
+
+      // R2 is the authority on how many bytes exist, not the counter kept while reading.
+      const actualBytes = put?.size ?? body.bytes.length
+      if (actualBytes > reservation.bytes) {
+        // The catch unwinds the row and the just-written bytes.
+        throw new ApiError('QUOTA_EXCEEDED', { details: { reason: 'object_larger_than_reserved' } })
+      }
+      if (actualBytes !== objectValues.byteSize) {
+        await db.update(cloudObjects).set({ byteSize: actualBytes }).where(eq(cloudObjects.id, objectId))
+        uploaded = { ...uploaded, byteSize: actualBytes }
+      }
+
+      await commitUploadedObject(
+        db,
+        context.env.AAT_OBJECTS,
+        { id: objectId, r2Key: key, ownerUserId, byteSize: actualBytes },
+        reservation,
+        revision.runId,
+        now,
+      )
       await db
         .update(analysisRevisions)
         .set({ snapshotObjectId: objectId })
@@ -455,8 +504,20 @@ revisionRoutes.put(
       return context.json({ object: { id: objectId, byteSize: actualBytes }, created: true }, 201)
     } catch (error) {
       // Every failure path gives the reservation back — to the account it was taken from. Leaking
-      // one would slowly consume a user's quota with bytes that were never stored.
-      await releaseReservation(db, reservation, ownerUserId, now)
+      // one would slowly consume a user's quota with bytes that were never stored. Once the object
+      // row exists the charge may already be settled, so the whole upload is unwound instead —
+      // otherwise the row's unique r2_key would refuse the retry. Cleanup failure must not replace
+      // the real error: a remnant is reclaimable by the next contender for the key or the sweeper.
+      if (uploaded === null) {
+        await releaseReservation(db, reservation, ownerUserId, now).catch(() => {})
+      } else {
+        await unwindUploadedObject(
+          db,
+          context.env.AAT_OBJECTS,
+          { ...uploaded, r2Key: key, ownerUserId, reservationId: reservation.id },
+          now,
+        ).catch(() => {})
+      }
       throw error
     }
   },
@@ -556,11 +617,33 @@ revisionRoutes.put(
       now,
     )
 
+    let uploaded: { id: string; byteSize: number; sha256: string } | null = null
     try {
       const body = await readBoundedBody(context.req.raw.body, reservation.bytes, 'SOURCE_TOO_LARGE')
       if (body.sha256 !== query.sha256) {
         throw new ApiError('INVALID_CSV', { details: { reason: 'sha256_mismatch' } })
       }
+
+      const objectValues = {
+        id: objectId,
+        ownerUserId,
+        kind: 'source' as const,
+        r2Key: key,
+        // Provisional until R2 reports what it stored — corrected below before the commit.
+        byteSize: body.bytes.length,
+        sha256: body.sha256,
+        contentType: 'text/csv',
+        // Metadata only. Never a key component — see services/storage.ts.
+        originalFilename: query.filename,
+        runId: run.id,
+        reservationId: reservation.id,
+        createdAt: now,
+      }
+      // The row claims the key BEFORE the bytes exist — the ordering the snapshot and poster
+      // paths use — so a failed insert cannot strand untracked bytes, and a failed put unwinds
+      // a row that never committed.
+      await insertObjectRowClaimingKey(db, key, objectValues, now)
+      uploaded = { id: objectId, byteSize: body.bytes.length, sha256: body.sha256 }
 
       const put = await context.env.AAT_OBJECTS.put(key, body.bytes as ArrayBufferView, {
         httpMetadata: { contentType: 'text/csv' },
@@ -568,21 +651,18 @@ revisionRoutes.put(
         customMetadata: { runId: run.id, ownerUserId },
       })
       const actualBytes = put?.size ?? body.bytes.length
-
-      await db.insert(cloudObjects).values({
-        id: objectId,
-        ownerUserId,
-        kind: 'source',
-        r2Key: key,
-        byteSize: actualBytes,
-        sha256: body.sha256,
-        contentType: 'text/csv',
-        // Metadata only. Never a key component — see services/storage.ts.
-        originalFilename: query.filename,
-        runId: run.id,
-        createdAt: now,
-      })
-      await finaliseReservation(db, reservation, actualBytes, ownerUserId, now)
+      if (actualBytes !== uploaded.byteSize) {
+        await db.update(cloudObjects).set({ byteSize: actualBytes }).where(eq(cloudObjects.id, objectId))
+        uploaded.byteSize = actualBytes
+      }
+      await commitUploadedObject(
+        db,
+        context.env.AAT_OBJECTS,
+        { id: objectId, r2Key: key, ownerUserId, byteSize: actualBytes },
+        reservation,
+        run.id,
+        now,
+      )
 
       await writeAuditLog(db, {
         actorUserId: actor.userId,
@@ -596,7 +676,20 @@ revisionRoutes.put(
 
       return context.json({ object: { id: objectId, byteSize: actualBytes } }, 201)
     } catch (error) {
-      await releaseReservation(db, reservation, ownerUserId, now)
+      // Once the object row exists the charge may already be settled — releaseReservation is a
+      // no-op there — so the whole upload is unwound: accounting, row and bytes all go, and the
+      // deterministic key is free for the retry. Cleanup failure must not replace the real
+      // error: a remnant is reclaimable by the next contender for the key or the sweeper.
+      if (uploaded === null) {
+        await releaseReservation(db, reservation, ownerUserId, now).catch(() => {})
+      } else {
+        await unwindUploadedObject(
+          db,
+          context.env.AAT_OBJECTS,
+          { ...uploaded, r2Key: key, ownerUserId, reservationId: reservation.id },
+          now,
+        ).catch(() => {})
+      }
       throw error
     }
   },
@@ -649,10 +742,24 @@ revisionRoutes.delete('/runs/:runId/source', requireCapability('raw:delete'), as
   // against that owner at `destroy`. Re-testing each row against the *caller* here would skip the
   // owner's objects on exactly the administrative path this route exists to serve, and would
   // leave the bytes in R2 while reporting a successful delete.
+  //
+  // Settlement runs before the tombstone — the same rule as run deletion.
+  // `releaseObjectAccounting` is self-claiming and once-only, so a delete that fails partway can
+  // be retried: the settlement replays as a no-op and the tombstone lands. Tombstone-first would
+  // strand a release failure permanently, because a retried walk only sees live rows. The R2
+  // delete stays outside both claims: deleting bytes twice is harmless where releasing them
+  // twice is free quota.
+  let objectsDeleted = 0
   for (const record of records) {
     await context.env.AAT_OBJECTS.delete(record.r2Key)
-    await db.update(cloudObjects).set({ deletedAt: now }).where(eq(cloudObjects.id, record.id))
-    await releaseUsage(db, record.ownerUserId, record.byteSize, now)
+    await releaseObjectAccounting(db, record, now)
+    const claimed = await db
+      .update(cloudObjects)
+      .set({ deletedAt: now })
+      .where(and(eq(cloudObjects.id, record.id), isNull(cloudObjects.deletedAt)))
+    if (rowsAffected(claimed) === 1) {
+      objectsDeleted += 1
+    }
   }
 
   await writeAuditLog(db, {
@@ -661,9 +768,9 @@ revisionRoutes.delete('/runs/:runId/source', requireCapability('raw:delete'), as
     targetType: 'run',
     targetId: run.id,
     targetOwnerUserId: run.ownerUserId,
-    details: { objectsDeleted: records.length },
+    details: { objectsDeleted },
     headers: context.req.raw.headers,
   })
 
-  return context.json({ ok: true, objectsDeleted: records.length })
+  return context.json({ ok: true, objectsDeleted })
 })

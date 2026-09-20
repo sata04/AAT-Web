@@ -13,11 +13,12 @@
  */
 
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { type ChartGeometry, pixelsToSpan, pixelToValue, valueToPixel } from './geometry.ts'
+import { type ChartGeometry, pixelsToSpan, valueToPixel } from './geometry.ts'
 import {
   beginDrag,
   commitDrag,
   dragRange,
+  hitTestSelection,
   type SelectionDrag,
   type SelectionRange,
   updateDrag,
@@ -37,20 +38,23 @@ export interface SelectionOverlayProps {
    * `SpanSelector`, every other one calls `clear_span_selectors()`.
    */
   enabled: boolean
+  /**
+   * uPlot's `.u-over` element — the plot-area event layer, published by
+   * `UPlotChart` once the plot exists.
+   *
+   * The overlay's pointer handlers bind there rather than on the overlay div:
+   * the overlay sits above the chart for painting, so making *it* the event
+   * layer would swallow wheel-zoom, Shift-drag pan and middle-drag pan before
+   * they reached the chart. `over` is exactly the plot rectangle, which also
+   * makes axes unreachable to selection — a drag starting on a tick label can
+   * no longer create a junk span clamped to the plot edge.
+   */
+  gestureLayer: HTMLElement | null
 }
 
 export function SelectionOverlay(props: SelectionOverlayProps): React.JSX.Element | null {
-  const { geometry, selection, onSelectionChange, enabled } = props
+  const { geometry, selection, onSelectionChange, enabled, gestureLayer } = props
   const [drag, setDrag] = useState<SelectionDrag | null>(null)
-  /*
-   * The layer is held in state, not only in a ref, because the effect below has to bind its pointer
-   * listeners at the moment the element appears — and it does not appear on the first render. A ref
-   * assignment does not re-render, so an effect reading the ref would run once,
-   * find null, bail out, and never run again: the graph would silently have no pointer handlers.
-   * A callback ref that sets state gives the effect something that actually changes when the node
-   * arrives.
-   */
-  const [layer, setLayer] = useState<HTMLDivElement | null>(null)
 
   // Refs so the pointer handlers, which are attached once, always see current
   // values instead of the render they were created in.
@@ -63,18 +67,23 @@ export function SelectionOverlay(props: SelectionOverlayProps): React.JSX.Elemen
   const onChangeRef = useRef(onSelectionChange)
   onChangeRef.current = onSelectionChange
 
+  // `gestureLayer` is uPlot's `over`: its bounding rect is exactly the plot
+  // area, so a client position maps to a data value with no axis-offset maths.
   const valueAt = useCallback(
     (clientX: number): number | null => {
       const currentGeometry = geometryRef.current
-      if (layer === null || currentGeometry === null) return null
-      const rect = layer.getBoundingClientRect()
-      return pixelToValue(currentGeometry, clientX - rect.left)
+      if (gestureLayer === null || currentGeometry === null) return null
+      const rect = gestureLayer.getBoundingClientRect()
+      if (rect.width === 0) return null
+      const span = currentGeometry.xMax - currentGeometry.xMin
+      return currentGeometry.xMin + ((clientX - rect.left) / rect.width) * span
     },
-    [layer],
+    [gestureLayer],
   )
 
   useEffect(() => {
-    if (layer === null || !enabled) return
+    const target = gestureLayer
+    if (target === null || !enabled) return
 
     const onPointerDown = (event: PointerEvent) => {
       // Shift-drag and the middle button belong to panning; a secondary click
@@ -84,46 +93,66 @@ export function SelectionOverlay(props: SelectionOverlayProps): React.JSX.Elemen
       const value = valueAt(event.clientX)
       if (currentGeometry === null || value === null) return
       event.preventDefault()
-      layer.setPointerCapture(event.pointerId)
+      target.setPointerCapture(event.pointerId)
       const tolerance = pixelsToSpan(currentGeometry, HANDLE_TOLERANCE_PX)
-      setDrag(beginDrag(selectionRef.current, value, tolerance))
+      const next = beginDrag(selectionRef.current, value, tolerance)
+      setDrag(next)
+      target.style.cursor =
+        next.kind === 'move' ? 'grabbing' : next.kind === 'resize' ? 'ew-resize' : 'crosshair'
     }
 
     const onPointerMove = (event: PointerEvent) => {
-      const current = dragRef.current
       const currentGeometry = geometryRef.current
-      if (current === null || currentGeometry === null) return
+      if (currentGeometry === null) return
       const value = valueAt(event.clientX)
       if (value === null) return
+
+      const current = dragRef.current
+      if (current === null) {
+        // No drag in progress: the cursor is the affordance for what a press
+        // would grab — an edge resizes, the body moves, empty area creates.
+        const existing = selectionRef.current
+        const tolerance = pixelsToSpan(currentGeometry, HANDLE_TOLERANCE_PX)
+        const handle = existing === null ? null : hitTestSelection(existing, value, tolerance)
+        target.style.cursor =
+          handle === 'start' || handle === 'end' ? 'ew-resize' : handle === 'body' ? 'grab' : 'crosshair'
+        return
+      }
       setDrag(updateDrag(current, value, { min: currentGeometry.xMin, max: currentGeometry.xMax }))
     }
 
     const finish = (event: PointerEvent) => {
       const current = dragRef.current
       const currentGeometry = geometryRef.current
+      if (target.hasPointerCapture(event.pointerId)) target.releasePointerCapture(event.pointerId)
       if (current === null || currentGeometry === null) return
       setDrag(null)
-      if (layer.hasPointerCapture(event.pointerId)) layer.releasePointerCapture(event.pointerId)
       onChangeRef.current(
         commitDrag(current, selectionRef.current, {
           min: currentGeometry.xMin,
           max: currentGeometry.xMax,
         }),
       )
+      target.style.cursor = 'crosshair'
     }
 
-    layer.addEventListener('pointerdown', onPointerDown)
-    layer.addEventListener('pointermove', onPointerMove)
-    layer.addEventListener('pointerup', finish)
-    layer.addEventListener('pointercancel', finish)
+    // A horizontal touch drag must not become a page scroll.
+    target.style.touchAction = 'none'
+    target.style.cursor = 'crosshair'
+    target.addEventListener('pointerdown', onPointerDown)
+    target.addEventListener('pointermove', onPointerMove)
+    target.addEventListener('pointerup', finish)
+    target.addEventListener('pointercancel', finish)
 
     return () => {
-      layer.removeEventListener('pointerdown', onPointerDown)
-      layer.removeEventListener('pointermove', onPointerMove)
-      layer.removeEventListener('pointerup', finish)
-      layer.removeEventListener('pointercancel', finish)
+      target.style.touchAction = ''
+      target.style.cursor = ''
+      target.removeEventListener('pointerdown', onPointerDown)
+      target.removeEventListener('pointermove', onPointerMove)
+      target.removeEventListener('pointerup', finish)
+      target.removeEventListener('pointercancel', finish)
     }
-  }, [enabled, valueAt, layer])
+  }, [enabled, valueAt, gestureLayer])
 
   if (geometry === null) return null
 
@@ -133,18 +162,9 @@ export function SelectionOverlay(props: SelectionOverlayProps): React.JSX.Elemen
   return (
     <div
       className="selection-overlay"
-      ref={setLayer}
-      style={{
-        // The layer covers the whole chart root but only accepts pointers over
-        // the plot area, so the axes stay clickable for focus and text
-        // selection. `touch-action: none` stops the browser from turning a
-        // horizontal drag into a page scroll.
-        pointerEvents: enabled ? 'auto' : 'none',
-        touchAction: enabled ? 'none' : 'auto',
-        // Crosshair while idle, grabbing while moving a selection. The edge
-        // grips set their own `ew-resize` in CSS, since they are real elements.
-        cursor: drag?.kind === 'move' ? 'grabbing' : 'crosshair',
-      }}
+      // Purely visual now — the gestures live on the chart's own event layer,
+      // so zoom, pan and axis interactions are never shadowed.
+      style={{ pointerEvents: 'none' }}
     >
       {shown === null ? null : (
         <>

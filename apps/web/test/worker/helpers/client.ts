@@ -16,10 +16,12 @@
  */
 
 import { env, SELF } from 'cloudflare:test'
-import type { Role } from '@aat/shared'
+import type { PosterPlotSpec } from '@aat/plot-spec'
+import { columnMappingHash, type Role } from '@aat/shared'
 import { createInvitation } from '../../../worker/auth/invitations.ts'
 import { getDatabase } from '../../../worker/db/client.ts'
 import { VirtualAuthenticator } from './authenticator.ts'
+import { TEST_COLUMN_MAPPING } from './snapshot.ts'
 
 export const ORIGIN = 'https://aat.test'
 export const RP_ID = 'aat.test'
@@ -230,11 +232,11 @@ export async function createRun(user: TestUser, filename = '260811a_data.csv'): 
 
 const SOURCE_SHA = 'a'.repeat(64)
 
-/** Create an immutable revision of `runId`, with a config hash the caller can vary. */
+/** Create an immutable revision of `runId`, with identity fields the caller can vary. */
 export async function createRevision(
   user: TestUser,
   runId: string,
-  overrides: { configHash?: string; sourceSha256?: string } = {},
+  overrides: { configHash?: string; sourceSha256?: string; mappingHash?: string } = {},
 ): Promise<string> {
   const response = await apiFetch(`/api/v1/runs/${runId}/revisions`, {
     method: 'POST',
@@ -242,6 +244,9 @@ export async function createRevision(
     body: JSON.stringify({
       sourceSha256: overrides.sourceSha256 ?? SOURCE_SHA,
       configHash: overrides.configHash ?? 'b'.repeat(64),
+      // The upload admission hashes the snapshot's declared columnMapping against this value, so
+      // the default must be the real hash of the mapping the test snapshots carry.
+      mappingHash: overrides.mappingHash ?? (await columnMappingHash(TEST_COLUMN_MAPPING)),
       config: {},
       engineVersion: '1.0.0',
       snapshotFormatVersion: 1,
@@ -263,7 +268,7 @@ export async function createRevision(
 }
 
 /** A minimal but valid poster plot spec for `revisionId`. */
-export function posterSpec(revisionId: string, kind: 'auto' | 'custom' = 'auto') {
+export function posterSpec(revisionId: string, kind: 'auto' | 'custom' = 'auto'): PosterPlotSpec {
   const time = new Float64Array([0, 0.001, 0.002, 0.003])
   const values = new Float64Array([0.0001, 0.0002, 0.00015, 0.0001])
   return {

@@ -41,6 +41,8 @@ export type AnalysisErrorCode =
   | 'ANALYSIS_PARAMETER_INVALID'
   /** The exact-computation budget would be exceeded (deliberate divergence). */
   | 'ANALYSIS_TOO_LARGE'
+  /** The request was abandoned before it finished (web only; the desktop cancels by stopping the thread). */
+  | 'ANALYSIS_CANCELLED'
 
 /** Structured, serialisable context attached to an error. */
 export type AnalysisErrorDetails = Readonly<Record<string, string | number | boolean | readonly string[]>>
@@ -93,6 +95,32 @@ export class ColumnNotFoundError extends AnalysisError {
     this.name = 'ColumnNotFoundError'
     this.missingColumns = missingColumns
     this.availableColumns = availableColumns
+  }
+}
+
+export class AnalysisCancelledError extends AnalysisError {
+  constructor(message = 'The analysis was cancelled.') {
+    super('ANALYSIS_CANCELLED', message)
+    this.name = 'AnalysisCancelledError'
+  }
+}
+
+/** A window size or sampling rate that cannot describe a real window. */
+export class AnalysisParameterError extends AnalysisError {
+  readonly parameter: string
+
+  constructor(message: string, parameter: string) {
+    super('ANALYSIS_PARAMETER_INVALID', message, { parameter })
+    this.name = 'AnalysisParameterError'
+    this.parameter = parameter
+  }
+}
+
+/** The exact-computation budget would be exceeded (deliberate divergence). */
+export class AnalysisSizeError extends AnalysisError {
+  constructor(message: string) {
+    super('ANALYSIS_TOO_LARGE', message)
+    this.name = 'AnalysisSizeError'
   }
 }
 

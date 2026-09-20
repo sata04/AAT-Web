@@ -28,6 +28,7 @@
 /// <reference lib="webworker" />
 
 import {
+  AnalysisCancelledError,
   AnalysisError,
   ColumnNotFoundError,
   type CsvTable,
@@ -36,15 +37,25 @@ import {
   decodeCsv,
   detectColumns,
   EMPTY_WINDOW_STATISTICS,
+  type AnalysisConfig as EngineConfig,
+  type FilterResult,
   filterData,
+  type GQualityResult,
+  type LoadedData,
   loadAndProcessData,
   parseCsvText,
-  toNumericColumn,
+  type WindowStatistics,
 } from '@aat/analysis-core'
 import type { AnalysisConfig } from '@aat/shared'
 import { configHash, sha256Hex } from '@aat/shared'
 import { ANALYSIS_ENGINE_VERSION } from '../app/version.ts'
-import { readCache, sha256Hex as sha256Bytes, writeCache } from '../cache/analysis-cache.ts'
+import {
+  type CacheKeyParts,
+  cacheBudgetBytes,
+  evictToBudget,
+  readCache,
+  writeCache,
+} from '../cache/analysis-cache.ts'
 import { toEngineConfig } from './engine-config.ts'
 import { proposeMapping } from './mapping.ts'
 import type {
@@ -78,6 +89,54 @@ interface RetainedTable {
 }
 
 const retained = new Map<string, RetainedTable>()
+
+/**
+ * Sources whose `release` arrived while their `open` was still parsing. The
+ * open still answers its request — the column proposal was asked for — but it
+ * must not go on to retain a table the page has already closed.
+ */
+const releasedBeforeOpen = new Set<string>()
+
+/**
+ * Sources an `open` is working on, from the moment its content hash is known
+ * until the request settles. `handleRelease` consults this to tell an
+ * in-flight open apart from an already-evicted or never-opened source: only
+ * the former earns a `releasedBeforeOpen` marker, because a marker with no
+ * open to consume it would sit until the *next* open of that source and keep
+ * it from retaining — reopening a closed-and-evicted dataset would then fail
+ * analysis with SOURCE_NOT_RETAINED.
+ */
+const opensInFlight = new Set<string>()
+
+/**
+ * Cancellation bookkeeping. `inFlight` bounds `cancelled` to requests that are
+ * actually running so a stale cancel for a finished id is a no-op, and each
+ * finished run clears its own flag, keeping the set from growing for the
+ * lifetime of the worker. Worker messages are processed in post order, so a
+ * request's listener — and its `inFlight` entry — always exists before the
+ * `cancel` message naming it can be handled.
+ */
+const inFlight = new Set<string>()
+const cancelled = new Set<string>()
+
+function throwIfCancelled(requestId: string): void {
+  if (cancelled.has(requestId)) throw new AnalysisCancelledError()
+}
+
+/**
+ * Let a queued `cancel` message run. A worker processes one message at a time,
+ * so a cancellation sent while a synchronous stage is executing can only be
+ * *seen* after a real event-loop turn — awaiting a resolved promise is a
+ * microtask and would check the set before the cancel message ever ran.
+ */
+function yieldToEventLoop(): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, 0))
+}
+
+async function checkpoint(requestId: string): Promise<void> {
+  await yieldToEventLoop()
+  throwIfCancelled(requestId)
+}
 
 function retain(sourceSha256: string, entry: RetainedTable): void {
   // Re-inserting moves the key to the end of the Map's insertion order, which is
@@ -151,9 +210,8 @@ function reportError(requestId: string, error: unknown): void {
     message.code = error.code
     message.message = error.message
   } else if (error instanceof Error) {
-    // Named errors from the statistics module (AnalysisParameterError,
-    // AnalysisSizeError) reach here; the name is the most specific thing they
-    // carry, so it becomes the code rather than being flattened to INTERNAL.
+    // A non-AnalysisError (RangeError, engine bug): the name is the most
+    // specific thing it carries, so it becomes the code rather than INTERNAL.
     message.code = error.name
     message.message = error.message
   }
@@ -167,33 +225,49 @@ async function handleOpen(request: OpenRequest): Promise<void> {
   // Content-addressed, via Web Crypto: a renamed file is the same data and a
   // touched file is not different data. The same digest identifies the retained
   // table, the cache entry and the cloud snapshot's provenance.
-  const sourceSha256 = await sha256Bytes(bytes)
+  const sourceSha256 = await sha256Hex(bytes)
 
-  const { text, encoding } = decodeCsv(bytes)
-  progress(request.requestId, 'parsing', 20)
+  opensInFlight.add(sourceSha256)
+  try {
+    const { text, encoding } = decodeCsv(bytes)
+    progress(request.requestId, 'parsing', 20)
 
-  const table = parseCsvText(text)
-  progress(request.requestId, 'detecting', 45)
+    const table = parseCsvText(text)
+    // Decoding and parsing are the long synchronous stretch of `open`; the
+    // earliest a cancel can land is here, at the first suspension.
+    await checkpoint(request.requestId)
+    progress(request.requestId, 'detecting', 45)
 
-  const detected = detectColumns(table)
-  retain(sourceSha256, { table, filename: request.filename, encoding })
+    const detected = detectColumns(table)
+    // A `release` processed during the checkpoint above means the dataset was
+    // closed mid-open: answer it (the columns were asked for) without retaining.
+    if (!releasedBeforeOpen.delete(sourceSha256)) {
+      retain(sourceSha256, { table, filename: request.filename, encoding })
+    }
 
-  const proposal = proposeMapping(detected)
-  const message: OpenedMessage = {
-    type: 'opened',
-    requestId: request.requestId,
-    source: {
-      sourceSha256,
-      filename: request.filename,
-      encoding,
-      columnNames: [...table.columnNames],
-      detected,
-      rowCount: table.rowCount,
-      suggestedMapping: proposal.mapping,
-      ambiguity: proposal.ambiguity,
-    },
+    const proposal = proposeMapping(detected)
+    const message: OpenedMessage = {
+      type: 'opened',
+      requestId: request.requestId,
+      source: {
+        sourceSha256,
+        filename: request.filename,
+        encoding,
+        columnNames: [...table.columnNames],
+        detected,
+        rowCount: table.rowCount,
+        suggestedMapping: proposal.mapping,
+        ambiguity: proposal.ambiguity,
+      },
+    }
+    scope.postMessage(message)
+  } finally {
+    opensInFlight.delete(sourceSha256)
+    // A marker that survived to here targeted this open's lifecycle. Clearing it
+    // unconditionally covers the failure paths too: a release during an open
+    // that then errors must not linger into the source's next open.
+    releasedBeforeOpen.delete(sourceSha256)
   }
-  scope.postMessage(message)
 }
 
 /**
@@ -219,42 +293,6 @@ async function analysisIdentityHash(config: AnalysisConfig, mapping: ColumnMappi
 }
 
 /**
- * Reconstruct a sensor's acceleration series in m/s^2.
- *
- * The pipeline returns gravity, not acceleration, and the desktop's Excel export
- * has an Acceleration Data worksheet. Multiplying gravity back by the gravity
- * constant would be wrong by a rounding step per sample, so the column is
- * re-read and put through the same two transformations `loadAndProcessData`
- * applies: samples whose timestamp is unusable are masked to NaN, and the Inner
- * Capsule is negated when `invert_inner_acceleration` is set.
- *
- * Kept next to its call site rather than tucked away, precisely because it
- * duplicates pipeline behaviour and has to be re-checked whenever that changes.
- */
-function readSensorAcceleration(
-  table: CsvTable,
-  columnName: string,
-  time: Float64Array,
-  invert: boolean,
-): Float64Array {
-  const column = table.column(columnName)
-  if (column === undefined) return new Float64Array(0)
-
-  const values = toNumericColumn(column).values
-  const result = new Float64Array(values.length)
-  for (let index = 0; index < values.length; index++) {
-    const timestamp = time[index]
-    const value = values[index] as number
-    if (timestamp === undefined || !Number.isFinite(timestamp)) {
-      result[index] = Number.NaN
-      continue
-    }
-    result[index] = invert ? -value : value
-  }
-  return result
-}
-
-/**
  * A disabled sensor's slot in the payload.
  *
  * Freshly allocated rather than a shared constant. Zero-length buffers are
@@ -275,53 +313,38 @@ function emptySensor(): SensorResult {
   }
 }
 
-async function handleAnalyse(request: AnalyseRequest): Promise<void> {
-  const entry = retained.get(request.sourceSha256)
-  if (entry === undefined) {
-    scope.postMessage({
-      type: 'error',
-      requestId: request.requestId,
-      code: 'SOURCE_NOT_RETAINED',
-      message: 'The parsed source is no longer held by the worker; reopen the file.',
-    } satisfies ErrorMessage)
-    return
+/**
+ * Answer `analyse` from the IndexedDB cache when a usable entry exists.
+ *
+ * Returns true when the request was answered from cache. The read itself yields
+ * to the event loop, where a queued `cancel` runs — a hit is not allowed to
+ * answer over a cancellation just because it was fast.
+ */
+async function respondFromCache(request: AnalyseRequest, cacheParts: CacheKeyParts): Promise<boolean> {
+  if (!request.useCache) return false
+  const cached = await readCache<AnalysisPayload>(cacheParts)
+  throwIfCancelled(request.requestId)
+  if (cached === null) return false
+  // A cached entry computed without the sweep must not satisfy a request that
+  // needs it; the reverse is fine, extra rows are simply ignored.
+  if (!request.skipGQuality && !cached.payload.gQualityComputed) return false
+  const message: AnalysedMessage = {
+    type: 'analysed',
+    requestId: request.requestId,
+    payload: cached.payload,
+    fromCache: true,
   }
+  scope.postMessage(message, payloadTransfers(cached.payload))
+  return true
+}
 
-  const identity = await analysisIdentityHash(request.config, request.mapping)
-  const cacheParts = {
-    sourceSha256: request.sourceSha256,
-    configHash: identity,
-    engineVersion: ANALYSIS_ENGINE_VERSION,
-  }
-
-  if (request.useCache) {
-    const cached = await readCache<AnalysisPayload>(cacheParts)
-    // A cached entry computed without the sweep must not satisfy a request that
-    // needs it; the reverse is fine, extra rows are simply ignored.
-    if (cached !== null && (request.skipGQuality || cached.payload.gQualityComputed)) {
-      const message: AnalysedMessage = {
-        type: 'analysed',
-        requestId: request.requestId,
-        payload: cached.payload,
-        fromCache: true,
-      }
-      scope.postMessage(message, payloadTransfers(cached.payload))
-      return
-    }
-  }
-
-  const { table } = entry
-  const engineConfig = toEngineConfig(request.config, request.mapping)
-
-  progress(request.requestId, 'loading', 50)
-  const loaded = loadAndProcessData(table, engineConfig)
-
-  progress(request.requestId, 'filtering', 58)
-  const filtered = filterData(loaded, engineConfig)
-
-  progress(request.requestId, 'statistics', 64)
+/** Per-sensor minimum-window statistics over the filtered segment. */
+function sensorStatistics(
+  filtered: FilterResult,
+  engineConfig: EngineConfig,
+): { inner: WindowStatistics; drag: WindowStatistics } {
   const statisticsConfig = { windowSize: engineConfig.windowSize, samplingRate: engineConfig.samplingRate }
-  const statistics = {
+  return {
     inner:
       filtered.inner.gravity.length > 0
         ? calculateStatistics(filtered.inner.gravity, filtered.inner.time, statisticsConfig)
@@ -331,10 +354,14 @@ async function handleAnalyse(request: AnalyseRequest): Promise<void> {
         ? calculateStatistics(filtered.drag.gravity, filtered.drag.time, statisticsConfig)
         : EMPTY_WINDOW_STATISTICS,
   }
+}
 
-  const timeColumn = table.column(engineConfig.timeColumn)
-  const rawTime = timeColumn === undefined ? new Float64Array(0) : toNumericColumn(timeColumn).values
-
+/** The two sensor slots of the payload; a disabled sensor gets an empty result. */
+function sensorResults(
+  request: AnalyseRequest,
+  loaded: LoadedData,
+  filtered: FilterResult,
+): { inner: SensorResult; drag: SensorResult } {
   const inner: SensorResult = request.mapping.useInner
     ? {
         present: filtered.inner.gravity.length > 0,
@@ -342,12 +369,7 @@ async function handleAnalyse(request: AnalyseRequest): Promise<void> {
         gravity: loaded.inner.gravity,
         filteredTime: filtered.inner.time,
         filteredGravity: filtered.inner.gravity,
-        acceleration: readSensorAcceleration(
-          table,
-          engineConfig.accelerationColumnInnerCapsule,
-          rawTime,
-          engineConfig.invertInnerAcceleration,
-        ),
+        acceleration: loaded.inner.acceleration,
         startIndex: filtered.inner.startIndex,
         endIndex: filtered.inner.endIndex,
       }
@@ -360,30 +382,98 @@ async function handleAnalyse(request: AnalyseRequest): Promise<void> {
         gravity: loaded.drag.gravity,
         filteredTime: filtered.drag.time,
         filteredGravity: filtered.drag.gravity,
-        acceleration: readSensorAcceleration(
-          table,
-          engineConfig.accelerationColumnDragShield,
-          rawTime,
-          false,
-        ),
+        acceleration: loaded.drag.acceleration,
         startIndex: filtered.drag.startIndex,
         endIndex: filtered.drag.endIndex,
       }
     : emptySensor()
 
-  const gQuality = request.skipGQuality
-    ? { rows: [], warnings: [] }
-    : calculateGQuality(filtered, engineConfig, (update) => {
-        // The sweep dominates the wall clock, so it owns the tail of the bar.
-        progress(request.requestId, 'gquality', 65 + Math.round(update.percent * 0.3))
-      })
+  return { inner, drag }
+}
 
-  const payload: AnalysisPayload = {
+/**
+ * The G-quality sweep with its cooperative-cancel checkpoint.
+ *
+ * Checking the flag costs nothing per window; yielding to the event loop costs
+ * a millisecond-scale turn, so only pay it when this sweep is taking long
+ * enough that a user could plausibly reach for the cancel button.
+ */
+async function runGQualitySweep(
+  request: AnalyseRequest,
+  filtered: FilterResult,
+  engineConfig: EngineConfig,
+): Promise<GQualityResult> {
+  if (request.skipGQuality) return { rows: [], warnings: [] }
+  let lastYield = 0
+  return calculateGQuality(filtered, engineConfig, {
+    onProgress: (update) => {
+      // The sweep dominates the wall clock, so it owns the tail of the bar.
+      progress(request.requestId, 'gquality', 65 + Math.round(update.percent * 0.3))
+    },
+    checkpoint: async () => {
+      const now = Date.now()
+      if (now - lastYield >= 50) {
+        lastYield = now
+        await yieldToEventLoop()
+      }
+      throwIfCancelled(request.requestId)
+    },
+  })
+}
+
+/** Everything the numerical pipeline produced for one request. */
+interface ComputedAnalysis {
+  loaded: LoadedData
+  filtered: FilterResult
+  statistics: { inner: WindowStatistics; drag: WindowStatistics }
+  gQuality: GQualityResult
+}
+
+/**
+ * Run the numerical pipeline: load, filter, statistics, then the sweep.
+ *
+ * The checkpoints bracket the two longest un-interruptible stretches — the
+ * synchronous stages, and the sweep itself, which can take minutes on a large
+ * file (its own per-window checkpoint covers the interior).
+ */
+async function computeAnalysis(
+  request: AnalyseRequest,
+  table: CsvTable,
+  engineConfig: EngineConfig,
+): Promise<ComputedAnalysis> {
+  await checkpoint(request.requestId)
+  progress(request.requestId, 'loading', 50)
+  const loaded = loadAndProcessData(table, engineConfig)
+
+  progress(request.requestId, 'filtering', 58)
+  const filtered = filterData(loaded, engineConfig)
+
+  progress(request.requestId, 'statistics', 64)
+  const statistics = sensorStatistics(filtered, engineConfig)
+
+  // The last chance to see a cancel before the sweep starts — the run of
+  // synchronous stages above is the longest un-interruptible stretch of the
+  // pipeline, and the sweep itself can take minutes on a large file.
+  await checkpoint(request.requestId)
+
+  const gQuality = await runGQualitySweep(request, filtered, engineConfig)
+  return { loaded, filtered, statistics, gQuality }
+}
+
+/** Assemble the `analysed` payload from the finished pipeline stages. */
+function assemblePayload(
+  request: AnalyseRequest,
+  entry: RetainedTable,
+  computed: ComputedAnalysis,
+): AnalysisPayload {
+  const { loaded, filtered, statistics, gQuality } = computed
+  const { inner, drag } = sensorResults(request, loaded, filtered)
+  return {
     sourceSha256: request.sourceSha256,
     filename: request.filename,
     encoding: entry.encoding,
-    columnNames: [...table.columnNames],
-    detected: detectColumns(table),
+    columnNames: [...entry.table.columnNames],
+    detected: detectColumns(entry.table),
     mapping: request.mapping,
     inner,
     drag,
@@ -396,14 +486,73 @@ async function handleAnalyse(request: AnalyseRequest): Promise<void> {
     sampleCount: loaded.sampleCount,
     analysisTimestamp: new Date().toISOString(),
   }
+}
 
-  if (request.useCache) {
-    progress(request.requestId, 'caching', 97)
-    // Written before the transfer: after `postMessage` the buffers are detached
-    // and there is nothing left here to store.
-    await writeCache(cacheParts, request.filename, payload, approximateBytes(payload))
+/**
+ * Store a computed payload under the cache's quota budget.
+ *
+ * Runs before the result is transferred: after `postMessage` the payload's
+ * buffers are detached and there is nothing left here to store.
+ */
+async function writeResultToCache(
+  request: AnalyseRequest,
+  cacheParts: CacheKeyParts,
+  payload: AnalysisPayload,
+): Promise<void> {
+  if (!request.useCache) return
+  progress(request.requestId, 'caching', 97)
+  const payloadBytes = approximateBytes(payload)
+  const budget = await cacheBudgetBytes()
+  // A payload larger than the whole budget would evict every other entry to make room for a
+  // record it can never share the cache with — skip it rather than empty the store for nothing.
+  if (payloadBytes > budget) return
+  let stored = await writeCache(cacheParts, request.filename, payload, payloadBytes)
+  if (!stored) {
+    // The write failed under pressure, so the store is over budget even before
+    // this payload: evict to a budget that excludes it, then try once more.
+    await evictToBudget(Math.max(0, budget - payloadBytes))
+    stored = await writeCache(cacheParts, request.filename, payload, payloadBytes)
+  }
+  if (stored) {
+    // Whichever write landed, bring the store back under its real budget now rather than
+    // letting it sit over the cap until a later write happens to fail.
+    await evictToBudget(budget)
+  }
+  // Every await above yields to the event loop, where a queued `cancel` finally runs —
+  // check it before the result is posted, or a cancel during eviction still reports success.
+  throwIfCancelled(request.requestId)
+}
+
+async function handleAnalyse(request: AnalyseRequest): Promise<void> {
+  const entry = retained.get(request.sourceSha256)
+  if (entry === undefined) {
+    scope.postMessage({
+      type: 'error',
+      requestId: request.requestId,
+      code: 'SOURCE_NOT_RETAINED',
+      message: 'The parsed source is no longer held by the worker; reopen the file.',
+    } satisfies ErrorMessage)
+    return
+  }
+  // Map insertion order is the LRU order; reinsert so a table in active use is
+  // not evicted under a burst of opens for other datasets.
+  retain(request.sourceSha256, entry)
+
+  const cacheParts: CacheKeyParts = {
+    sourceSha256: request.sourceSha256,
+    configHash: await analysisIdentityHash(request.config, request.mapping),
+    engineVersion: ANALYSIS_ENGINE_VERSION,
   }
 
+  if (await respondFromCache(request, cacheParts)) return
+
+  const engineConfig = toEngineConfig(request.config, request.mapping)
+  const computed = await computeAnalysis(request, entry.table, engineConfig)
+  const payload = assemblePayload(request, entry, computed)
+
+  await writeResultToCache(request, cacheParts, payload)
+
+  throwIfCancelled(request.requestId)
   const message: AnalysedMessage = {
     type: 'analysed',
     requestId: request.requestId,
@@ -414,12 +563,29 @@ async function handleAnalyse(request: AnalyseRequest): Promise<void> {
 }
 
 function handleRelease(request: ReleaseRequest): void {
-  retained.delete(request.sourceSha256)
+  // Only an open still parsing earns a marker. For an already-evicted (or
+  // never-opened) source there is no open to consume one, and the marker would
+  // outlive its purpose — consumed by the source's *next* open, which would
+  // then skip retention and break the following analyse.
+  if (!retained.delete(request.sourceSha256) && opensInFlight.has(request.sourceSha256)) {
+    releasedBeforeOpen.add(request.sourceSha256)
+  }
   scope.postMessage({ type: 'released', requestId: request.requestId })
 }
 
 scope.addEventListener('message', (event: MessageEvent<AnalysisWorkerRequest>) => {
   const request = event.data
+  if (request.type === 'cancel') {
+    for (const requestId of request.requestIds) {
+      // A cancel for an id that already finished — its flag was cleared while its
+      // response was still in flight to the page — must not leave an entry that
+      // nothing will ever remove.
+      if (inFlight.has(requestId)) cancelled.add(requestId)
+    }
+    return
+  }
+
+  inFlight.add(request.requestId)
   const run = async (): Promise<void> => {
     switch (request.type) {
       case 'open':
@@ -430,5 +596,10 @@ scope.addEventListener('message', (event: MessageEvent<AnalysisWorkerRequest>) =
         return handleRelease(request)
     }
   }
-  run().catch((error: unknown) => reportError(request.requestId, error))
+  run()
+    .catch((error: unknown) => reportError(request.requestId, error))
+    .finally(() => {
+      inFlight.delete(request.requestId)
+      cancelled.delete(request.requestId)
+    })
 })

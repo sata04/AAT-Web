@@ -29,6 +29,7 @@ import { ApiError } from '@aat/shared'
 import { and, eq, gt, inArray, sql } from 'drizzle-orm'
 import { type Database, rowsAffected } from '../db/client.ts'
 import { posterFigures } from '../db/schema.ts'
+import { newId } from '../lib/ids.ts'
 import { getCircuitBreaker } from './flags.ts'
 
 /** Statuses shared with @aat/plot-spec's `PosterFigureStatus`, so one vocabulary spans the system. */
@@ -112,18 +113,47 @@ export async function assertRenderCapacity(
   }
 }
 
+export interface RenderClaimOptions {
+  /**
+   * Render slots. The claim refuses atomically while this many non-stale renders exist — the
+   * count check inside the UPDATE's WHERE is what makes the limit hold under concurrency,
+   * where an earlier assertRenderCapacity only makes the common case fail fast.
+   */
+  maxConcurrent: number
+  /** How old a render may be before it stops counting as live — the stale-claim threshold. */
+  staleSeconds: number
+  /**
+   * The spec about to be drawn. A retry may carry a different spec than the figure was inserted
+   * with, so the claim records it: `specHash` must always name the spec that produced the PNG.
+   */
+  spec?: { specHash: string; presetVersion: string }
+}
+
+/** Render slots still occupied — a self-subquery usable inside an UPDATE's WHERE clause. */
+function liveRenderCount(staleBeforeSeconds: number) {
+  return sql<number>`(select count(*) from ${posterFigures} where ${posterFigures.status} = 'rendering' and ${posterFigures.startedAt} > ${staleBeforeSeconds})`
+}
+
 /**
  * Move a figure into `rendering`, but only from a status it may legally leave.
  *
  * Conditional on the current status, so two requests that both read `queued` cannot both start a
- * render: one transitions, the other sees zero rows affected and backs off.
+ * render: one transitions, the other sees zero rows affected and backs off. The capacity clause
+ * rides inside the same UPDATE, so two requests that both saw a free slot cannot both claim the
+ * last one either.
  */
 export async function claimForRender(
   db: Database,
   posterId: string,
   fromStatuses: readonly PosterStatus[],
+  options: RenderClaimOptions,
   now: Date = new Date(),
-): Promise<boolean> {
+): Promise<string | null> {
+  const staleBefore = Math.floor((now.getTime() - options.staleSeconds * 1000) / 1000)
+  // The attempt token makes 'stale' a soft handoff rather than a duplicate ownership: a
+  // superseded attempt that eventually finishes cannot markRendered under the new token, so the
+  // row's specHash and PNG always come from the same attempt.
+  const attempt = newId()
   const result = await db
     .update(posterFigures)
     .set({
@@ -131,20 +161,31 @@ export async function claimForRender(
       startedAt: now,
       updatedAt: now,
       attemptCount: sql`${posterFigures.attemptCount} + 1`,
+      renderAttempt: attempt,
       errorCode: null,
+      ...(options.spec === undefined
+        ? {}
+        : { specHash: options.spec.specHash, presetVersion: options.spec.presetVersion }),
     })
-    .where(and(eq(posterFigures.id, posterId), inArray(posterFigures.status, [...fromStatuses])))
-  return rowsAffected(result) === 1
+    .where(
+      and(
+        eq(posterFigures.id, posterId),
+        inArray(posterFigures.status, [...fromStatuses]),
+        sql`${liveRenderCount(staleBefore)} < ${options.maxConcurrent}`,
+      ),
+    )
+  return rowsAffected(result) === 1 ? attempt : null
 }
 
 /** Reclaim a render that has been in `rendering` past the stale threshold. */
 export async function takeOverStaleRender(
   db: Database,
   posterId: string,
-  staleSeconds: number,
+  options: RenderClaimOptions,
   now: Date = new Date(),
-): Promise<boolean> {
-  const staleBefore = new Date(now.getTime() - staleSeconds * 1000)
+): Promise<string | null> {
+  const staleBefore = Math.floor((now.getTime() - options.staleSeconds * 1000) / 1000)
+  const attempt = newId()
   const result = await db
     .update(posterFigures)
     .set({
@@ -152,38 +193,54 @@ export async function takeOverStaleRender(
       startedAt: now,
       updatedAt: now,
       attemptCount: sql`${posterFigures.attemptCount} + 1`,
+      renderAttempt: attempt,
+      ...(options.spec === undefined
+        ? {}
+        : { specHash: options.spec.specHash, presetVersion: options.spec.presetVersion }),
     })
     .where(
       and(
         eq(posterFigures.id, posterId),
         eq(posterFigures.status, 'rendering'),
-        sql`${posterFigures.startedAt} <= ${Math.floor(staleBefore.getTime() / 1000)}`,
+        // The figure being reclaimed does not count itself: its own started_at is at or below
+        // the stale bound, and the capacity subquery counts only strictly-newer renders.
+        sql`${posterFigures.startedAt} <= ${staleBefore}`,
+        sql`${liveRenderCount(staleBefore)} < ${options.maxConcurrent}`,
       ),
     )
-  return rowsAffected(result) === 1
+  return rowsAffected(result) === 1 ? attempt : null
 }
 
+/**
+ * Publish a finished render — but only if `attempt` still owns the figure. A stale-render
+ * takeover hands the row to a new attempt while the old render can still be in flight; the token
+ * gate is what stops that old render from publishing its PNG under the new attempt's specHash.
+ * Returns whether the transition ran.
+ */
 export async function markRendered(
   db: Database,
   posterId: string,
   objectId: string,
   rendererVersion: string,
+  attempt: string,
   now: Date = new Date(),
-): Promise<void> {
-  await db
+): Promise<boolean> {
+  const result = await db
     .update(posterFigures)
     .set({ status: 'ready', objectId, rendererVersion, completedAt: now, updatedAt: now, errorCode: null })
-    .where(eq(posterFigures.id, posterId))
+    .where(and(eq(posterFigures.id, posterId), eq(posterFigures.renderAttempt, attempt)))
+  return rowsAffected(result) === 1
 }
 
 export async function markFailed(
   db: Database,
   posterId: string,
   errorCode: string,
+  attempt: string,
   now: Date = new Date(),
 ): Promise<void> {
   await db
     .update(posterFigures)
     .set({ status: 'failed', errorCode, completedAt: now, updatedAt: now })
-    .where(eq(posterFigures.id, posterId))
+    .where(and(eq(posterFigures.id, posterId), eq(posterFigures.renderAttempt, attempt)))
 }

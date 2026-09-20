@@ -120,6 +120,43 @@ app.all('/api/auth/*', async (context) => {
 
 const v1 = new Hono<AppEnv>()
 
+/**
+ * JSON bodies are buffered whole before a schema ever sees them, so a request whose declared
+ * size is already impossible — the largest legitimate body is a poster spec, a few hundred KB —
+ * is refused before a byte is paid for in isolate memory. The bound is on `Content-Length`.
+ * A body that arrives without one (chunked or HTTP/2 streaming) cannot be bounded by declaration
+ * at all, so on methods that carry a body it is refused rather than buffered blind — every real
+ * client sends a length, because none of them stream request bodies.
+ */
+const MAX_JSON_BODY_BYTES = 16 * 1024 * 1024
+const METHODS_WITH_BODY = new Set(['POST', 'PUT', 'PATCH'])
+
+/**
+ * The size the request declares, or NaN when it declares none.
+ *
+ * An absent or blank header is the lengthless case, not a zero-byte body — `Number('')` is 0,
+ * which would sail under the ceiling and buffer the very request the bound exists to refuse.
+ */
+function declaredBodyBytes(header: string | undefined): number {
+  const value = header?.trim()
+  return value === undefined || value === '' ? Number.NaN : Number(value)
+}
+
+/** Whether this request is one the JSON ceiling applies to. */
+function boundsJsonBody(method: string, contentType: string): boolean {
+  return METHODS_WITH_BODY.has(method) && contentType.includes('application/json')
+}
+
+v1.use('*', async (context, next) => {
+  if (boundsJsonBody(context.req.method, context.req.header('content-type') ?? '')) {
+    const declared = declaredBodyBytes(context.req.header('content-length'))
+    if (!Number.isFinite(declared) || declared > MAX_JSON_BODY_BYTES) {
+      throw new ApiError('REQUEST_TOO_LARGE', { details: { maxBytes: MAX_JSON_BODY_BYTES } })
+    }
+  }
+  await next()
+})
+
 v1.route('/me', meRoutes)
 v1.route('/runs', runRoutes)
 // There is no /projects. Runs are grouped by their tags — see worker/routes/runs.ts and

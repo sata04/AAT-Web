@@ -19,6 +19,7 @@
  *  - a spec that cannot be built sends nothing at all.
  */
 
+import { DEFAULT_ANALYSIS_CONFIG } from '@aat/shared'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { asFullResolution } from '../../src/analysis/series.ts'
 import type { Dataset, SensorDataset } from '../../src/app/dataset.ts'
@@ -99,6 +100,7 @@ function context(innerSamples = 1000): PosterContext {
     sampleCount: innerSamples,
     analysisTimestamp: '2026-08-11T00:00:00.000Z',
     fromCache: false,
+    config: DEFAULT_ANALYSIS_CONFIG,
   }
   return { revisionId: REVISION_ID, runCode: '260811a', dataset }
 }

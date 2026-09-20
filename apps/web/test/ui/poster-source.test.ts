@@ -16,6 +16,7 @@
  */
 
 import { decodeSeries, isPosterSpecError, MAX_POINTS, type PosterPlotSpec } from '@aat/plot-spec'
+import { DEFAULT_ANALYSIS_CONFIG } from '@aat/shared'
 import { describe, expect, it } from 'vitest'
 import { asFullResolution } from '../../src/analysis/series.ts'
 import type { Dataset, SensorDataset } from '../../src/app/dataset.ts'
@@ -99,6 +100,7 @@ function dataset(options: { drag?: boolean } = {}): Dataset {
     sampleCount: UNFILTERED_SECONDS * RATE_HZ,
     analysisTimestamp: '2026-01-01T00:00:00.000Z',
     fromCache: false,
+    config: DEFAULT_ANALYSIS_CONFIG,
   }
 }
 

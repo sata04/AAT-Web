@@ -225,18 +225,43 @@ export function requireObjectAccess(context: AppContext, ownerUserId: string, ac
 /* Resolvers                                                                                     */
 /* ------------------------------------------------------------------------------------------- */
 
-/** Resolve a live run the caller reaches at `access`, or report it as absent. */
-export async function requireRun(context: AppContext, runId: string, access: ResourceAccess) {
+/**
+ * Load a run row and confirm the caller reaches it at `access`.
+ *
+ * `includeTombstoned` exists for the delete path alone (see {@link requireRunForDelete});
+ * everywhere else a tombstoned run is indistinguishable from one that never existed.
+ */
+async function resolveRun(
+  context: AppContext,
+  runId: string,
+  access: ResourceAccess,
+  includeTombstoned: boolean,
+) {
   const db = context.get('db')
-  const [run] = await db
-    .select()
-    .from(runs)
-    .where(and(eq(runs.id, runId), isNull(runs.deletedAt)))
-    .limit(1)
+  const where = includeTombstoned ? eq(runs.id, runId) : and(eq(runs.id, runId), isNull(runs.deletedAt))
+  const [run] = await db.select().from(runs).where(where).limit(1)
   if (!run || !reachesResource(context.get('actor'), run.ownerUserId, access)) {
     throw new ApiError('RESOURCE_NOT_FOUND')
   }
   return run
+}
+
+/** Resolve a live run the caller reaches at `access`, or report it as absent. */
+export async function requireRun(context: AppContext, runId: string, access: ResourceAccess) {
+  return resolveRun(context, runId, access, false)
+}
+
+/**
+ * Resolve a run for `DELETE`, live or already tombstoned.
+ *
+ * Deletion has to be retryable: the route tombstones the run before walking its objects, so a
+ * failure partway through the walk leaves `requireRun` unable to see it at all — unreachable to
+ * its owner but still charged and still holding bytes. Admitting tombstoned rows here lets a
+ * retried delete resume the object walk (the per-object tombstones keep it idempotent) without
+ * opening the door anywhere else: uploads check `deleted_at` directly and still refuse.
+ */
+export async function requireRunForDelete(context: AppContext, runId: string) {
+  return resolveRun(context, runId, 'destroy', true)
 }
 
 /**

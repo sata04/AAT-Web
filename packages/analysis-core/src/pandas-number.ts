@@ -56,49 +56,51 @@ function isAsciiDigit(code: number): boolean {
   return code >= CHAR_ZERO && code <= CHAR_NINE
 }
 
-/**
- * Parse one cell the way pandas' C parser does.
- *
- * Returns `null` when pandas would *not* accept the text as a float — which is
- * how a column ends up as `object` dtype and how `pd.to_numeric(errors='coerce')`
- * decides to emit a missing value. `Infinity` is never returned from here; the
- * infinity spellings are handled by the caller, mirroring pandas, where they are
- * a fallback applied after the numeric conversion has failed.
- *
- * Known faithful quirks, reproduced deliberately:
- *   - only the first 17 significant digits are read, the rest shift the decimal
- *     exponent, so `0.00000000000000000001` converts to `0` exactly as pandas
- *     does with its default `float_precision`;
- *   - a decimal exponent above 308, or a scaled value that overflows to
- *     infinity, is reported as *not a number* rather than as `Infinity`,
- *     because the tokenizer sets `ERANGE` and the caller then rejects the cell.
- *
- * Deliberate, documented divergence: an all-integer column is `int64` in pandas
- * and converts to float in one correctly-rounded step, whereas this converter
- * accumulates digit by digit. The two agree for every integer below 2^53, which
- * covers any physically meaningful sample; they can differ only for integer
- * literals of 16+ digits.
- */
-export function parsePandasFloat(text: string): number | null {
-  const length = text.length
-  let position = 0
-
+/** Advance past one run of tokenizer whitespace. */
+function skipAsciiSpace(text: string, position: number, length: number): number {
   while (position < length && isAsciiSpace(text.charCodeAt(position))) position++
+  return position
+}
 
-  let negative = false
+/** Advance past a run of digits that are no longer accumulated. */
+function skipAsciiDigits(text: string, position: number, length: number): number {
+  while (position < length && isAsciiDigit(text.charCodeAt(position))) position++
+  return position
+}
+
+interface Sign {
+  negative: boolean
+  position: number
+}
+
+/** The leading `+`/`-`, if one is present. */
+function scanSign(text: string, position: number, length: number): Sign {
   const signCode = position < length ? text.charCodeAt(position) : 0
-  if (signCode === CHAR_MINUS) {
-    negative = true
-    position++
-  } else if (signCode === CHAR_PLUS) {
-    position++
-  }
+  if (signCode === CHAR_MINUS) return { negative: true, position: position + 1 }
+  if (signCode === CHAR_PLUS) return { negative: false, position: position + 1 }
+  return { negative: false, position }
+}
 
+interface Mantissa {
+  /** The accumulated significant digits. */
+  number: number
+  /** Significant digits read; zero means the cell was not a number at all. */
+  digits: number
+  /** The decimal exponent implied by excess integer digits and the fraction length. */
+  exponent: number
+  position: number
+}
+
+/**
+ * The digits left of the decimal point.
+ *
+ * Only the first `max_digits` significant digits are accumulated; every later
+ * integer digit instead shifts the decimal exponent.
+ */
+function scanIntegerDigits(text: string, position: number, length: number): Mantissa {
   let number = 0
-  let exponent = 0
   let digits = 0
-  let decimals = 0
-
+  let exponent = 0
   while (position < length && isAsciiDigit(text.charCodeAt(position))) {
     if (digits < MAX_DIGITS) {
       number = number * 10 + (text.charCodeAt(position) - CHAR_ZERO)
@@ -109,74 +111,136 @@ export function parsePandasFloat(text: string): number | null {
     }
     position++
   }
+  return { number, digits, exponent, position }
+}
 
-  if (position < length && text.charCodeAt(position) === CHAR_DOT) {
-    position++
-    while (position < length && digits < MAX_DIGITS && isAsciiDigit(text.charCodeAt(position))) {
-      number = number * 10 + (text.charCodeAt(position) - CHAR_ZERO)
-      position++
-      digits++
-      decimals++
-    }
+/**
+ * The optional `.digits` part. Fraction digits accumulate only while the
+ * significand has room; the rest are skipped, and the exponent pays for the
+ * digits that were kept.
+ */
+function scanFraction(text: string, length: number, mantissa: Mantissa): Mantissa {
+  let position = mantissa.position
+  if (position >= length || text.charCodeAt(position) !== CHAR_DOT) return mantissa
+  position++
+
+  let { number, digits } = mantissa
+  let decimals = 0
+  while (position < length && isAsciiDigit(text.charCodeAt(position))) {
+    // The significand is full — the rest of the fraction only moves the
+    // decimal point, so skip it and report the kept digits.
     if (digits >= MAX_DIGITS) {
-      while (position < length && isAsciiDigit(text.charCodeAt(position))) position++
+      position = skipAsciiDigits(text, position, length)
+      return { number, digits, exponent: mantissa.exponent - decimals, position }
     }
-    exponent -= decimals
-  }
-
-  if (digits === 0) return null
-
-  if (negative) number = -number
-
-  const exponentMarker = position < length ? text.charCodeAt(position) : 0
-  if (exponentMarker === CHAR_LOWER_E || exponentMarker === CHAR_UPPER_E) {
-    const markerPosition = position
+    number = number * 10 + (text.charCodeAt(position) - CHAR_ZERO)
     position++
-    let negativeExponent = false
-    const exponentSign = position < length ? text.charCodeAt(position) : 0
-    if (exponentSign === CHAR_MINUS) {
-      negativeExponent = true
-      position++
-    } else if (exponentSign === CHAR_PLUS) {
-      position++
-    }
-    let exponentDigits = 0
-    let exponentValue = 0
-    while (position < length && isAsciiDigit(text.charCodeAt(position))) {
-      exponentValue = exponentValue * 10 + (text.charCodeAt(position) - CHAR_ZERO)
-      exponentDigits++
-      position++
-    }
-    exponent += negativeExponent ? -exponentValue : exponentValue
-    // "1e" with no digits: the tokenizer un-consumes the marker, which leaves
-    // trailing text behind and makes the whole cell non-numeric.
-    if (exponentDigits === 0) position = markerPosition
+    digits++
+    decimals++
   }
+
+  return { number, digits, exponent: mantissa.exponent - decimals, position }
+}
+
+interface ExplicitExponent {
+  /** The signed value the `e` part contributes, or 0 when absent or empty. */
+  value: number
+  position: number
+}
+
+/** The optional `[eE][+-]?digits` tail. */
+function scanExplicitExponent(text: string, position: number, length: number): ExplicitExponent {
+  const marker = position < length ? text.charCodeAt(position) : 0
+  if (marker !== CHAR_LOWER_E && marker !== CHAR_UPPER_E) return { value: 0, position }
+
+  const markerPosition = position
+  const sign = scanSign(text, position + 1, length)
+  position = sign.position
+
+  let digits = 0
+  let value = 0
+  while (position < length && isAsciiDigit(text.charCodeAt(position))) {
+    value = value * 10 + (text.charCodeAt(position) - CHAR_ZERO)
+    digits++
+    position++
+  }
+
+  // "1e" with no digits: the tokenizer un-consumes the marker, which leaves
+  // trailing text behind and makes the whole cell non-numeric.
+  if (digits === 0) return { value: 0, position: markerPosition }
+  return { value: sign.negative ? -value : value, position }
+}
+
+/**
+ * Apply the decimal exponent by scaling with the `e[]` table.
+ *
+ * A decimal exponent above 308 does not set `ERANGE`: the tokenizer emits
+ * `number == 0 ? 0 : number < 0 ? -HUGE_VAL : HUGE_VAL`, and the caller
+ * accepts the infinity. `0e999` is therefore a real `0` — a sample pandas
+ * would count, and one this port must not silently turn into a gap. In the
+ * subnormal range the tokenizer scales in two steps to stay in range.
+ */
+function scaleByPowerOfTen(number: number, exponent: number): number {
+  if (exponent > 308) {
+    // Overflow: a signed zero stays a real zero; a nonzero mantissa becomes ±Infinity.
+    return number === 0 ? 0 : number < 0 ? Number.NEGATIVE_INFINITY : Number.POSITIVE_INFINITY
+  }
+  if (exponent > 0) return number * (POWERS_OF_TEN[exponent] as number)
+  if (exponent < -308) {
+    if (exponent < -616) return 0
+    return number / (POWERS_OF_TEN[-308 - exponent] as number) / (POWERS_OF_TEN[308] as number)
+  }
+  return number / (POWERS_OF_TEN[-exponent] as number)
+}
+
+/**
+ * Parse one cell the way pandas' C parser does.
+ *
+ * Returns `null` when pandas would *not* accept the text as a float — which is
+ * how a column ends up as `object` dtype and how `pd.to_numeric(errors='coerce')`
+ * decides to emit a missing value. Overflowing magnitudes return ±Infinity, and
+ * the `inf` spellings are handled by the caller, mirroring pandas, where they
+ * are a fallback applied after the numeric conversion has failed.
+ *
+ * Known faithful quirks, reproduced deliberately:
+ *   - only the first 17 significant digits are read, the rest shift the decimal
+ *     exponent, so `0.00000000000000000001` converts to `0` exactly as pandas
+ *     does with its default `float_precision`;
+ *   - a decimal exponent above 308 does not set `ERANGE`: the tokenizer emits
+ *     `number == 0 ? 0 : number < 0 ? -HUGE_VAL : HUGE_VAL`, and the caller
+ *     accepts the infinity. `0e999` is therefore a real `0` — a sample pandas
+ *     would count, and one this port must not silently turn into a gap.
+ *
+ * Deliberate, documented divergence: an all-integer column is `int64` in pandas
+ * and converts to float in one correctly-rounded step, whereas this converter
+ * accumulates digit by digit. The two agree for every integer below 2^53, which
+ * covers any physically meaningful sample; they can differ only for integer
+ * literals of 16+ digits.
+ */
+export function parsePandasFloat(text: string): number | null {
+  const length = text.length
+  let position = skipAsciiSpace(text, 0, length)
+
+  const sign = scanSign(text, position, length)
+  position = sign.position
+
+  const mantissa = scanFraction(text, length, scanIntegerDigits(text, position, length))
+  position = mantissa.position
+  if (mantissa.digits === 0) return null
+
+  const number = sign.negative ? -mantissa.number : mantissa.number
+
+  const sci = scanExplicitExponent(text, position, length)
+  position = sci.position
 
   // `skip_trailing = 1`: trailing whitespace is allowed, anything else is not.
-  while (position < length && isAsciiSpace(text.charCodeAt(position))) position++
+  position = skipAsciiSpace(text, position, length)
   if (position !== length) return null
 
-  if (exponent > 308) return null
-  if (exponent > 0) {
-    number *= POWERS_OF_TEN[exponent] as number
-  } else if (exponent < -308) {
-    // Subnormal range: the tokenizer scales in two steps to stay in range.
-    if (exponent < -616) {
-      number = 0
-    } else {
-      number /= POWERS_OF_TEN[-308 - exponent] as number
-      number /= POWERS_OF_TEN[308] as number
-    }
-  } else {
-    number /= POWERS_OF_TEN[-exponent] as number
-  }
-
-  // The tokenizer flags an overflowed result as ERANGE, and the caller then
-  // treats the cell as non-numeric rather than as an infinity.
-  if (!Number.isFinite(number)) return null
-
-  return number
+  // The scaled value itself is returned unchecked: `1.7e310` overflows at the
+  // multiply and pandas accepts the resulting Infinity, just as it accepts the
+  // `inf` spellings the caller handles separately.
+  return scaleByPowerOfTen(number, mantissa.exponent + sci.value)
 }
 
 /**
@@ -217,13 +281,18 @@ export function isMissingToken(text: string): boolean {
  * the numeric conversion has failed (`cinf` / `cposinf` / `cneginf` and the
  * `Infinity` forms in `pandas/_libs/parsers.pyx`).
  */
-function parseInfinityToken(text: string): number | null {
+const INFINITY_TOKENS: ReadonlyMap<string, number> = new Map([
+  ['inf', Number.POSITIVE_INFINITY],
+  ['+inf', Number.POSITIVE_INFINITY],
+  ['infinity', Number.POSITIVE_INFINITY],
+  ['+infinity', Number.POSITIVE_INFINITY],
+  ['-inf', Number.NEGATIVE_INFINITY],
+  ['-infinity', Number.NEGATIVE_INFINITY],
+])
+
+export function parseInfinityToken(text: string): number | null {
   // `strcasecmp` against the whole cell — no trimming, exactly as pandas does it.
-  const normalised = text.toLowerCase()
-  if (normalised === 'inf' || normalised === '+inf') return Number.POSITIVE_INFINITY
-  if (normalised === 'infinity' || normalised === '+infinity') return Number.POSITIVE_INFINITY
-  if (normalised === '-inf' || normalised === '-infinity') return Number.NEGATIVE_INFINITY
-  return null
+  return INFINITY_TOKENS.get(text.toLowerCase()) ?? null
 }
 
 /** How pandas classified one raw cell. */

@@ -20,6 +20,7 @@ export const ERROR_CODES = [
   'RESOURCE_NOT_FOUND',
   'QUOTA_EXCEEDED',
   'SOURCE_TOO_LARGE',
+  'REQUEST_TOO_LARGE',
   'SNAPSHOT_INVALID',
   'POSTER_BUSY',
   'POSTER_RENDER_FAILED',
@@ -83,6 +84,13 @@ const ERROR_SPECS: Record<ErrorCode, ErrorSpec> = {
     message: {
       ja: 'CSVファイルのサイズが上限を超えています。',
       en: 'The source CSV file exceeds the size limit.',
+    },
+  },
+  REQUEST_TOO_LARGE: {
+    httpStatus: 413,
+    message: {
+      ja: 'リクエストのサイズが上限を超えています。',
+      en: 'The request body exceeds the size limit.',
     },
   },
   SNAPSHOT_INVALID: {

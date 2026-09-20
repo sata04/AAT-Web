@@ -80,6 +80,7 @@ function dataset(filename = '260811a_data.csv'): Dataset {
     sampleCount: 4,
     analysisTimestamp: '2026-08-11T00:00:00.000Z',
     fromCache: false,
+    config: DEFAULT_ANALYSIS_CONFIG,
   }
 }
 

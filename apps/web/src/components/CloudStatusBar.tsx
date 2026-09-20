@@ -15,12 +15,21 @@ import {
   analysisLabel,
   type CloudStatuses,
   posterLabel,
+  retryableLanes,
   type StatusLabel,
   syncLabel,
 } from '../cloud/status.ts'
 
 export interface CloudStatusBarProps {
   statuses: CloudStatuses
+  /**
+   * The file the cloud and poster lanes are talking about. The lanes are
+   * global, not per-dataset, so when this is not the active file the subject
+   * is named explicitly rather than letting a status look like it belongs to
+   * the file on screen.
+   */
+  cloudSubject: string | null
+  activeName: string | null
   onRetrySync: () => void
   onRetryPoster: () => void
 }
@@ -45,6 +54,11 @@ export function CloudStatusBar(props: CloudStatusBarProps): React.JSX.Element {
         : statuses.poster.kind === 'failed'
           ? statuses.poster.message
           : null
+  // Name the file the cloud lanes describe when it is not the one on screen —
+  // a "saved" for dataset A must not read as if B were synced.
+  const remoteSubject =
+    props.cloudSubject !== null && props.cloudSubject !== props.activeName ? ` (${props.cloudSubject})` : ''
+  const retryable = retryableLanes(statuses)
 
   return (
     <footer className="status-bar">
@@ -53,15 +67,15 @@ export function CloudStatusBar(props: CloudStatusBarProps): React.JSX.Element {
       <div className="status-lane" role="status" aria-live="polite">
         <Lane name="解析" label={analysisLabel(statuses.analysis)} />
       </div>
-      <Lane name="クラウド同期" label={syncLabel(statuses.sync)} />
-      <Lane name="ポスター図" label={posterLabel(statuses.poster)} />
+      <Lane name={`クラウド同期${remoteSubject}`} label={syncLabel(statuses.sync)} />
+      <Lane name={`ポスター図${remoteSubject}`} label={posterLabel(statuses.poster)} />
 
-      {statuses.sync.kind === 'failed' && statuses.sync.retryable ? (
+      {retryable.includes('sync') ? (
         <button type="button" className="button button--flat" onClick={props.onRetrySync}>
           同期を再試行
         </button>
       ) : null}
-      {statuses.poster.kind === 'failed' && statuses.poster.retryable ? (
+      {retryable.includes('poster') ? (
         <button type="button" className="button button--flat" onClick={props.onRetryPoster}>
           ポスターを再試行
         </button>

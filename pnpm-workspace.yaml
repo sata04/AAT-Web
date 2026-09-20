@@ -59,3 +59,9 @@ overrides:
   # Pinned to the exact fixed version: miniflare pins an exact undici version
   # itself (no range), and undici 8 is a breaking major.
   undici@<7.29.0: "7.29.0"
+  # GHSA-rgj7-g3m4-5g8c (high): libheif vulnerabilities shipped in sharp's
+  # prebuilt binaries, exploitable when decoding untrusted AVIF/HEIF input.
+  # Reached through miniflare (wrangler / @cloudflare/vite-plugin /
+  # @cloudflare/vitest-pool-workers dev tooling); sharp is not in the deployed
+  # Worker bundle. 0.35.4 vendors libheif 1.23.2 with the fixes.
+  sharp@<0.35.4: "0.35.4"

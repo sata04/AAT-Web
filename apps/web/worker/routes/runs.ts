@@ -28,14 +28,19 @@ import { ApiError, parseRunFilename } from '@aat/shared'
 import { and, asc, desc, eq, gte, inArray, isNull, like, lt, lte, or, type SQL, sql } from 'drizzle-orm'
 import { Hono } from 'hono'
 import { z } from 'zod'
-import { rowsAffected } from '../db/client.ts'
 import { analysisRevisions, cloudObjects, posterFigures, runs, runTags, user } from '../db/schema.ts'
 import { newId } from '../lib/ids.ts'
 import type { AppEnv } from '../middleware/authorize.ts'
-import { requireCapability, requireRun, requireSession, withDatabase } from '../middleware/authorize.ts'
+import {
+  requireCapability,
+  requireRun,
+  requireRunForDelete,
+  requireSession,
+  withDatabase,
+} from '../middleware/authorize.ts'
 import { validate } from '../middleware/validate.ts'
 import { writeAuditLog } from '../services/audit.ts'
-import { releaseUsage } from '../services/quota.ts'
+import { releaseObjectAccounting } from '../services/quota.ts'
 
 export const runRoutes = new Hono<AppEnv>()
 
@@ -380,8 +385,20 @@ runRoutes.delete('/:runId', requireCapability('analysis:delete'), async (context
   // `destroy`, which no Researcher holds for another member's run: deleting a colleague's
   // experiment removes bytes nobody can recompute, and it is the one action in this file that is
   // not reversible by re-running the request differently.
-  const run = await requireRun(context, context.req.param('runId'), 'destroy')
+  // Tombstoned runs resolve too: a delete that failed partway through must be retryable, and the
+  // per-object tombstones below keep the walk idempotent. Everywhere else a deleted run is absent.
+  const run = await requireRunForDelete(context, context.req.param('runId'))
   const now = new Date()
+
+  // Tombstone the run BEFORE walking its objects: `deleted_at` is the admission gate. Every
+  // upload path re-checks it after inserting its object row (see commitUploadedObject), so a
+  // tombstone that lands first guarantees a commit that races this delete either unwinds itself
+  // or is visible to the walk below — it cannot land under a dead run unnoticed. The conditional
+  // keeps a retried delete from rewriting the original timestamp.
+  await db
+    .update(runs)
+    .set({ deletedAt: now, updatedAt: now })
+    .where(and(eq(runs.id, run.id), isNull(runs.deletedAt)))
 
   // Delete the bytes first and correct the quota as each object goes, so a failure partway through
   // leaves the account charged for objects that still exist rather than for objects that do not.
@@ -391,30 +408,32 @@ runRoutes.delete('/:runId', requireCapability('analysis:delete'), async (context
     .where(and(eq(cloudObjects.runId, run.id), isNull(cloudObjects.deletedAt)))
 
   /*
-   * The quota release is gated on winning the tombstone, not on having read the row.
+   * The quota settlement runs *before* the tombstone, which inverts an earlier version of this
+   * loop deliberately.
    *
-   * `requireRun` and this loop are several statements apart, so two concurrent deletes of the same
-   * run can both pass the ownership check and both walk the same object list. An unconditional
-   * decrement would then release the same bytes twice, drifting the account's usage below what it
-   * actually stores — and quota is enforced against that number, so the drift is free storage.
+   * Every settlement write in `releaseObjectAccounting` is self-claiming and once-only (the
+   * reservation's `claim_token` / the object's `settled_claim` make a second call a no-op), so a
+   * delete that dies between settlement and tombstone still converges on retry: the settlement
+   * replays as nothing and the tombstone lands. The old order — tombstone, then release — made a
+   * release failure permanent: a retried walk only sees live rows and the tombstoned object's
+   * bytes stayed charged forever.
    *
-   * `AND deleted_at IS NULL` in the UPDATE makes the tombstone the claim: exactly one caller sees
-   * a row affected, and only that caller releases. This is the same shape as every other race in
-   * this codebase — the invitation claim, the quota reservation, the poster render claim — a
-   * conditional UPDATE whose WHERE clause carries the entire precondition.
+   * Concurrent deletes are likewise safe without ordering: each object's settlement is claimed
+   * by exactly one caller regardless of which one wins the tombstone that drives the count below.
    *
-   * The R2 delete stays unconditional and outside the claim, because it is idempotent and because
+   * The R2 delete stays unconditional and outside both claims, because it is idempotent and
    * deleting bytes twice is harmless where releasing them twice is not.
    */
   for (const object of objects) {
     await context.env.AAT_OBJECTS.delete(object.r2Key)
-    const claimed = await db
+    // The object may still be mid-upload — its reservation pending, its usage never charged.
+    // releaseObjectAccounting releases whichever side of the ledger the bytes are on.
+    await releaseObjectAccounting(db, object, now)
+    // Still conditional: a concurrent delete must not stamp its own timestamp over the first.
+    await db
       .update(cloudObjects)
       .set({ deletedAt: now })
       .where(and(eq(cloudObjects.id, object.id), isNull(cloudObjects.deletedAt)))
-    if (rowsAffected(claimed) === 1) {
-      await releaseUsage(db, object.ownerUserId, object.byteSize, now)
-    }
   }
 
   const revisionIds = await db
@@ -429,8 +448,6 @@ runRoutes.delete('/:runId', requireCapability('analysis:delete'), async (context
       ),
     )
   }
-
-  await db.update(runs).set({ deletedAt: now, updatedAt: now }).where(eq(runs.id, run.id))
 
   await writeAuditLog(db, {
     actorUserId: actor.userId,

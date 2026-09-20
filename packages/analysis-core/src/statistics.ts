@@ -18,7 +18,12 @@
  * The threshold and the failure are documented in docs/numerical-compatibility.md.
  */
 
+import { AnalysisParameterError, AnalysisSizeError } from './errors.ts'
 import { absoluteMean, mean, nanArgMin, standardDeviation, sumTransformed } from './numeric.ts'
+
+// The classes live in `errors.ts` so they carry the declared wire codes;
+// re-exported here so existing `statistics.ts` import sites keep working.
+export { AnalysisParameterError, AnalysisSizeError }
 
 /** `_EXACT_ELEMENT_BUDGET` in `core/statistics.py`. */
 export const EXACT_ELEMENT_BUDGET = 20_000_000
@@ -40,23 +45,6 @@ export interface WindowStatistics {
 }
 
 export const EMPTY_WINDOW_STATISTICS: WindowStatistics = { mean: null, startTime: null, std: null }
-
-export class AnalysisParameterError extends Error {
-  constructor(
-    message: string,
-    readonly parameter: string,
-  ) {
-    super(message)
-    this.name = 'AnalysisParameterError'
-  }
-}
-
-export class AnalysisSizeError extends Error {
-  constructor(message: string) {
-    super(message)
-    this.name = 'AnalysisSizeError'
-  }
-}
 
 /**
  * `_positive_float` — reject non-positive or non-finite analysis parameters.

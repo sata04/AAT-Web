@@ -12,7 +12,7 @@ import { type DetectedColumns, detectColumns } from './columns.ts'
 import type { AnalysisConfig } from './config.ts'
 import { type CsvTable, parseCsvText } from './csv.ts'
 import { type CsvEncoding, decodeCsv } from './decode.ts'
-import { calculateGQuality, type GQualityProgress, type GQualityResult } from './gquality.ts'
+import { calculateGQuality, type GQualityOptions, type GQualityResult } from './gquality.ts'
 import { type FilterResult, filterData, type LoadedData, loadAndProcessData } from './pipeline.ts'
 import { calculateStatistics, EMPTY_WINDOW_STATISTICS, type WindowStatistics } from './statistics.ts'
 import type { AnalysisWarning } from './warnings.ts'
@@ -35,15 +35,16 @@ export interface AnalysisResult {
 export interface AnalyseOptions {
   /** Skip the (much slower) G-quality sweep. */
   skipGQuality?: boolean
-  onGQualityProgress?: (progress: GQualityProgress) => void
+  /** Progress and cancellation hooks, passed through to the sweep. */
+  gQuality?: GQualityOptions
 }
 
 /** Run the full pipeline over raw CSV bytes. */
-export function analyseCsv(
+export async function analyseCsv(
   bytes: Uint8Array,
   config: AnalysisConfig,
   options: AnalyseOptions = {},
-): AnalysisResult {
+): Promise<AnalysisResult> {
   const { text, encoding } = decodeCsv(bytes)
   const table = parseCsvText(text)
   const detectedColumns = detectColumns(table)
@@ -64,7 +65,7 @@ export function analyseCsv(
 
   const gQuality = options.skipGQuality
     ? { rows: [], warnings: [] }
-    : calculateGQuality(filtered, config, options.onGQualityProgress)
+    : await calculateGQuality(filtered, config, options.gQuality)
 
   return {
     encoding,

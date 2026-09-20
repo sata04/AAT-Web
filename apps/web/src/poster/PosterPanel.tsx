@@ -45,6 +45,8 @@ export interface PosterPanelProps {
   /** Custom figures created in this session, newest first. History lives on the server too. */
   customPosters: readonly PosterFigure[]
   onCustomCreated: (poster: PosterFigure) => void
+  /** A custom render that failed after its dialog was closed — routed to the notice stack. */
+  onCustomFailed?: ((message: string) => void) | undefined
 }
 
 export function PosterPanel(props: PosterPanelProps): React.JSX.Element {
@@ -144,6 +146,7 @@ export function PosterPanel(props: PosterPanelProps): React.JSX.Element {
           yRange={props.yRange}
           onClose={() => setDialogOpen(false)}
           onCreated={props.onCustomCreated}
+          onFailed={props.onCustomFailed}
         />
       ) : null}
     </section>

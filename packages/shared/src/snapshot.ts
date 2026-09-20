@@ -143,6 +143,20 @@ const DetectedColumnsSchema = z.object({
 })
 
 /**
+ * The column assignment the analysis actually used. `detectedColumns` lists names the file
+ * advertised; this is the choice the analyzer made among them — the five fields
+ * `columnMappingHash` hashes, in the same shape. Optional so snapshots written before the field
+ * existed still decode; a cloud upload to a revision that carries a `mappingHash` requires it.
+ */
+const ColumnMappingSchema = z.object({
+  timeColumn: z.string(),
+  innerColumn: z.string(),
+  dragColumn: z.string(),
+  useInner: z.boolean(),
+  useDrag: z.boolean(),
+})
+
+/**
  * Every full-resolution series needed to redraw the graph, recompute range statistics over any
  * user-selected span, and rebuild the Excel export's "Data" and "Acceleration Data" sheets.
  * Present (possibly zero-length) even for a sensor the run didn't use, so downstream code never
@@ -186,6 +200,7 @@ export const AnalysisSnapshotSchema = z.object({
   /** `configHash(config)` at analysis time — a cheap way to notice a config/snapshot mismatch. */
   configHash: z.string().regex(/^[0-9a-f]{64}$/),
   detectedColumns: DetectedColumnsSchema,
+  columnMapping: ColumnMappingSchema.optional(),
   sync: SyncMetadataSchema,
   filter: FilterMetadataSchema,
   /** User-facing warnings produced during analysis (e.g. a sensor's sync point used a fallback). */
