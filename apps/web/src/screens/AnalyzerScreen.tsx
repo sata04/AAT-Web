@@ -582,7 +582,14 @@ function TourLoadingScrim(props: { onSkip: () => void }): React.JSX.Element {
   // scrim holds no tabbable child; the shared trap now owns Tab even then.
   useTopmostDialogKeys(ref, props.onSkip)
   useEffect(() => {
+    // Same focus contract as Dialog: remember what had focus, and hand it
+    // back on unmount — whether the unmount is a skip or the loaded stage
+    // replacing the scrim (the stage then captures the restored element).
+    const previous = document.activeElement
     ref.current?.focus()
+    return () => {
+      if (previous instanceof HTMLElement && previous.isConnected) previous.focus()
+    }
   }, [])
   return (
     <div
