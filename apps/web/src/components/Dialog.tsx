@@ -120,7 +120,8 @@ function keepTabInsideDialog(panel: HTMLElement, event: KeyboardEvent): void {
   // Wrap at the edges; if focus already escaped the modal, pull it back to
   // the first control rather than letting Tab continue the inert page.
   const target =
-    wrapTarget(focusable, active, event.shiftKey) ?? (escapedDialog(panel, active) ? focusable[0] : null)
+    wrapTarget(focusable, active, event.shiftKey) ??
+    (escapedDialog(panel, active) ? (focusable[0] as HTMLElement) : null)
   if (target === null) return
   event.preventDefault()
   target.focus()
