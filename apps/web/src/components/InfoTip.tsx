@@ -65,6 +65,12 @@ export function InfoTip(props: InfoTipProps): React.JSX.Element {
             setOpen(false)
           }
         }}
+        // Escape leaves DOM focus on the trigger but clears `focused`, so a
+        // click or Enter is the only way back — treat activation as open.
+        onClick={() => {
+          focused.current = true
+          setOpen(true)
+        }}
       >
         ?
       </button>

@@ -259,7 +259,7 @@ export function AnalyzerScreen(): React.JSX.Element {
   // exists to point at. The graph hint also waits for normal mode — its lead
   // claim is that dragging selects a range, which other modes turn off.
   const hint: AnalyzerHint | null = (() => {
-    if (welcomeOpen || helpOpen || !analysisReady) return null
+    if (welcomeOpen || helpOpen || !analysisReady || datasets.length === 0) return null
     if (!onboarding.graphHintSeen && derived.selectionEnabled) return 'graph'
     if (datasets.length >= 2 && !onboarding.compareHintSeen) return 'compare'
     if (derived.selectionEnabled && selection === null && !onboarding.rangeHintSeen) return 'range'

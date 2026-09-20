@@ -93,7 +93,7 @@ test.describe('onboarding', () => {
 })
 
 test.describe('onboarding — reduced motion', () => {
-  test.use({ onboardingComplete: false, reducedMotion: 'reduce' })
+  test.use({ onboardingComplete: false, contextOptions: { reducedMotion: 'reduce' } })
 
   test('the welcome and quick start render and dismiss normally', async ({ page }) => {
     await page.goto('/')
