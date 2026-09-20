@@ -126,13 +126,30 @@ describe('parseCsvText', () => {
     expect(table.column('a.2')?.cells).toEqual(['3'])
   })
 
-  it('mangles a duplicate that collides with a generated name, as dedup_names does', () => {
-    // pandas counts occurrences of the *original* name and keeps suffixing when
-    // the generated name itself is taken: the third column is a.1.1, not a.2.
+  it('skips a candidate that collides with a literal header, like pandas', () => {
+    // pandas' header pass (`python_parser._infer_columns`) checks each generated
+    // candidate against the whole header row, so the literal `a.1` at index 1
+    // takes the first candidate and the repeat becomes a.2, not a.1.1.
     const table = parseCsvText('a,a.1,a\n1,2,3\n')
-    expect(table.columnNames).toEqual(['a', 'a.1', 'a.1.1'])
+    expect(table.columnNames).toEqual(['a', 'a.1', 'a.2'])
     expect(table.column('a.1')?.cells).toEqual(['2'])
-    expect(table.column('a.1.1')?.cells).toEqual(['3'])
+    expect(table.column('a.2')?.cells).toEqual(['3'])
+  })
+
+  it('reserves literal header names ahead of the duplicate being renamed', () => {
+    // `a.1` exists later in the row, so the second `a` skips straight to a.2.
+    expect(parseCsvText('a,a,a.1\n1,2,3\n').columnNames).toEqual(['a', 'a.2', 'a.1'])
+    // …but a name only produced by an earlier rename does not reserve itself:
+    // the second `a.1` becomes a.1.1 and the second `a` then skips a.1 → a.2.
+    expect(parseCsvText('a,a.1,a.1,a\n1,2,3,4\n').columnNames).toEqual(['a', 'a.1', 'a.1.1', 'a.2'])
+    expect(parseCsvText('x,x.1,x,x.1\n1,2,3,4\n').columnNames).toEqual(['x', 'x.1', 'x.2', 'x.1.1'])
+  })
+
+  it('names blank header cells Unnamed: {position}, like pandas', () => {
+    expect(parseCsvText('a,,b\n1,2,3\n').columnNames).toEqual(['a', 'Unnamed: 1', 'b'])
+    expect(parseCsvText(',a,\n1,2,3\n').columnNames).toEqual(['Unnamed: 0', 'a', 'Unnamed: 2'])
+    // A literal Unnamed name wins: the blank cell is mangled, not the literal.
+    expect(parseCsvText('Unnamed: 1,\n1,2\n').columnNames).toEqual(['Unnamed: 1', 'Unnamed: 1.1'])
   })
 
   it('skips blank lines and pads short rows', () => {

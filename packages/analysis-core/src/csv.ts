@@ -52,27 +52,55 @@ export class CsvTable {
 }
 
 /**
- * `mangle_dupe_cols` via `parsers.pyx::dedup_names`: the first copy keeps the
- * name, later copies become `.1`, `.2`, … counting occurrences *of the original
- * name*, and a generated name that itself collides keeps suffixing —
- * `a, a.1, a` becomes `a, a.1, a.1.1`, not `a.2`.
+ * `mangle_dupe_cols`, ported from the header-dedup loop pandas actually runs
+ * (`python_parser._infer_columns`, shared by the C and Python engines — not the
+ * near-identical `io.common.dedup_names`, which lacks the lookahead). The first
+ * copy keeps the name and each repeat becomes `name.<k>` counting occurrences of
+ * the *original* name; a candidate that already appears in the header row —
+ * whether at a not-yet-processed position or as a name produced by an earlier
+ * rename — is skipped rather than suffixed further. That is why `a, a.1, a`
+ * becomes `a, a.1, a.2`, not `a.1.1` (the literal `a.1` occupies the first
+ * candidate).
+ *
+ * Blank header cells are renamed `Unnamed: {position}` and mangled only after
+ * every named column, so a real column name is never displaced by a blank cell.
  *
  * Without this a duplicated header would silently shadow the earlier column, and
  * a configuration naming that column would analyse the wrong data.
  */
 function deduplicateHeader(header: readonly string[]): string[] {
+  const names = header.map((name, index) => (name === '' ? `Unnamed: ${index}` : name))
+  // The names each position currently holds — the `col in this_columns`
+  // membership check, which sees unprocessed originals and earlier renames.
+  const present = new Map<string, number>()
+  for (const name of names) present.set(name, (present.get(name) ?? 0) + 1)
   const counts = new Map<string, number>()
-  return header.map((original) => {
+  const namedFirst = names
+    .map((_, index) => index)
+    .filter((index) => header[index] !== '')
+    .concat(names.map((_, index) => index).filter((index) => header[index] === ''))
+  for (const index of namedFirst) {
+    const original = names[index] as string
     let name = original
     let seen = counts.get(name) ?? 0
     while (seen > 0) {
-      counts.set(name, seen + 1)
-      name = `${name}.${seen}`
-      seen = counts.get(name) ?? 0
+      counts.set(original, seen + 1)
+      name = `${original}.${seen}`
+      seen = present.has(name) ? seen + 1 : (counts.get(name) ?? 0)
     }
-    counts.set(name, 1)
-    return name
-  })
+    names[index] = name
+    if (name !== original) {
+      const left = (present.get(original) ?? 1) - 1
+      if (left > 0) {
+        present.set(original, left)
+      } else {
+        present.delete(original)
+      }
+      present.set(name, 1)
+    }
+    counts.set(name, seen + 1)
+  }
+  return names
 }
 
 /**
