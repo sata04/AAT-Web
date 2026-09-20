@@ -346,18 +346,26 @@ export function AnalyzerScreen(): React.JSX.Element {
     // continuation: `loop.openFiles` resolves before this commit lands, so a
     // same-tick read would miss the install entirely.
     const tracker = tourOwnedRef.current
-    for (const [filename, pending] of tracker.pending) {
+    for (const [filename, queue] of tracker.pending) {
       const installed = datasets.find((dataset) => dataset.filename === filename)
-      if (installed !== undefined) {
+      if (installed !== undefined && !tracker.reconciled.has(installed)) {
+        // Each new install consumes the oldest open for its name: restarting
+        // mid-open re-picks the same filename, and whichever result lands
+        // belongs to whichever request completes first.
+        tracker.reconciled.add(installed)
+        const pending = queue.shift()
+        if (queue.length === 0) tracker.pending.delete(filename)
+        if (pending === undefined) continue
         tracker.owned.set(pending.which, installed)
-        tracker.pending.delete(filename)
         if (pending.epoch !== tracker.epoch || !tracker.keep.has(pending.which)) {
           loop.closeDataset(installed)
         }
-      } else if (pending.settled) {
-        // The open finished without this install — `installAnalysisResult`
-        // dropped it into `closedSources` — so nothing is coming.
-        tracker.pending.delete(filename)
+      } else if (installed === undefined) {
+        // Opens that finished without installing — `installAnalysisResult`
+        // dropped them into `closedSources` — leave a settled corpse.
+        const live = queue.filter((pending) => !pending.settled)
+        if (live.length === 0) tracker.pending.delete(filename)
+        else if (live.length !== queue.length) tracker.pending.set(filename, live)
       }
     }
   })
@@ -372,7 +380,12 @@ export function AnalyzerScreen(): React.JSX.Element {
     // different object, which cleanup therefore never matches.
     owned: new Map<DemoDataset, Dataset>(),
     keep: new Set<DemoDataset>(),
-    pending: new Map<string, { which: DemoDataset; epoch: number; settled: boolean }>(),
+    // In-flight opens, queued per chosen filename: a restart mid-open
+    // re-picks the same name, and each install must consume its own request.
+    pending: new Map<string, { which: DemoDataset; epoch: number; settled: boolean }[]>(),
+    // Installs already matched to a request — the same dataset object still
+    // visible on the next commit must not consume another open.
+    reconciled: new WeakSet<Dataset>(),
     epoch: 0,
   })
 
@@ -418,7 +431,9 @@ export function AnalyzerScreen(): React.JSX.Element {
         // Adoption happens in the snapshot-sync effect — the commit boundary —
         // because `openFiles` resolves before the install commits.
         const pending = { which, epoch: tracker.epoch, settled: false }
-        tracker.pending.set(filename, pending)
+        const queue = tracker.pending.get(filename)
+        if (queue === undefined) tracker.pending.set(filename, [pending])
+        else queue.push(pending)
         try {
           // Local-only: the tour's own copy promises nothing leaves the
           // browser, and a skipped tour must never leave cloud revisions or

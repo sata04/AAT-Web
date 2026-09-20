@@ -104,14 +104,21 @@ function plotPoint(snapshot: TourSnapshot, x: number): { x: number; y: number } 
   return { x: over.left + valueToPixel(geometry, x) - geometry.left, y: over.top + over.height * 0.45 }
 }
 
-/** Open a demo dataset and wait until its analysis lands; false on abort. */
+/**
+ * Open a demo dataset and wait until its analysis lands. False on abort; a
+ * genuine failure throws so the machine can stop the tour instead of
+ * advancing to the outro over an empty workspace.
+ */
 async function openDemoAndWait(ctx: TourCtx, which: DemoDataset): Promise<boolean> {
   const filename = await ctx.driver.openDemo(which)
   if (ctx.signal.aborted) return false
-  return ctx.waitFor(
+  const ready = await ctx.waitFor(
     (snapshot) =>
       snapshot.analysisReady && snapshot.datasets.some((dataset) => dataset.filename === filename),
   )
+  if (ctx.signal.aborted) return false
+  if (!ready) throw new Error(`sample ${which} did not reach a ready analysis`)
+  return true
 }
 
 async function enterIngest(ctx: TourCtx): Promise<void> {

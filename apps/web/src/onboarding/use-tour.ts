@@ -150,17 +150,20 @@ function cursorPoint(target: Element | { x: number; y: number }): { x: number; y
   return { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 }
 }
 
-/** Run `scene.enter`; false when the run aborted — a step, skip or unmount. */
-async function enterScene(scene: SceneDef, ctx: TourCtx): Promise<boolean> {
+/** What `scene.enter` left behind: ready to dwell, or a reason to stop. */
+type SceneOutcome = 'ok' | 'failed' | 'aborted'
+
+async function enterScene(scene: SceneDef, ctx: TourCtx): Promise<SceneOutcome> {
   try {
     await scene.enter?.(ctx)
   } catch (error) {
-    if (isAbort(error) || ctx.signal.aborted) return false
+    if (isAbort(error) || ctx.signal.aborted) return 'aborted'
     // A scene that fails must not hang the tour — report it and let the
-    // dwell logic decide what comes next as usual.
+    // caller decide whether autoplay may continue.
     console.error('onboarding scene failed', error)
+    return 'failed'
   }
-  return !ctx.signal.aborted
+  return ctx.signal.aborted ? 'aborted' : 'ok'
 }
 
 /** Hold the scene's dwell on the running clock, then advance — aborted runs simply end. */
@@ -191,7 +194,11 @@ async function runScene(
   advance: () => void,
 ): Promise<void> {
   ctx.cursor.moveTo(cursorTargetFor(scene.cursor))
-  if (!(await enterScene(scene, ctx))) return
+  const outcome = await enterScene(scene, ctx)
+  // A failed scene holds instead of advancing: autoplay must not glide on
+  // to a "sample loaded" outro over an empty workspace. Manual stepping
+  // still works — the next scene's enter simply tries its own world again.
+  if (outcome !== 'ok') return
   // The element a scene's cursor names may only exist once `enter` has
   // run — the statistics panel mounts with the first dataset, for one.
   ctx.cursor.moveTo(cursorTargetFor(scene.cursor))
@@ -338,7 +345,12 @@ export function useTour(input: {
       instant: reducedMotion,
     }
     const ctx = sceneCtx(driverRef.current, clock, setCursor)
-    void runScene(scene, ctx, () => playingRef.current, () => activate(index + 1))
+    void runScene(
+      scene,
+      ctx,
+      () => playingRef.current,
+      () => activate(index + 1),
+    )
     return () => controller.abort()
   }, [index, reducedMotion, activate])
 
