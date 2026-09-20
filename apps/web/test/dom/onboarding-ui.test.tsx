@@ -37,6 +37,7 @@ function fakeDriver(overrides: Partial<TourDriver> = {}): TourDriver {
     discardPending: vi.fn(),
     activateDemo: vi.fn(),
     applyModeEvent: vi.fn(),
+    setNormalMode: vi.fn(),
     setSelection: vi.fn(),
     setViewport: vi.fn(),
     restoreBaseline: vi.fn(),

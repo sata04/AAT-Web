@@ -331,7 +331,10 @@ async function respondFromCache(request: AnalyseRequest, cacheParts: CacheKeyPar
   const message: AnalysedMessage = {
     type: 'analysed',
     requestId: request.requestId,
-    payload: cached.payload,
+    // The payload's filename was baked at write time; the same bytes opened
+    // under a different name must install under the name on *this* request,
+    // or a cache hit would silently adopt (and replace) a sibling dataset.
+    payload: { ...cached.payload, filename: request.filename },
     fromCache: true,
   }
   scope.postMessage(message, payloadTransfers(cached.payload))

@@ -47,7 +47,15 @@ import type { SelectionRange } from '../graph/selection.ts'
 import { type GraphPalette, themeSettingFrom } from '../graph/theme.ts'
 import type { ChartViewport } from '../graph/UPlotChart.tsx'
 import { useThemePalette } from '../graph/use-theme-palette.ts'
-import { canSelectRange, isComparing, type ViewMode } from '../graph/view-mode.ts'
+import {
+  canSelectRange,
+  isComparing,
+  isGQuality,
+  isShowingAll,
+  leaveComparing,
+  transition,
+  type ViewMode,
+} from '../graph/view-mode.ts'
 import { type DemoDataset, demoCsvFile, demoFilename } from '../onboarding/demo-data.ts'
 import { type TourDriver, type TourSnapshot, type TourView, tourViewOf } from '../onboarding/tour-driver.ts'
 import type { PosterContext } from '../poster/requests.ts'
@@ -340,7 +348,7 @@ export function AnalyzerScreen(): React.JSX.Element {
     for (const [filename, pending] of tracker.pending) {
       const installed = datasets.find((dataset) => dataset.filename === filename)
       if (installed !== undefined) {
-        tracker.owned.set(pending.which, filename)
+        tracker.owned.set(pending.which, installed)
         tracker.pending.delete(filename)
         if (pending.epoch !== tracker.epoch || !tracker.keep.has(pending.which)) {
           loop.closeDataset(installed)
@@ -358,7 +366,10 @@ export function AnalyzerScreen(): React.JSX.Element {
   // stays. In a ref because `loop` is recreated every commit — `useMemo`
   // state tied to it would reset each render.
   const tourOwnedRef = useRef({
-    owned: new Map<DemoDataset, string>(),
+    // The installed Dataset objects — identity, not filename: a researcher who
+    // closes a kept demo and reopens their own file under the same name gets a
+    // different object, which cleanup therefore never matches.
+    owned: new Map<DemoDataset, Dataset>(),
     keep: new Set<DemoDataset>(),
     pending: new Map<string, { which: DemoDataset; epoch: number; settled: boolean }>(),
     epoch: 0,
@@ -388,10 +399,17 @@ export function AnalyzerScreen(): React.JSX.Element {
       snapshot: () => snapshot.current,
       openFiles: (files) => loop.openFiles(files),
       openDemo: async (which) => {
-        const mine = new Set(tracker.owned.values())
+        // Only a still-present owned object exempts its name — a stale entry
+        // (user closed the demo, reused the filename) must not hide the
+        // researcher's current dataset from `taken`.
+        const mine = new Set(
+          [...tracker.owned.values()]
+            .filter((dataset) => snapshot.current.datasets.includes(dataset))
+            .map((dataset) => dataset.name),
+        )
         const taken = new Set(
           snapshot.current.datasets
-            .filter((dataset) => !mine.has(dataset.filename))
+            .filter((dataset) => !mine.has(dataset.name))
             .map((dataset) => dataset.name),
         )
         const filename = demoFilename(which, taken)
@@ -410,10 +428,9 @@ export function AnalyzerScreen(): React.JSX.Element {
       closeTourDatasets: (except = []) => {
         tracker.keep.clear()
         for (const which of except) tracker.keep.add(which)
-        for (const [which, filename] of tracker.owned) {
+        for (const [which, dataset] of tracker.owned) {
           if (tracker.keep.has(which)) continue
-          const dataset = snapshot.current.datasets.find((entry) => entry.filename === filename)
-          if (dataset !== undefined) loop.closeDataset(dataset)
+          if (snapshot.current.datasets.includes(dataset)) loop.closeDataset(dataset)
           tracker.owned.delete(which)
         }
       },
@@ -421,16 +438,25 @@ export function AnalyzerScreen(): React.JSX.Element {
         tracker.epoch += 1
       },
       activateDemo: (which) => {
-        const filename = tracker.owned.get(which)
-        if (filename === undefined) return
-        const dataset = snapshot.current.datasets.find((entry) => entry.filename === filename)
-        if (dataset === undefined) return
+        const dataset = tracker.owned.get(which)
+        if (dataset === undefined || !snapshot.current.datasets.includes(dataset)) return
         setActiveName(dataset.name)
         setSelection(null)
         setViewport(null)
       },
       applyModeEvent: (event) =>
         applyViewEvent(snapshot.current.mode, event, { setMode, setSelection, setViewport }),
+      setNormalMode: () => {
+        // Fold the overlay transitions locally — committing each one would let
+        // the next read the pre-commit mode and transition from it again.
+        let next = snapshot.current.mode
+        if (isComparing(next)) next = leaveComparing(next)
+        if (isShowingAll(next)) next = transition(next, 'SHOW_ALL_OFF')
+        else if (isGQuality(next)) next = transition(next, 'G_QUALITY_OFF')
+        setMode(next)
+        setSelection(null)
+        setViewport(null)
+      },
       setSelection,
       setViewport,
       restoreBaseline: () => {

@@ -36,10 +36,20 @@ const FALLBACK_NAME: Readonly<Record<DemoDataset, string>> = {
   b: 'sample-b-tour.csv',
 }
 
-/** Preferred filename, or the tour-suffixed fallback when `taken` names collide. */
+/**
+ * Preferred filename, the tour-suffixed fallback, then deterministic numeric
+ * suffixes — whichever first produces a dataset name absent from `taken`.
+ * The analyzer installs by display name, so the chosen filename must derive a
+ * name nobody is using, not merely an unused filename.
+ */
 export function demoFilename(which: DemoDataset, taken: ReadonlySet<string>): string {
-  const preferred = FILE_NAME[which]
-  return taken.has(datasetNameFromFilename(preferred)) ? FALLBACK_NAME[which] : preferred
+  for (const candidate of [FILE_NAME[which], FALLBACK_NAME[which]]) {
+    if (!taken.has(datasetNameFromFilename(candidate))) return candidate
+  }
+  for (let index = 2; ; index++) {
+    const candidate = `sample-${which}-tour-${index}.csv`
+    if (!taken.has(datasetNameFromFilename(candidate))) return candidate
+  }
 }
 
 /**

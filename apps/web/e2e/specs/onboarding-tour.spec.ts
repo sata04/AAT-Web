@@ -235,6 +235,41 @@ test.describe('onboarding tour', () => {
     await expect(datasets(page).getByRole('button', { name: /sample-a-tour|sample-b/ })).toHaveCount(0)
   })
 
+  test("a file named sample-a.csv opened after the demo closed is the researcher's", async ({
+    page,
+  }) => {
+    await page.goto('/')
+    const stage = tourStage(page)
+    // Shortest path to a kept demo: keep the sample rather than watching it.
+    await stage.getByRole('button', { name: 'サンプルデータで試す' }).click()
+    await waitForAnalysis(page)
+
+    // They close the demo and open their own data under its name — a stale
+    // ownership record must not hide that file from the demo's name chooser
+    // or mark it for cleanup.
+    await page.getByRole('button', { name: 'sample-a を閉じる', exact: true }).click()
+    await openCsv(page, repoCsv('normal_two_sensor_utf8.csv'), 'sample-a.csv')
+    await waitForAnalysis(page)
+
+    await page.getByRole('button', { name: '操作ガイド', exact: true }).click()
+    await page.getByRole('dialog').getByRole('button', { name: '初回の案内をもう一度見る' }).click()
+    const replay = tourStage(page)
+    await replay.getByRole('button', { name: 'デモを見る' }).click()
+    await expect(tourCaption(replay)).toHaveAttribute('data-scene', 'graph')
+    // The demo must land as its own dataset — a cache hit on identical bytes
+    // that installs under the request's name, not the cached payload's.
+    await expect(
+      datasets(page).getByRole('button', { name: 'sample-a-tour', exact: true }),
+    ).toBeVisible()
+
+    await page.keyboard.press('Escape')
+    await expect(replay).toHaveCount(0)
+
+    // Their sample-a survives: the demo landed under the fallback and left.
+    await expect(datasets(page).getByRole('button', { name: 'sample-a', exact: true })).toBeVisible()
+    await expect(datasets(page).getByRole('button', { name: /sample-a-tour|sample-b/ })).toHaveCount(0)
+  })
+
   test("skipping a replayed tour hands the workspace's view back", async ({ page }) => {
     await page.goto('/')
     await tourStage(page).getByRole('button', { name: 'そのまま始める' }).click()

@@ -11,7 +11,7 @@
  */
 
 import { valueToPixel } from '../graph/geometry.ts'
-import { isComparing, isGQuality, isShowingAll, leaveComparing, type ViewMode } from '../graph/view-mode.ts'
+import { isComparing, type ViewMode } from '../graph/view-mode.ts'
 import type { DemoDataset } from './demo-data.ts'
 import type { TourDriver, TourSnapshot } from './tour-driver.ts'
 
@@ -80,17 +80,6 @@ export interface TourCtx {
   }
 }
 
-/** `leaveComparing` knows the overlay to keep; applying it lands us in NORMAL's neighbourhood. */
-function toNormalMode(driver: TourDriver, mode: ViewMode): void {
-  let current = mode
-  if (isComparing(current)) {
-    driver.applyModeEvent('LEAVE_COMPARING')
-    current = leaveComparing(current)
-  }
-  if (isShowingAll(current)) driver.applyModeEvent('SHOW_ALL_OFF')
-  else if (isGQuality(current)) driver.applyModeEvent('G_QUALITY_OFF')
-}
-
 /**
  * Canonical baseline for a driving scene: only the listed demo roles open
  * (the tour never touches a researcher's own files — ownership is what the
@@ -98,9 +87,8 @@ function toNormalMode(driver: TourDriver, mode: ViewMode): void {
  * selection.
  */
 function prepare(ctx: TourCtx, keep: readonly DemoDataset[]): void {
-  const snapshot = ctx.driver.snapshot()
   ctx.driver.closeTourDatasets(keep)
-  toNormalMode(ctx.driver, snapshot.mode)
+  ctx.driver.setNormalMode()
   ctx.driver.setSelection(null)
   ctx.driver.setViewport(null)
   for (const which of keep) ctx.driver.activateDemo(which)

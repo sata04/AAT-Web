@@ -10,9 +10,10 @@
  *
  * Two ownership rules keep the tour honest on a workspace that is not empty:
  *
- *   - datasets the tour installs are tracked as they land (`openDemo`), so
- *     cleanup removes exactly them — never a researcher's own file that happens
- *     to share the demo's name;
+ *   - datasets the tour installs are tracked as they land (`openDemo`), by
+ *     the installed `Dataset` object rather than its filename — a researcher
+ *     who closes a kept demo and reopens their own file under the same name
+ *     produces a different object, which ownership therefore never matches;
  *   - the view found when the stage opened is capturable and restorable
  *     (`restoreBaseline`), so skipping a replayed tour hands back the mode,
  *     active dataset, selection and zoom the researcher left, not a reset.
@@ -80,6 +81,13 @@ export interface TourDriver {
   activateDemo(which: DemoDataset): void
   /** A real view-mode event — the same ones the toolbar buttons raise. */
   applyModeEvent(event: ViewEvent): void
+  /**
+   * Land the view in NORMAL in a single commit. Chained `applyModeEvent`
+   * calls each read the pre-commit mode, so `LEAVE_COMPARING` followed by
+   * `SHOW_ALL_OFF` from a comparison overlay would leave the view in
+   * COMPARING — this folds the transitions locally and commits once.
+   */
+  setNormalMode(): void
   setSelection(range: SelectionRange | null): void
   /** `null` is the real reset — the same call 「全体表示」 makes. */
   setViewport(viewport: ChartViewport | null): void
