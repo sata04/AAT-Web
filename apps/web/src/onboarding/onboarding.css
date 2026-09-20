@@ -1,0 +1,245 @@
+/*
+ * First-run live onboarding stage.
+ *
+ * Same rules as the rest of the chrome: tokens only, hairline borders, accent
+ * spent on state. The stage is a full-viewport replica of the analyzer — it
+ * reads as "the app, working" because it is the app's own classes — plus the
+ * three pieces of theatre on top: the pseudo-cursor, the file cards it
+ * carries, and the caption bar. All animation here is position/opacity over
+ * the timeline; nothing decorative loops.
+ */
+
+.onb {
+  position: fixed;
+  inset: 0;
+  z-index: 40;
+  background: var(--bg-primary);
+}
+
+/* The replica fills the stage; `inert` blocks interaction, this keeps the
+   pointer cursor honest too. */
+.onb__app {
+  height: 100%;
+  pointer-events: none;
+  user-select: none;
+}
+
+/* Pseudo-cursor. Decorative assistance only — the captions carry meaning. */
+.onb-cursor {
+  position: absolute;
+  top: 0;
+  left: 0;
+  z-index: 46;
+  pointer-events: none;
+  /* The arrow's tip is its origin: targets land under the point, not the centre. */
+}
+
+.onb-cursor__arrow {
+  display: block;
+  fill: var(--text-primary);
+  stroke: var(--bg-primary);
+  stroke-width: 1.2px;
+  paint-order: stroke;
+  filter: drop-shadow(0 1px 1px rgb(0 0 0 / 25%));
+  transition: transform var(--transition);
+}
+
+.onb-cursor--pressed .onb-cursor__arrow {
+  transform: scale(0.85);
+  transform-origin: 2px 2px;
+}
+
+/* A quiet press ring — the only "click" affordance. */
+.onb-cursor__ring {
+  position: absolute;
+  top: -3px;
+  left: -3px;
+  width: 12px;
+  height: 12px;
+  border: 1.5px solid var(--accent);
+  border-radius: 50%;
+  opacity: 0.8;
+}
+
+/* A CSV mid-drag: a table glyph + the filename in the mono UI face. */
+.onb-filecard {
+  position: absolute;
+  top: 0;
+  left: 0;
+  z-index: 45;
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-xs);
+  padding: var(--space-xs) var(--space-md);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-form);
+  background: var(--bg-primary);
+  box-shadow: 0 4px 12px rgb(0 0 0 / 14%);
+  font-family: var(--font-mono);
+  font-size: var(--size-small);
+  color: var(--text-primary);
+  white-space: nowrap;
+  pointer-events: none;
+}
+
+.onb-filecard__icon {
+  fill: none;
+  stroke: var(--success);
+  stroke-width: 1;
+}
+
+/* The column-detection card floats over the graph area, like the real
+   column dialog would — a panel, not a modal. */
+.onb-mapping {
+  position: absolute;
+  top: 38%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  z-index: 5;
+  width: min(24rem, calc(100% - 2 * var(--space-xl)));
+  box-shadow: 0 4px 12px rgb(0 0 0 / 12%);
+}
+
+/* Button press feedback for scripted clicks — a small scale, no spring. */
+.onb-press {
+  transform: scale(0.94);
+  transition: transform var(--transition);
+}
+
+/* ---- Caption bar -------------------------------------------------------- */
+
+.onb__chrome {
+  position: absolute;
+  right: 0;
+  bottom: calc(var(--space-xl) + var(--space-md));
+  left: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--space-sm);
+  pointer-events: none;
+}
+
+.onb__caption {
+  display: flex;
+  align-items: center;
+  gap: var(--space-lg);
+  max-width: min(44rem, calc(100% - 2 * var(--space-lg)));
+  padding: var(--space-sm) var(--space-lg);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-panel);
+  background: var(--bg-primary);
+  box-shadow: 0 4px 12px rgb(0 0 0 / 12%);
+  pointer-events: auto;
+}
+
+.onb__caption-text {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3xs);
+  min-width: 0;
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .onb__caption-text {
+    animation: aat-fade-in 240ms ease-out;
+  }
+}
+
+.onb__caption-text > strong {
+  font-size: var(--size-subheader);
+  font-weight: var(--weight-bold);
+}
+
+.onb__caption-text > span {
+  font-size: var(--size-small);
+  color: var(--text-secondary);
+}
+
+.onb__caption-actions {
+  display: flex;
+  gap: var(--space-2xs);
+  flex: none;
+}
+
+.onb__dots {
+  display: flex;
+  gap: var(--space-xs);
+  flex: none;
+}
+
+.onb__dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--border-strong);
+}
+
+.onb__dot--active {
+  background: var(--accent);
+}
+
+/* A hairline progress track under the caption — the demo is finite. */
+.onb__progress {
+  width: min(44rem, calc(100% - 2 * var(--space-lg)));
+  height: 2px;
+  background: var(--bg-tertiary);
+  border-radius: var(--radius-inner);
+  overflow: hidden;
+}
+
+.onb__progress-bar {
+  height: 100%;
+  background: var(--accent);
+}
+
+/* Reduced-motion summary: the same beats as a readable list, no theatre. */
+.onb__summary {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--space-md);
+  max-width: min(34rem, calc(100% - 2 * var(--space-lg)));
+  padding: var(--space-lg) var(--space-xl);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-panel);
+  background: var(--bg-primary);
+  box-shadow: 0 4px 12px rgb(0 0 0 / 12%);
+  pointer-events: auto;
+}
+
+.onb__steps {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-sm);
+  margin: 0;
+  padding-left: var(--space-xl);
+}
+
+.onb__steps li {
+  padding-left: var(--space-2xs);
+}
+
+.onb__steps strong {
+  display: block;
+  font-size: var(--size-subheader);
+  font-weight: var(--weight-bold);
+}
+
+.onb__steps span {
+  font-size: var(--size-small);
+  color: var(--text-secondary);
+}
+
+/* Narrow stages: the caption keeps its controls on one row by shrinking text. */
+@media (max-width: 640px) {
+  .onb__caption {
+    flex-wrap: wrap;
+    justify-content: center;
+    gap: var(--space-sm);
+  }
+
+  .onb__dots {
+    order: -1;
+  }
+}
