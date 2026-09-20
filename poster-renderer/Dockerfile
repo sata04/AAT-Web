@@ -23,15 +23,22 @@
 #        https://registry-1.docker.io/v2/library/python/manifests/3.14-slim-bookworm \
 #     | grep -i docker-content-digest
 #
-# This digest was raised by Renovate and checked that way on 2026-08-14: it is what the tag
-# resolves to, and its linux/amd64 child is CPython 3.14.7 built 2026-08-05 from
-# debian:bookworm-slim (org.opencontainers.image.base.digest
-#  sha256:362e64223cc0da95422b3b13c045186fc0a81250e765d31c025fbddf257f6143) — the same Debian layer
-# the 3.12 pin named, which is part of why the interpreter bump moved no pixels.
+# This digest was raised by Renovate on 2026-09-08 and reviewed on 2026-09-20. Its linux/amd64
+# child is CPython 3.14.7 (org.opencontainers.image.version 3.14.7-slim-bookworm) built
+# 2026-08-31 from debian:bookworm-slim (org.opencontainers.image.base.digest
+#  sha256:5ae3c39ebd15e229dcedd5cee596b2497182493d41ff162e824ba13fc1b2b867) — a *different*
+# Debian layer from the one the previous pin named, which is precisely the case this review
+# exists for. The strict reference check inside the built image still passes, so the rebuilt
+# zlib, libpng and FreeType moved no pixels.
+#
+# The tag has moved on since: on 2026-09-20 `3.14-slim-bookworm` resolved to
+# sha256:82bc3c539b8813ada9d68c63b40158fa002f7f33de9bf3312a3dfdc0620dff56. Not a reason to chase
+# it — the pin is the digest, and a poster-renderer update is only eligible once it has aged past
+# the 7-day minimum release age.
 #
 # Renovate keeps this digest fresh, but poster-renderer updates never auto-merge: a base-image
 # bump is a visual-contract change and needs the review in README.md.
-FROM python:3.14-slim-bookworm@sha256:23c59390fc717bf09f9336908199a0ae75d9c4264bf296123f94ad772fea3b52 AS base
+FROM python:3.14-slim-bookworm@sha256:9ab8d9c8514b44f90cf0029dd42fdd7e9e211e639c8b995304cc04568dee900f AS base
 
 # ---------------------------------------------------------------------------------------------
 # Build stage: install dependencies into an isolated prefix
