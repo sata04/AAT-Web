@@ -221,11 +221,13 @@ export function useTour(input: {
   }, [index, reducedMotion, activate])
 
   const start = useCallback(() => {
-    setPlaying(true)
+    // Reduced motion never autoplays — the caption says so, so デモを見る
+    // lands on the first scene and hands stepping to 次へ.
+    setPlaying(!reducedMotion)
     setPaused(false)
     // `intro` is pinned, so autoplay begins at the first driving scene.
     activate(1)
-  }, [activate])
+  }, [activate, reducedMotion])
 
   const next = useCallback(() => {
     setPlaying(false)

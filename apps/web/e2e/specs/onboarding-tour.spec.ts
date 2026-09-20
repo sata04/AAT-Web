@@ -288,11 +288,19 @@ test.describe('onboarding tour — reduced motion', () => {
     await page.waitForTimeout(4_000)
     await expect(caption).toHaveAttribute('data-scene', 'intro')
 
-    // Stepping by hand still drives the real analyzer.
-    await stage.getByRole('button', { name: '次へ', exact: true }).click()
+    // デモを見る obeys the same promise: it enters the first driving scene and
+    // stops there. Without this check a "reduce" autoplay would flash through
+    // every scene in about two seconds, which is exactly what happened once.
+    await stage.getByRole('button', { name: 'デモを見る' }).click()
     await expect(caption).toHaveAttribute('data-scene', 'ingest')
     await expect(datasets(page).getByRole('button', { name: 'sample-a', exact: true })).toBeVisible()
     await waitForAnalysis(page)
+    await page.waitForTimeout(4_000)
+    await expect(caption).toHaveAttribute('data-scene', 'ingest')
+
+    // Stepping by hand still drives the real analyzer.
+    await stage.getByRole('button', { name: '次へ', exact: true }).click()
+    await expect(caption).toHaveAttribute('data-scene', 'graph')
 
     await page.keyboard.press('Escape')
     await expect(tourStage(page)).toHaveCount(0)
