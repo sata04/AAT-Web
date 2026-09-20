@@ -48,6 +48,22 @@ function topmostDialogPanel(): HTMLElement | null {
   return topmost
 }
 
+// Keep Tab inside the dialog: the content behind it is inert to the mouse
+// but not to the keyboard unless something holds the cycle closed.
+function keepTabInsideDialog(panel: HTMLElement, event: KeyboardEvent): void {
+  const focusable = [...panel.querySelectorAll<HTMLElement>(FOCUSABLE)]
+  if (focusable.length === 0) return
+  const first = focusable[0] as HTMLElement
+  const last = focusable[focusable.length - 1] as HTMLElement
+  if (event.shiftKey && document.activeElement === first) {
+    event.preventDefault()
+    last.focus()
+  } else if (!event.shiftKey && document.activeElement === last) {
+    event.preventDefault()
+    first.focus()
+  }
+}
+
 export function Dialog(props: DialogProps): React.JSX.Element {
   const titleId = useId()
   const descriptionId = useId()
@@ -103,19 +119,7 @@ export function Dialog(props: DialogProps): React.JSX.Element {
         props.onClose()
         return
       }
-      // Keep Tab inside the dialog: the content behind it is inert to the mouse
-      // but not to the keyboard unless something holds the cycle closed.
-      const focusable = [...panel.querySelectorAll<HTMLElement>(FOCUSABLE)]
-      if (focusable.length === 0) return
-      const first = focusable[0] as HTMLElement
-      const last = focusable[focusable.length - 1] as HTMLElement
-      if (event.shiftKey && document.activeElement === first) {
-        event.preventDefault()
-        last.focus()
-      } else if (!event.shiftKey && document.activeElement === last) {
-        event.preventDefault()
-        first.focus()
-      }
+      keepTabInsideDialog(panel, event)
     }
     document.addEventListener('keydown', onKeyDown, true)
     return () => document.removeEventListener('keydown', onKeyDown, true)
