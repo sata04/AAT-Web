@@ -130,13 +130,26 @@ const v1 = new Hono<AppEnv>()
  */
 const MAX_JSON_BODY_BYTES = 16 * 1024 * 1024
 const METHODS_WITH_BODY = new Set(['POST', 'PUT', 'PATCH'])
+
+/**
+ * The size the request declares, or NaN when it declares none.
+ *
+ * An absent or blank header is the lengthless case, not a zero-byte body — `Number('')` is 0,
+ * which would sail under the ceiling and buffer the very request the bound exists to refuse.
+ */
+function declaredBodyBytes(header: string | undefined): number {
+  const value = header?.trim()
+  return value === undefined || value === '' ? Number.NaN : Number(value)
+}
+
+/** Whether this request is one the JSON ceiling applies to. */
+function boundsJsonBody(method: string, contentType: string): boolean {
+  return METHODS_WITH_BODY.has(method) && contentType.includes('application/json')
+}
+
 v1.use('*', async (context, next) => {
-  const contentType = context.req.header('content-type') ?? ''
-  if (contentType.includes('application/json') && METHODS_WITH_BODY.has(context.req.method)) {
-    // An absent or blank header is the lengthless case, not a zero-byte body: `Number('')` is 0,
-    // which would sail under the ceiling and buffer the very request this gate exists to refuse.
-    const header = context.req.header('content-length')?.trim()
-    const declared = header === undefined || header === '' ? Number.NaN : Number(header)
+  if (boundsJsonBody(context.req.method, context.req.header('content-type') ?? '')) {
+    const declared = declaredBodyBytes(context.req.header('content-length'))
     if (!Number.isFinite(declared) || declared > MAX_JSON_BODY_BYTES) {
       throw new ApiError('REQUEST_TOO_LARGE', { details: { maxBytes: MAX_JSON_BODY_BYTES } })
     }
