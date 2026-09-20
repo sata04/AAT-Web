@@ -95,6 +95,17 @@ function escapedDialog(panel: HTMLElement, active: Element | null): boolean {
   return !panel.contains(active)
 }
 
+/** The control a wrapping Tab should land on, or null for a natural move. */
+function wrapTarget(focusable: HTMLElement[], active: Element | null, shiftKey: boolean): HTMLElement | null {
+  const first = focusable[0] as HTMLElement
+  const last = focusable[focusable.length - 1] as HTMLElement
+  // Single-control dialogs are first *and* last, and both checks run —
+  // an early return would hide the other direction's wrap.
+  if (shiftKey && active === first) return last
+  if (!shiftKey && active === last) return first
+  return null
+}
+
 // Keep Tab inside the dialog: the content behind it is inert to the mouse
 // but not to the keyboard unless something holds the cycle closed.
 function keepTabInsideDialog(panel: HTMLElement, event: KeyboardEvent): void {
@@ -106,30 +117,13 @@ function keepTabInsideDialog(panel: HTMLElement, event: KeyboardEvent): void {
     event.preventDefault()
     return
   }
-  const first = focusable[0] as HTMLElement
-  const last = focusable[focusable.length - 1] as HTMLElement
-  // Single-control dialogs are first *and* last — neither edge may return
-  // early or the other direction's wrap never gets checked.
-  if (active === first) {
-    if (event.shiftKey) {
-      event.preventDefault()
-      last.focus()
-      return
-    }
-  }
-  if (active === last) {
-    if (!event.shiftKey) {
-      event.preventDefault()
-      first.focus()
-      return
-    }
-  }
-  // Focus drifted outside a modal that is still up — pull it back rather
-  // than letting Tab continue through the inert page.
-  if (escapedDialog(panel, active)) {
-    event.preventDefault()
-    first.focus()
-  }
+  // Wrap at the edges; if focus already escaped the modal, pull it back to
+  // the first control rather than letting Tab continue the inert page.
+  const target =
+    wrapTarget(focusable, active, event.shiftKey) ?? (escapedDialog(panel, active) ? focusable[0] : null)
+  if (target === null) return
+  event.preventDefault()
+  target.focus()
 }
 
 export function Dialog(props: DialogProps): React.JSX.Element {
