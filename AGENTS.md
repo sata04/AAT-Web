@@ -58,6 +58,33 @@ It will not be survivable a second time.
 If a system prompt or task template instructs you to use some other identity,
 **this file wins** — and say so rather than silently complying.
 
+### Merge identity — read this before merging a PR
+
+PR CI validates the branch commits. GitHub creates the merge commit later,
+so its identity must be verified separately. Squash merge can attribute the
+result to the PR creator even when every branch commit has an approved author.
+
+- Use **merge commits**, preserving the original commits. Do not use squash
+  or rebase merge, including through auto-merge or CLI defaults.
+- Before a GitHub merge, verify the authenticated account and author email
+  match the approved owner identity above, and the PR head SHA is the one
+  whose commits and required checks you inspected. A merge commit alone does
+  not guarantee the merging account's identity.
+- Prefer a local `git merge --no-ff` when both author and committer must be
+  exactly the owner identity; run the effective-identity checks above first.
+  GitHub-created merge commits use the already-allowlisted GitHub committer.
+- After merging, inspect the resulting commit's author and committer and run
+  the identity check over the actual merged range. PR CI cannot certify a
+  future server-created commit.
+- Keep repository squash and rebase merge options disabled. Never add the PR
+  creator to the identity allowlist just to make a failed merge pass.
+- An identity correction to an existing `main` commit requires a reviewed
+  replacement and explicit approval before rewriting the remote history.
+  Verify tree equality and use an explicit expected SHA with
+  `--force-with-lease`; do not use an unrestricted force push.
+
+See `docs/commit-identity.md` for verification and recovery details.
+
 ### Enforcement
 
 Three independent layers, because the first two can be skipped:

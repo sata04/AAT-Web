@@ -19,6 +19,17 @@ email, never pass `-c user.email=...`, never set `GIT_*` identity variables, and
 never use `--no-verify`. This repository's first 37 commits had to be rewritten
 because an agent did exactly that.
 
+## Before you merge — mandatory
+
+Read the merge-identity procedure in `AGENTS.md`. Use a merge commit and
+explicitly verify the merging account and approved author email. Squash merge
+can replace correct branch authorship with the PR creator; a green PR identity
+check does not cover the future merge commit.
+Do not use squash or rebase merge, or widen the identity allowlist to repair
+the result. Verify the actual merged commit and pushed range afterwards.
+Rewriting existing remote `main` history requires explicit approval of the
+verified replacement.
+
 ## What this project is
 
 AAT Web is a local-first browser rewrite of AAT (Acceleration Analysis Tool), a

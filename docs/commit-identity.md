@@ -39,6 +39,46 @@ It was corrected by rewriting the whole history with `git filter-repo`, which
 changed every SHA. That is cheap in a private, unreferenced, undeployed
 repository and expensive in any other kind — hence the enforcement below.
 
+## Merge policy
+
+PR CI validates the commits on the branch. Squash merge creates a new commit
+and can attribute it to the PR creator, replacing approved branch authorship.
+The resulting commit is checked only after it reaches the target branch.
+
+Use **merge commits** to preserve the original commits. Keep squash and rebase
+merge disabled in repository settings; GitHub supports
+[disabling squash merges](https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/configuring-pull-request-merges/configuring-commit-squashing-for-pull-requests).
+The new merge commit must also carry approved identities:
+
+1. Verify the exact PR head, required checks, and identities in `base..head`.
+2. For a GitHub merge, confirm the authenticated account and author email
+   match the approved owner identity defined in `AGENTS.md`. Explicitly
+   select merge commit, including when enabling auto-merge. GitHub supplies
+   its already-allowlisted committer identity.
+3. For a local merge, verify both effective identities before
+   `git merge --no-ff`. Both author and committer must be the approved owner.
+4. Inspect the resulting commit with `git show --no-patch --format=fuller`
+   and run the identity check over the actual merged range. Confirm the push
+   identity job passes.
+
+### Correcting a merged identity
+
+A follow-up commit or revert cannot change an existing commit's identity.
+Prepare a replacement separately, preserve the original approved commits,
+verify that the replacement tree is identical, and audit its entire ancestry
+with `node scripts/check-commit-identity.mjs --range REPLACEMENT_SHA`.
+Keep any additional changes in separate commits.
+
+Replacing remote history requires explicit approval of the verified result.
+Use `--force-with-lease=refs/heads/main:EXPECTED_SHA` to protect concurrent
+updates, and preserve any newer work. Do not expand the identity allowlist or
+weaken branch protection to bypass a failure.
+
+Old commits may remain reachable through PR refs or other branches. Audit the
+repaired branch's ancestry separately from `--all`, which checks every local
+ref. The replacement also needs its own CI run; the old failed run remains a
+record of the original commit.
+
 ## Enforcement
 
 Three layers, because each of the first two can be skipped:
