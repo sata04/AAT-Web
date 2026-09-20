@@ -39,7 +39,7 @@
  */
 
 import { ApiError } from '@aat/shared'
-import { and, eq, isNull, lte, sql } from 'drizzle-orm'
+import { and, eq, inArray, isNotNull, isNull, lte, or, sql } from 'drizzle-orm'
 import { type Database, rowsAffected } from '../db/client.ts'
 import { cloudObjects, quotaReservations, quotaUsage, runs } from '../db/schema.ts'
 import { newId } from '../lib/ids.ts'
@@ -58,6 +58,11 @@ import { newId } from '../lib/ids.ts'
  */
 const claimedBy = (reservationId: string, token: string) =>
   sql`EXISTS (SELECT 1 FROM quota_reservations WHERE id = ${reservationId} AND claim_token = ${token})`
+
+/** Lowercase hex of an R2 checksum ArrayBuffer, matching the `sha256` column's format. */
+function checksumHex(buffer: ArrayBuffer): string {
+  return [...new Uint8Array(buffer)].map((byte) => byte.toString(16).padStart(2, '0')).join('')
+}
 
 export type ReservationPurpose = 'snapshot' | 'poster' | 'source'
 
@@ -390,8 +395,17 @@ export async function commitUploadedObject(
  *
  * `releaseObjectAccounting` covers whatever state the commit reached — a still-pending
  * reservation, a finalised charge — exactly once, so the unwind is safe to re-run after a crash
- * mid-cleanup. The row and bucket deletes are unconditional: the row is the unique-key obstacle
- * and the bytes are the storage it described.
+ * mid-cleanup.
+ *
+ * The row is deleted BEFORE the bucket object, and the bucket delete is gated on having won the
+ * row, because the unique index on `r2_key` makes the row the claim ticket: a retry that finds a
+ * dead row (`evictDeadObject`) removes it and re-puts its own bytes, and that re-put must never be
+ * reachable by this unwind's bucket delete. If the row is already gone the unwind is over — the
+ * bytes at the key now belong to whoever took the key. The sha256 guard then narrows the
+ * delete to the bytes this object actually wrote: a different-sha256 retry that raced the row
+ * delete leaves its put intact. (A byte-identical retry landing inside the head→delete gap is the
+ * residual window; it is uncloseable without a conditional delete R2 does not offer, and bounded
+ * by the re-put the recovery path performs.)
  */
 export async function unwindUploadedObject(
   db: Database,
@@ -399,6 +413,7 @@ export async function unwindUploadedObject(
   object: {
     id: string
     r2Key: string
+    sha256: string
     ownerUserId: string
     byteSize: number
     reservationId: string
@@ -406,13 +421,60 @@ export async function unwindUploadedObject(
   now: Date = new Date(),
 ): Promise<void> {
   await releaseObjectAccounting(db, object, now)
-  await db.delete(cloudObjects).where(eq(cloudObjects.id, object.id))
-  await bucket.delete(object.r2Key)
+  const removed = await db.delete(cloudObjects).where(eq(cloudObjects.id, object.id))
+  if (rowsAffected(removed) !== 1) return
+  const head = await bucket.head(object.r2Key)
+  if (head?.checksums.sha256 && checksumHex(head.checksums.sha256) === object.sha256) {
+    await bucket.delete(object.r2Key)
+  }
+}
+
+/**
+ * Finish the cleanup of an object whose accounting is terminal but whose row still occupies a
+ * deterministic key — the state an unwind dies in.
+ *
+ * "Dead" has to be provable from the row alone, because the only actor who ever calls this is a
+ * stranger: a later upload that needs the key. `settled_claim` set, a reservation released or
+ * settled, or a reservation row gone entirely all mean no one can still be committing it. A
+ * `finalised` reservation is deliberately NOT dead — it is the steady state of every committed
+ * object, and its `expires_at` lapses while the object lives legitimately, so expiry cannot
+ * separate a crashed unwind from a live record.
+ *
+ * R2 is never touched here: the caller got to this row because its own put already wrote the key,
+ * so the bytes present are the caller's, not the dead row's.
+ *
+ * Returns whether the key is free — true when no row existed or the row was dead and removed.
+ */
+export async function evictDeadObject(db: Database, r2Key: string, now: Date = new Date()): Promise<boolean> {
+  const [row] = await db
+    .select()
+    .from(cloudObjects)
+    .where(and(eq(cloudObjects.r2Key, r2Key), isNull(cloudObjects.deletedAt)))
+    .limit(1)
+  if (!row) return true
+
+  let dead = row.settledClaim !== null
+  if (!dead && row.reservationId !== null) {
+    const [reservation] = await db
+      .select({ status: quotaReservations.status })
+      .from(quotaReservations)
+      .where(eq(quotaReservations.id, row.reservationId))
+      .limit(1)
+    dead = reservation === undefined || reservation.status === 'released' || reservation.status === 'settled'
+  }
+  if (!dead) return false
+
+  // Accounting first, row second — the same order unwindUploadedObject uses, so whoever removes
+  // the row is always the last writer the key sees.
+  await releaseObjectAccounting(db, row, now)
+  await db.delete(cloudObjects).where(eq(cloudObjects.id, row.id))
+  return true
 }
 
 export interface SweepResult {
   reservationsReleased: number
   orphanedObjectsDeleted: number
+  deadRowsReclaimed: number
 }
 
 /**
@@ -474,7 +536,43 @@ export async function sweepStaleReservations(
     }
   }
 
-  return { reservationsReleased, orphanedObjectsDeleted }
+  // Rows whose accounting is terminal but which still occupy their deterministic key — what an
+  // unwind that dies between `releaseObjectAccounting` and its row delete leaves behind. The
+  // predicate is the one `evictDeadObject` uses: a settled_claim marker, a released or settled
+  // reservation, or a reservation row that vanished. `finalised` is deliberately not dead — it is
+  // the steady state of every committed object, and its `expires_at` lapses while the object
+  // lives legitimately, so expiry cannot separate a crashed unwind from a live record.
+  const deadRows = await db
+    .select({ object: cloudObjects })
+    .from(cloudObjects)
+    .leftJoin(quotaReservations, eq(quotaReservations.id, cloudObjects.reservationId))
+    .where(
+      and(
+        isNull(cloudObjects.deletedAt),
+        or(
+          isNotNull(cloudObjects.settledClaim),
+          inArray(quotaReservations.status, ['released', 'settled']),
+          and(isNotNull(cloudObjects.reservationId), isNull(quotaReservations.id)),
+        ),
+      ),
+    )
+    .limit(limit)
+
+  let deadRowsReclaimed = 0
+  for (const { object } of deadRows) {
+    // Accounting first, row second, bytes last — the order unwindUploadedObject keeps, so the
+    // row's presence always gates the bucket delete.
+    await releaseObjectAccounting(db, object, now)
+    const removed = await db.delete(cloudObjects).where(eq(cloudObjects.id, object.id))
+    if (rowsAffected(removed) !== 1) continue
+    const head = await bucket.head(object.r2Key)
+    if (head?.checksums.sha256 && checksumHex(head.checksums.sha256) === object.sha256) {
+      await bucket.delete(object.r2Key)
+    }
+    deadRowsReclaimed++
+  }
+
+  return { reservationsReleased, orphanedObjectsDeleted, deadRowsReclaimed }
 }
 
 /** Change a user's storage ceiling. Never lowers below what is already stored. */

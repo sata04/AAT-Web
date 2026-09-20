@@ -62,6 +62,7 @@ import {
 import {
   commitUploadedObject,
   ensureQuotaRow,
+  evictDeadObject,
   type Reservation,
   releaseReservation,
   reserveQuota,
@@ -137,21 +138,23 @@ async function commitPosterRender(
   const actor = context.get('actor')
   const ownerUserId = revision.ownerUserId
 
-  let uploaded: { id: string; byteSize: number } | null = null
+  let uploaded: { id: string; byteSize: number; sha256: string } | null = null
   try {
     const digest = await sha256Hex(outcome.png)
-    const put = await context.env.AAT_OBJECTS.put(key, outcome.png as ArrayBufferView, {
-      httpMetadata: { contentType: 'image/png' },
-      sha256: digest,
-      customMetadata: { revisionId: revision.id, posterId: figureId, ownerUserId },
-    })
+    const putObject = () =>
+      context.env.AAT_OBJECTS.put(key, outcome.png as ArrayBufferView, {
+        httpMetadata: { contentType: 'image/png' },
+        sha256: digest,
+        customMetadata: { revisionId: revision.id, posterId: figureId, ownerUserId },
+      })
+    const put = await putObject()
     const actualBytes = put?.size ?? outcome.png.length
 
     const objectId = newId()
-    await db.insert(cloudObjects).values({
+    const objectValues = {
       id: objectId,
       ownerUserId,
-      kind: 'poster',
+      kind: 'poster' as const,
       r2Key: key,
       byteSize: actualBytes,
       sha256: digest,
@@ -161,8 +164,18 @@ async function commitPosterRender(
       analysisRevisionId: revision.id,
       reservationId: reservation.id,
       createdAt: now,
-    })
-    uploaded = { id: objectId, byteSize: actualBytes }
+    }
+    try {
+      await db.insert(cloudObjects).values(objectValues)
+    } catch (insertError) {
+      // A wedged predecessor — an unwind that died mid-cleanup — still holds this deterministic
+      // key. Finish its eviction, re-put (that cleanup may have removed the bytes we just wrote),
+      // and take the key. A live row keeps its key and the original error flies.
+      if (!(await evictDeadObject(db, key, now))) throw insertError
+      await putObject()
+      await db.insert(cloudObjects).values(objectValues)
+    }
+    uploaded = { id: objectId, byteSize: actualBytes, sha256: digest }
     await commitUploadedObject(
       db,
       context.env.AAT_OBJECTS,
@@ -183,8 +196,10 @@ async function commitPosterRender(
       headers: context.req.raw.headers,
     })
   } catch (error) {
+    // Cleanup failure must not replace the error the request actually died of — a remnant it
+    // leaves is reclaimable by the next contender for the key or the sweeper.
     if (uploaded === null) {
-      await releaseReservation(db, reservation, ownerUserId, now)
+      await releaseReservation(db, reservation, ownerUserId, now).catch(() => {})
     } else {
       // The charge may already be settled; only the object's own accounting knows.
       await unwindUploadedObject(
@@ -192,7 +207,7 @@ async function commitPosterRender(
         context.env.AAT_OBJECTS,
         { ...uploaded, r2Key: key, ownerUserId, reservationId: reservation.id },
         now,
-      )
+      ).catch(() => {})
     }
     throw error
   }

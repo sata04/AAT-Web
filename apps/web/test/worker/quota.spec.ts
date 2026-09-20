@@ -11,10 +11,11 @@
 import { env } from 'cloudflare:test'
 import { and, eq, isNull } from 'drizzle-orm'
 import { describe, expect, it } from 'vitest'
-import { cloudObjects, quotaReservations, quotaUsage } from '../../worker/db/schema.ts'
+import { analysisRevisions, cloudObjects, quotaReservations, quotaUsage } from '../../worker/db/schema.ts'
 import { newId } from '../../worker/lib/ids.ts'
 import {
   finaliseReservation,
+  releaseObjectAccounting,
   sweepStaleReservations,
   unwindUploadedObject,
 } from '../../worker/services/quota.ts'
@@ -600,6 +601,7 @@ describe('quota enforcement', () => {
     await unwindUploadedObject(db(), env.AAT_OBJECTS, {
       id: object.id,
       r2Key: object.r2Key,
+      sha256: object.sha256,
       ownerUserId: object.ownerUserId,
       byteSize: object.byteSize,
       reservationId: object.reservationId,
@@ -616,5 +618,65 @@ describe('quota enforcement', () => {
     const retry = await uploadSnapshot(user, revisionId)
     expect(retry.response.status).toBe(201)
     expect(retry.size).toBe(size)
+  })
+
+  it('takes a key back from a wedged row whose unwind died mid-cleanup', async () => {
+    const user = await createUser()
+    const runId = await createRun(user)
+    const revisionId = await createRevision(user, runId)
+    const { size } = await uploadSnapshot(user, revisionId)
+
+    // Rebuild the state an unwind crash leaves: the accounting is already terminal — settled and
+    // uncharged — but the row still occupies the deterministic key, and the revision's pointer
+    // was never written, which is why the client is retrying the upload at all.
+    const [object] = await db()
+      .select()
+      .from(cloudObjects)
+      .where(eq(cloudObjects.analysisRevisionId, revisionId))
+    if (!object?.reservationId) throw new Error('expected a committed object row')
+    await releaseObjectAccounting(db(), object)
+    await db()
+      .update(analysisRevisions)
+      .set({ snapshotObjectId: null })
+      .where(eq(analysisRevisions.id, revisionId))
+
+    const wedged = await quotaOf(user)
+    expect(wedged.bytesUsed).toBe(0)
+    expect(wedged.objectCount).toBe(0)
+    // …but the row and its bytes are still there, blocking the deterministic key.
+    expect(await env.AAT_OBJECTS.get(object.r2Key)).not.toBeNull()
+
+    const retry = await uploadSnapshot(user, revisionId)
+    expect(retry.response.status).toBe(201)
+    expect(retry.size).toBe(size)
+
+    const quota = await quotaOf(user)
+    expect(quota.bytesUsed).toBe(size)
+    expect(quota.objectCount).toBe(1)
+
+    const download = await apiFetch(`/api/v1/revisions/${revisionId}/snapshot`, { cookie: user.cookie })
+    expect(download.status).toBe(200)
+    expect((await download.arrayBuffer()).byteLength).toBe(size)
+  })
+
+  it('sweeps a dead object row and the bytes it still points at', async () => {
+    const user = await createUser()
+    const runId = await createRun(user)
+    const revisionId = await createRevision(user, runId)
+    await uploadSnapshot(user, revisionId)
+
+    const [object] = await db()
+      .select()
+      .from(cloudObjects)
+      .where(eq(cloudObjects.analysisRevisionId, revisionId))
+    if (!object?.reservationId) throw new Error('expected a committed object row')
+    await releaseObjectAccounting(db(), object)
+
+    const swept = await sweepStaleReservations(db(), env.AAT_OBJECTS)
+    expect(swept.deadRowsReclaimed).toBe(1)
+
+    const [row] = await db().select().from(cloudObjects).where(eq(cloudObjects.id, object.id))
+    expect(row).toBeUndefined()
+    expect(await env.AAT_OBJECTS.get(object.r2Key)).toBeNull()
   })
 })

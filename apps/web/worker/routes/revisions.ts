@@ -60,6 +60,7 @@ import { writeAuditLog } from '../services/audit.ts'
 import {
   commitUploadedObject,
   ensureQuotaRow,
+  evictDeadObject,
   releaseObjectAccounting,
   releaseReservation,
   reserveQuota,
@@ -394,7 +395,7 @@ revisionRoutes.put(
       now,
     )
 
-    let uploaded: { id: string; byteSize: number } | null = null
+    let uploaded: { id: string; byteSize: number; sha256: string } | null = null
     try {
       // Read at most what was reserved: a client that declares 100 bytes and sends 10 MB is cut
       // off at 100 and rejected, rather than storing 10 MB against a 100-byte reservation.
@@ -421,13 +422,15 @@ revisionRoutes.put(
         throw new ApiError('SNAPSHOT_INVALID', { details: { reason: 'does_not_match_revision' } })
       }
 
-      const put = await context.env.AAT_OBJECTS.put(key, body.bytes as ArrayBufferView, {
-        httpMetadata: { contentType: 'application/json' },
-        // R2 verifies this itself and rejects the write on mismatch, so the stored bytes cannot
-        // differ from the bytes that were hashed.
-        sha256: body.sha256,
-        customMetadata: { revisionId: revision.id, runId: revision.runId, ownerUserId },
-      })
+      const putObject = () =>
+        context.env.AAT_OBJECTS.put(key, body.bytes as ArrayBufferView, {
+          httpMetadata: { contentType: 'application/json' },
+          // R2 verifies this itself and rejects the write on mismatch, so the stored bytes cannot
+          // differ from the bytes that were hashed.
+          sha256: body.sha256,
+          customMetadata: { revisionId: revision.id, runId: revision.runId, ownerUserId },
+        })
+      const put = await putObject()
 
       // R2 is the authority on how many bytes exist, not the counter kept while reading.
       const actualBytes = put?.size ?? body.bytes.length
@@ -437,10 +440,10 @@ revisionRoutes.put(
       }
 
       const objectId = newId()
-      await db.insert(cloudObjects).values({
+      const objectValues = {
         id: objectId,
         ownerUserId,
-        kind: 'snapshot',
+        kind: 'snapshot' as const,
         r2Key: key,
         byteSize: actualBytes,
         sha256: body.sha256,
@@ -450,8 +453,18 @@ revisionRoutes.put(
         analysisRevisionId: revision.id,
         reservationId: reservation.id,
         createdAt: now,
-      })
-      uploaded = { id: objectId, byteSize: actualBytes }
+      }
+      try {
+        await db.insert(cloudObjects).values(objectValues)
+      } catch (insertError) {
+        // A wedged predecessor — an unwind that died mid-cleanup — still holds this deterministic
+        // key. Finish its eviction, re-put (that cleanup may have removed the bytes we just
+        // wrote), and take the key. A live row keeps its key and the original error flies.
+        if (!(await evictDeadObject(db, key, now))) throw insertError
+        await putObject()
+        await db.insert(cloudObjects).values(objectValues)
+      }
+      uploaded = { id: objectId, byteSize: actualBytes, sha256: body.sha256 }
 
       await commitUploadedObject(
         db,
@@ -481,16 +494,17 @@ revisionRoutes.put(
       // Every failure path gives the reservation back — to the account it was taken from. Leaking
       // one would slowly consume a user's quota with bytes that were never stored. Once the object
       // row exists the charge may already be settled, so the whole upload is unwound instead —
-      // otherwise the row's unique r2_key would refuse the retry.
+      // otherwise the row's unique r2_key would refuse the retry. Cleanup failure must not replace
+      // the real error: a remnant is reclaimable by the next contender for the key or the sweeper.
       if (uploaded === null) {
-        await releaseReservation(db, reservation, ownerUserId, now)
+        await releaseReservation(db, reservation, ownerUserId, now).catch(() => {})
       } else {
         await unwindUploadedObject(
           db,
           context.env.AAT_OBJECTS,
           { ...uploaded, r2Key: key, ownerUserId, reservationId: reservation.id },
           now,
-        )
+        ).catch(() => {})
       }
       throw error
     }
@@ -591,24 +605,26 @@ revisionRoutes.put(
       now,
     )
 
-    let uploaded: { id: string; byteSize: number } | null = null
+    let uploaded: { id: string; byteSize: number; sha256: string } | null = null
     try {
       const body = await readBoundedBody(context.req.raw.body, reservation.bytes, 'SOURCE_TOO_LARGE')
       if (body.sha256 !== query.sha256) {
         throw new ApiError('INVALID_CSV', { details: { reason: 'sha256_mismatch' } })
       }
 
-      const put = await context.env.AAT_OBJECTS.put(key, body.bytes as ArrayBufferView, {
-        httpMetadata: { contentType: 'text/csv' },
-        sha256: body.sha256,
-        customMetadata: { runId: run.id, ownerUserId },
-      })
+      const putObject = () =>
+        context.env.AAT_OBJECTS.put(key, body.bytes as ArrayBufferView, {
+          httpMetadata: { contentType: 'text/csv' },
+          sha256: body.sha256,
+          customMetadata: { runId: run.id, ownerUserId },
+        })
+      const put = await putObject()
       const actualBytes = put?.size ?? body.bytes.length
 
-      await db.insert(cloudObjects).values({
+      const objectValues = {
         id: objectId,
         ownerUserId,
-        kind: 'source',
+        kind: 'source' as const,
         r2Key: key,
         byteSize: actualBytes,
         sha256: body.sha256,
@@ -618,8 +634,18 @@ revisionRoutes.put(
         runId: run.id,
         reservationId: reservation.id,
         createdAt: now,
-      })
-      uploaded = { id: objectId, byteSize: actualBytes }
+      }
+      try {
+        await db.insert(cloudObjects).values(objectValues)
+      } catch (insertError) {
+        // A wedged predecessor — an unwind that died mid-cleanup — still holds this deterministic
+        // key. Finish its eviction, re-put (that cleanup may have removed the bytes we just
+        // wrote), and take the key. A live row keeps its key and the original error flies.
+        if (!(await evictDeadObject(db, key, now))) throw insertError
+        await putObject()
+        await db.insert(cloudObjects).values(objectValues)
+      }
+      uploaded = { id: objectId, byteSize: actualBytes, sha256: body.sha256 }
       await commitUploadedObject(
         db,
         context.env.AAT_OBJECTS,
@@ -643,16 +669,17 @@ revisionRoutes.put(
     } catch (error) {
       // Once the object row exists the charge may already be settled — releaseReservation is a
       // no-op there — so the whole upload is unwound: accounting, row and bytes all go, and the
-      // deterministic key is free for the retry.
+      // deterministic key is free for the retry. Cleanup failure must not replace the real
+      // error: a remnant is reclaimable by the next contender for the key or the sweeper.
       if (uploaded === null) {
-        await releaseReservation(db, reservation, ownerUserId, now)
+        await releaseReservation(db, reservation, ownerUserId, now).catch(() => {})
       } else {
         await unwindUploadedObject(
           db,
           context.env.AAT_OBJECTS,
           { ...uploaded, r2Key: key, ownerUserId, reservationId: reservation.id },
           now,
-        )
+        ).catch(() => {})
       }
       throw error
     }
