@@ -172,7 +172,11 @@ async function waitFor(
 async function startRenderer(): Promise<boolean> {
   if (process.env.AAT_E2E_SKIP_RENDERER === '1') return false
 
-  const images = await run('docker', ['images', '-q', RENDERER_IMAGE], 'docker images')
+  // A machine with no docker at all reports itself the same way a broken
+  // daemon does — spawn failing is "Docker is not usable", not a stack crash.
+  const images = await run('docker', ['images', '-q', RENDERER_IMAGE], 'docker images').catch(
+    (error: Error) => ({ code: -1, output: error.message }),
+  )
   if (images.code !== 0) {
     process.stderr.write(
       `[e2e] Docker is not usable (${images.output.trim()}). The real-renderer specs will report it.\n`,

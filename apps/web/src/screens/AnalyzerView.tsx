@@ -49,8 +49,6 @@ interface AnalyzerViewState {
   activeCustomPosters: readonly PosterFigure[]
   pendingColumns: PendingColumnChoice | null
   settingsOpen: boolean
-  /** First-run modal; once dismissed it is a persisted flag, not a state machine. */
-  welcomeOpen: boolean
   helpOpen: boolean
   /** The one contextual hint currently allowed to show, or null. */
   hint: AnalyzerHint | null
@@ -60,10 +58,9 @@ export type AnalyzerHint = 'graph' | 'range' | 'compare'
 
 /** The actions `analyzer-actions.ts` does not build — the screen supplies them itself. */
 export type OnboardingActionKeys =
-  | 'dismissWelcome'
   | 'openHelp'
   | 'closeHelp'
-  | 'reopenWelcome'
+  | 'reopenTour'
   | 'dismissHint'
   | 'dismissAllNotices'
 
@@ -109,12 +106,11 @@ interface AnalyzerViewActions {
     configOverride?: AnalysisConfig,
   ) => Promise<void>
   setSettingsOpen: Dispatch<SetStateAction<boolean>>
-  dismissWelcome: () => void
-  /** Open help — from the toolbar, the welcome's CTA, or the quick start. */
+  /** Open help — from the toolbar's `?` or the drop zone's quick start. */
   openHelp: () => void
   closeHelp: () => void
-  /** From help's "もう一度見る": close help and show the welcome again. */
-  reopenWelcome: () => void
+  /** From help's "もう一度見る": close help and re-run the first-run tour. */
+  reopenTour: () => void
   dismissHint: (hint: AnalyzerHint) => void
   dismissAllNotices: () => void
   /**

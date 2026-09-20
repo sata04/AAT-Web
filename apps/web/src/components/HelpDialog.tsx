@@ -13,8 +13,8 @@ import { Dialog } from './Dialog.tsx'
 
 export interface HelpDialogProps {
   onClose: () => void
-  /** Re-show the first-run welcome, even though it has been seen. */
-  onShowWelcome: () => void
+  /** Re-run the first-run tour — the only way to see it again once seen. */
+  onShowTour: () => void
 }
 
 function HelpSection(props: { title: string; children: React.ReactNode }): React.JSX.Element {
@@ -33,7 +33,7 @@ export function HelpDialog(props: HelpDialogProps): React.JSX.Element {
       onClose={props.onClose}
       footer={
         <>
-          <button type="button" className="button button--flat" onClick={props.onShowWelcome}>
+          <button type="button" className="button button--flat" onClick={props.onShowTour}>
             初回の案内をもう一度見る
           </button>
           <button type="button" className="button" data-autofocus onClick={props.onClose}>

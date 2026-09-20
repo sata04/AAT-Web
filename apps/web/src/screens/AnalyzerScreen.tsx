@@ -22,7 +22,7 @@
  */
 
 import type { AnalysisConfig } from '@aat/shared'
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { type Dataset, sensorModeFrom } from '../app/dataset.ts'
 import {
   loadOnboarding,
@@ -34,7 +34,7 @@ import { type RangeStatisticsResult, rangeResultFor } from '../app/range-statist
 import { loadConfig } from '../app/settings.ts'
 import type { PosterFigure } from '../cloud/gateway.ts'
 import { type CloudStatuses, INITIAL_STATUSES } from '../cloud/status.ts'
-import { useNotices } from '../components/hooks.ts'
+import { applyViewEvent, useNotices } from '../components/hooks.ts'
 import type { ChartGeometry } from '../graph/geometry.ts'
 import {
   buildPlotModel,
@@ -48,6 +48,8 @@ import { type GraphPalette, themeSettingFrom } from '../graph/theme.ts'
 import type { ChartViewport } from '../graph/UPlotChart.tsx'
 import { useThemePalette } from '../graph/use-theme-palette.ts'
 import { canSelectRange, isComparing, type ViewMode } from '../graph/view-mode.ts'
+import { DEMO_DATASET_NAMES } from '../onboarding/demo-data.ts'
+import type { TourDriver, TourSnapshot } from '../onboarding/tour-driver.ts'
 import type { PosterContext } from '../poster/requests.ts'
 import { type SessionStatus, useSession } from '../session/SessionProvider.tsx'
 import { type AnalyzerHint, AnalyzerView } from './AnalyzerView.tsx'
@@ -71,6 +73,8 @@ interface AnalyzerDerived {
   posterContext: PosterContext | null
   posterUnavailableReason: string | null
   activeCustomPosters: readonly PosterFigure[]
+  /** The plotted data's x extent — the tour's driver reads it to place selections. */
+  dataRange: { min: number; max: number } | null
 }
 
 function useAnalyzerDerived(input: {
@@ -158,8 +162,16 @@ function useAnalyzerDerived(input: {
     posterContext,
     posterUnavailableReason,
     activeCustomPosters,
+    dataRange,
   }
 }
+
+/**
+ * The tour is the only consumer of this module — a first-run-only surface —
+ * so it stays a lazy chunk: returning researchers never pay the download for
+ * code that by design never runs for them.
+ */
+const OnboardingStage = lazy(() => import('../onboarding/OnboardingStage.tsx'))
 
 export function AnalyzerScreen(): React.JSX.Element {
   const [config, setConfig] = useState<AnalysisConfig>(loadConfig)
@@ -175,7 +187,10 @@ export function AnalyzerScreen(): React.JSX.Element {
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [customPosters, setCustomPosters] = useState<PosterFigure[]>([])
   const [onboarding, setOnboarding] = useState<OnboardingState>(loadOnboarding)
-  const [welcomeOpen, setWelcomeOpen] = useState(() => !loadOnboarding().welcomeSeen)
+  // The first-run tour — the flag it consumes is still `welcomeSeen`, so the
+  // returning researcher who answered the old welcome is not re-greeted by its
+  // replacement, and e2e's seeded fixtures keep meaning "already onboarded".
+  const [tourOpen, setTourOpen] = useState(() => !loadOnboarding().welcomeSeen)
   const [helpOpen, setHelpOpen] = useState(false)
 
   const markOnboarding = useCallback((flag: OnboardingFlag) => {
@@ -186,21 +201,6 @@ export function AnalyzerScreen(): React.JSX.Element {
       return next
     })
   }, [])
-
-  // A file arriving while the welcome is still up answers the welcome's
-  // question — close it and count it as seen rather than leaving a modal over
-  // fresh data. Only the empty→non-empty transition counts: re-showing the
-  // welcome from the operation guide is an explicit ask and must not be
-  // dismissed just because a dataset happens to be open already.
-  const previousDatasetCount = useRef(datasets.length)
-  useEffect(() => {
-    const firstDatasetArrived = previousDatasetCount.current === 0 && datasets.length > 0
-    previousDatasetCount.current = datasets.length
-    if (!firstDatasetArrived) return
-    if (!welcomeOpen) return
-    setWelcomeOpen(false)
-    markOnboarding('welcomeSeen')
-  }, [welcomeOpen, datasets.length, markOnboarding])
 
   // Doing the thing is the same as being taught it: a user who selects a
   // range or enters compare before the hint appears never needs to see it.
@@ -264,7 +264,7 @@ export function AnalyzerScreen(): React.JSX.Element {
   // exists to point at. The graph hint also waits for normal mode — its lead
   // claim is that dragging selects a range, which other modes turn off.
   const hint: AnalyzerHint | null = (() => {
-    if (welcomeOpen || helpOpen || !analysisReady || datasets.length === 0) return null
+    if (tourOpen || helpOpen || !analysisReady || datasets.length === 0) return null
     if (!onboarding.graphHintSeen && derived.selectionEnabled) return 'graph'
     if (datasets.length >= 2 && !onboarding.compareHintSeen) return 'compare'
     if (derived.selectionEnabled && selection === null && !onboarding.rangeHintSeen) return 'range'
@@ -307,60 +307,129 @@ export function AnalyzerScreen(): React.JSX.Element {
     markOnboarding(flag)
   }
 
-  const onboardingActions = {
-    dismissWelcome: () => {
-      setWelcomeOpen(false)
+  // The state the tour's driver reads — a live ref so a scene mid-wait always
+  // sees the latest commit, not the render it was built under.
+  const tourSnapshotRef = useRef<TourSnapshot>({
+    datasets,
+    mode,
+    analysisReady,
+    dataRange: null,
+    geometry: null,
+    gestureLayer: null,
+  })
+  useEffect(() => {
+    tourSnapshotRef.current = {
+      datasets,
+      mode,
+      analysisReady,
+      dataRange: derived.dataRange,
+      geometry,
+      gestureLayer,
+    }
+  })
+
+  const tourDriver = useMemo<TourDriver>(
+    () => ({
+      snapshot: () => tourSnapshotRef.current,
+      openFiles: (files) => loop.openFiles(files),
+      closeDatasets: (filenames) => {
+        for (const dataset of tourSnapshotRef.current.datasets) {
+          if (filenames.includes(dataset.filename)) loop.closeDataset(dataset)
+        }
+      },
+      applyModeEvent: (event) =>
+        applyViewEvent(tourSnapshotRef.current.mode, event, { setMode, setSelection, setViewport }),
+      activateDataset: (filename) => {
+        const dataset = tourSnapshotRef.current.datasets.find((entry) => entry.filename === filename)
+        if (dataset === undefined) return
+        setActiveName(dataset.name)
+        setSelection(null)
+        setViewport(null)
+      },
+      setSelection,
+      setViewport,
+      resetView: () => {
+        setMode('NORMAL')
+        setSelection(null)
+        setViewport(null)
+      },
+      openFilePicker: () => document.getElementById('aat-file-open')?.click(),
+    }),
+    [loop],
+  )
+
+  const finishTour = useCallback(
+    (kind: 'keep' | 'skip', drove: boolean) => {
+      if (kind === 'skip' && drove) {
+        // Mid-tour exits leave the workspace pristine — whatever the scenes
+        // opened goes back out with the stage.
+        tourDriver.closeDatasets(DEMO_DATASET_NAMES)
+        tourDriver.resetView()
+      }
+      if (kind === 'keep' && drove) {
+        // The tour already demonstrated selection, gestures and compare live;
+        // replaying those as hint bars the moment it ends would be noise.
+        markOnboarding('graphHintSeen')
+        markOnboarding('rangeHintSeen')
+        markOnboarding('compareHintSeen')
+      }
       markOnboarding('welcomeSeen')
+      setTourOpen(false)
     },
-    openHelp: () => {
-      // Reaching help through the welcome is a dismissal of the welcome.
-      if (welcomeOpen) markOnboarding('welcomeSeen')
-      setWelcomeOpen(false)
-      setHelpOpen(true)
-    },
+    [tourDriver, markOnboarding],
+  )
+
+  const onboardingActions = {
+    openHelp: () => setHelpOpen(true),
     closeHelp: () => setHelpOpen(false),
-    reopenWelcome: () => {
+    reopenTour: () => {
       setHelpOpen(false)
-      setWelcomeOpen(true)
+      setTourOpen(true)
     },
     dismissHint,
   }
 
   return (
-    <AnalyzerView
-      state={{
-        config,
-        datasets,
-        active: derived.active,
-        activeName,
-        mode,
-        selection,
-        rangeResult: derived.rangeResult,
-        selectionEnabled: derived.selectionEnabled,
-        statuses,
-        // The cloud lanes describe the last file synced, which is not always
-        // the one on screen — the status bar names it when they differ.
-        cloudSubject,
-        notices,
-        posterContext: derived.posterContext,
-        posterUnavailableReason: derived.posterUnavailableReason,
-        activeCustomPosters: derived.activeCustomPosters,
-        pendingColumns: loop.pendingColumns,
-        settingsOpen,
-        welcomeOpen,
-        helpOpen,
-        hint,
-      }}
-      plot={{
-        model: derived.plotModel,
-        palette,
-        viewport: derived.effectiveViewport,
-        bounds: derived.bounds,
-        geometry,
-        canvas,
-        gestureLayer,
-      }}
-      actions={{ ...actions, ...onboardingActions, dismissAllNotices }}
-    />
+    <>
+      <AnalyzerView
+        state={{
+          config,
+          datasets,
+          active: derived.active,
+          activeName,
+          mode,
+          selection,
+          rangeResult: derived.rangeResult,
+          selectionEnabled: derived.selectionEnabled,
+          statuses,
+          // The cloud lanes describe the last file synced, which is not always
+          // the one on screen — the status bar names it when they differ.
+          cloudSubject,
+          notices,
+          posterContext: derived.posterContext,
+          posterUnavailableReason: derived.posterUnavailableReason,
+          activeCustomPosters: derived.activeCustomPosters,
+          pendingColumns: loop.pendingColumns,
+          settingsOpen,
+          helpOpen,
+          hint,
+        }}
+        plot={{
+          model: derived.plotModel,
+          palette,
+          viewport: derived.effectiveViewport,
+          bounds: derived.bounds,
+          geometry,
+          canvas,
+          gestureLayer,
+        }}
+        actions={{ ...actions, ...onboardingActions, dismissAllNotices }}
+      />
+      {tourOpen ? (
+        <Suspense fallback={null}>
+          <OnboardingStage driver={tourDriver} onFinish={finishTour} />
+        </Suspense>
+      ) : null}
+    </>
   )
 }

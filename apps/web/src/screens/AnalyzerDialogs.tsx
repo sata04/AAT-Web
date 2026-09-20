@@ -3,13 +3,11 @@ import { clearCache } from '../cache/analysis-cache.ts'
 import { ColumnSelectorDialog } from '../components/ColumnSelectorDialog.tsx'
 import { HelpDialog } from '../components/HelpDialog.tsx'
 import { SettingsDialog } from '../components/SettingsDialog.tsx'
-import { WelcomeDialog } from '../components/WelcomeDialog.tsx'
 import type { AnalyzerViewProps } from './AnalyzerView.tsx'
 
 /**
- * Every modal the analyzer can raise — column confirmation, settings, the
- * first-run welcome, and the operation guide — rendered from the same state
- * slots. They live apart from the view's layout code so adding a dialog does
+ * Every modal the analyzer can raise — column confirmation, settings, and
+ * the operation guide — rendered from the same state slots. They live apart from the view's layout code so adding a dialog does
  * not grow the screen's composition.
  *
  * Only one mounts at a time. The states are independent — a file's column
@@ -18,7 +16,9 @@ import type { AnalyzerViewProps } from './AnalyzerView.tsx'
  * would reach both. A queued modal keeps its flag and re-appears when the
  * slot frees. Settings wins the slot because unmounting it would discard a
  * half-edited draft; the column question comes next — it blocks an import in
- * flight — and the information-only welcome and help wait behind the rest.
+ * flight — and the information-only help waits behind the rest. The first-run
+ * tour is absent here on purpose: it is not a `Dialog` at all, but a stage
+ * mounted over the whole analyzer by `AnalyzerScreen`.
  */
 export function AnalyzerDialogs({
   state,
@@ -47,23 +47,8 @@ export function AnalyzerDialogs({
           onCancel={actions.cancelPendingColumns}
           onConfirm={actions.confirmPendingColumns}
         />
-      ) : state.welcomeOpen ? (
-        <WelcomeDialog
-          onDismiss={actions.dismissWelcome}
-          onShowHelp={actions.openHelp}
-          // There is exactly one CSV picker on the page — the toolbar's — so
-          // the welcome borrows it rather than hiding a second input inside a
-          // modal, where a hidden input would only confuse the focus trap.
-          // Dismissing first keeps the picker, progress and any column dialog
-          // unblocked; closing only on a finished analysis would leave the
-          // welcome modal above the column selector.
-          onOpenCsv={() => {
-            actions.dismissWelcome()
-            document.getElementById('aat-file-open')?.click()
-          }}
-        />
       ) : state.helpOpen ? (
-        <HelpDialog onClose={actions.closeHelp} onShowWelcome={actions.reopenWelcome} />
+        <HelpDialog onClose={actions.closeHelp} onShowTour={actions.reopenTour} />
       ) : null}
     </>
   )
