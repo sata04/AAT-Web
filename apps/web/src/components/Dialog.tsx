@@ -22,6 +22,12 @@ export interface DialogProps {
 const FOCUSABLE =
   'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])'
 
+/** An explicit `data-autofocus` wins over DOM order. */
+function initialFocusTarget(panel: HTMLElement | null): HTMLElement | null {
+  if (panel === null) return null
+  return panel.querySelector<HTMLElement>('[data-autofocus]') ?? panel.querySelector<HTMLElement>(FOCUSABLE)
+}
+
 export function Dialog(props: DialogProps): React.JSX.Element {
   const titleId = useId()
   const descriptionId = useId()
@@ -30,12 +36,7 @@ export function Dialog(props: DialogProps): React.JSX.Element {
 
   useEffect(() => {
     restoreFocusTo.current = document.activeElement
-    const panel = panelRef.current
-    // An explicit `data-autofocus` wins over DOM order — useful when the
-    // first control in the markup is not the one a user should start on.
-    const first =
-      panel?.querySelector<HTMLElement>('[data-autofocus]') ?? panel?.querySelector<HTMLElement>(FOCUSABLE)
-    first?.focus()
+    initialFocusTarget(panelRef.current)?.focus()
     return () => {
       const previous = restoreFocusTo.current
       if (previous instanceof HTMLElement) previous.focus()

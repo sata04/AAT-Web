@@ -256,10 +256,11 @@ export function AnalyzerScreen(): React.JSX.Element {
   // One hint at a time, in the order a new user meets the features: how the
   // graph gestures work, then what comparing is for, then what dragging
   // selects for. None of them shows while a modal is up or before an analysis
-  // exists to point at.
+  // exists to point at. The graph hint also waits for normal mode — its lead
+  // claim is that dragging selects a range, which other modes turn off.
   const hint: AnalyzerHint | null = (() => {
     if (welcomeOpen || helpOpen || !analysisReady) return null
-    if (!onboarding.graphHintSeen) return 'graph'
+    if (!onboarding.graphHintSeen && derived.selectionEnabled) return 'graph'
     if (datasets.length >= 2 && !onboarding.compareHintSeen) return 'compare'
     if (derived.selectionEnabled && selection === null && !onboarding.rangeHintSeen) return 'range'
     return null
