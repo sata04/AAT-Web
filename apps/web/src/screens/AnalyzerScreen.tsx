@@ -34,6 +34,7 @@ import { type RangeStatisticsResult, rangeResultFor } from '../app/range-statist
 import { loadConfig } from '../app/settings.ts'
 import type { PosterFigure } from '../cloud/gateway.ts'
 import { type CloudStatuses, INITIAL_STATUSES } from '../cloud/status.ts'
+import { useTopmostDialogKeys } from '../components/Dialog.tsx'
 import { applyViewEvent, useNotices } from '../components/hooks.ts'
 import type { ChartGeometry } from '../graph/geometry.ts'
 import {
@@ -419,7 +420,10 @@ export function AnalyzerScreen(): React.JSX.Element {
         const pending = { which, epoch: tracker.epoch, settled: false }
         tracker.pending.set(filename, pending)
         try {
-          await loop.openFiles([demoCsvFile(which, filename)])
+          // Local-only: the tour's own copy promises nothing leaves the
+          // browser, and a skipped tour must never leave cloud revisions or
+          // poster jobs behind for a signed-in researcher.
+          await loop.openFiles([demoCsvFile(which, filename)], { localOnly: true })
         } finally {
           pending.settled = true
         }
@@ -494,6 +498,16 @@ export function AnalyzerScreen(): React.JSX.Element {
         markOnboarding('rangeHintSeen')
         markOnboarding('compareHintSeen')
       }
+      // The run is over: whatever it left is now the researcher's own data.
+      // Forget ownership — a replay must see kept demos in `taken` (and pick
+      // fallback names), never as objects it is allowed to close. A skipped
+      // run keeps `pending` alive until settle so an open still in flight
+      // self-closes on install; a kept run drops it — the landing file is
+      // exactly what the user asked for.
+      const tracker = tourOwnedRef.current
+      tracker.owned.clear()
+      tracker.keep.clear()
+      if (kind === 'keep') tracker.pending.clear()
       markOnboarding('welcomeSeen')
       setTourOpen(false)
     },
@@ -547,10 +561,37 @@ export function AnalyzerScreen(): React.JSX.Element {
         actions={{ ...actions, ...onboardingActions, dismissAllNotices }}
       />
       {tourOpen ? (
-        <Suspense fallback={null}>
+        <Suspense fallback={<TourLoadingScrim />}>
           <OnboardingStage driver={tourDriver} onFinish={finishTour} />
         </Suspense>
       ) : null}
     </>
+  )
+}
+
+/**
+ * What `tourOpen` shows while the stage chunk downloads: an inert scrim on
+ * the same layer the stage will occupy. Without it the bare analyzer stays
+ * interactive through the fetch — a started import or opened dialog would
+ * land *under* a modal that mounts seconds later.
+ */
+function TourLoadingScrim(): React.JSX.Element {
+  const ref = useRef<HTMLDivElement | null>(null)
+  // Registers in the topmost-panel set so Escape/Tab hear the same rules the
+  // stage will — while it is topmost, the trap has nothing to cycle to.
+  useTopmostDialogKeys(ref, () => {})
+  useEffect(() => {
+    ref.current?.focus()
+  }, [])
+  return (
+    <div
+      ref={ref}
+      tabIndex={-1}
+      className="dialog-backdrop"
+      role="dialog"
+      aria-modal="true"
+      aria-label="AAT Web のはじめてガイド"
+      aria-busy="true"
+    />
   )
 }

@@ -266,6 +266,32 @@ test.describe('onboarding tour', () => {
     await expect(datasets(page).getByRole('button', { name: /sample-a-tour|sample-b/ })).toHaveCount(0)
   })
 
+  test('a replayed tour never removes the samples an earlier run kept', async ({ page }) => {
+    await page.goto('/')
+    // Keep the sample, then replay: ownership of it must have ended with the
+    // first run, so the replay sees it as the researcher's own data.
+    await tourStage(page).getByRole('button', { name: 'サンプルデータで試す' }).click()
+    await waitForAnalysis(page)
+    const kept = datasets(page).getByRole('button', { name: 'sample-a', exact: true })
+    await expect(kept).toBeVisible()
+
+    await page.getByRole('button', { name: '操作ガイド', exact: true }).click()
+    await page.getByRole('dialog').getByRole('button', { name: '初回の案内をもう一度見る' }).click()
+    const replay = tourStage(page)
+    await replay.getByRole('button', { name: 'デモを見る' }).click()
+
+    // The replay's own demo lands under the fallback name — and the kept
+    // sample survives even *inside* the run, where cleanup used to close it.
+    await expect(tourCaption(replay)).toHaveAttribute('data-scene', 'graph')
+    await expect(kept).toBeVisible()
+    await expect(datasets(page).getByRole('button', { name: 'sample-a-tour', exact: true })).toBeVisible()
+
+    await page.keyboard.press('Escape')
+    await expect(replay).toHaveCount(0)
+    await expect(kept).toBeVisible()
+    await expect(datasets(page).getByRole('button', { name: /sample-a-tour|sample-b/ })).toHaveCount(0)
+  })
+
   test("skipping a replayed tour hands the workspace's view back", async ({ page }) => {
     await page.goto('/')
     await tourStage(page).getByRole('button', { name: 'そのまま始める' }).click()
