@@ -112,11 +112,93 @@ export interface AnalyzerViewProps {
   actions: AnalyzerViewActions
 }
 
+/** The export and settings controls on the toolbar's trailing side. */
+function ExportButtons({ state, plot, actions }: AnalyzerViewProps): React.JSX.Element {
+  return (
+    <div className="command-bar__group">
+      <button
+        type="button"
+        className="button"
+        disabled={state.active === null}
+        onClick={() => void actions.exportData('xlsx')}
+      >
+        Excelで書き出す
+      </button>
+      <button
+        type="button"
+        className="button"
+        disabled={state.active === null}
+        onClick={() => void actions.exportData('csv')}
+      >
+        CSVで書き出す
+      </button>
+      <button
+        type="button"
+        className="button"
+        disabled={plot.canvas === null}
+        title={PNG_PARITY_NOTICE}
+        aria-describedby="png-parity-hint"
+        onClick={() => void actions.exportPng()}
+      >
+        PNGを保存
+      </button>
+      {/* A `title` tooltip never reaches touch or screen-reader users; the
+          parity caveat is worth one line of hidden text. */}
+      <span id="png-parity-hint" className="visually-hidden">
+        {PNG_PARITY_NOTICE}
+      </span>
+      <button type="button" className="button button--flat" onClick={() => actions.setSettingsOpen(true)}>
+        設定
+      </button>
+    </div>
+  )
+}
+
+/** The normal / show-all / G-quality segmented control. */
+function ViewModeButtons({
+  state,
+  actions,
+}: Pick<AnalyzerViewProps, 'state' | 'actions'>): React.JSX.Element {
+  const hasDatasets = state.datasets.length > 0
+  const showingAll = isShowingAll(state.mode)
+  const showingGQuality = isGQuality(state.mode)
+  return (
+    <fieldset className="command-bar__group segmented">
+      <legend className="visually-hidden">表示モード</legend>
+      <button
+        type="button"
+        className="button"
+        aria-pressed={!showingAll && !showingGQuality}
+        disabled={!hasDatasets}
+        onClick={() => actions.applyModeEvent(showingAll ? 'SHOW_ALL_OFF' : 'G_QUALITY_OFF')}
+      >
+        通常
+      </button>
+      <button
+        type="button"
+        className="button"
+        aria-pressed={showingAll}
+        disabled={!hasDatasets || showingGQuality}
+        onClick={() => actions.applyModeEvent(showingAll ? 'SHOW_ALL_OFF' : 'SHOW_ALL_ON')}
+      >
+        全データ
+      </button>
+      <button
+        type="button"
+        className="button"
+        aria-pressed={showingGQuality}
+        disabled={!hasDatasets}
+        onClick={() => actions.applyModeEvent(showingGQuality ? 'G_QUALITY_OFF' : 'G_QUALITY_ON')}
+      >
+        G-quality
+      </button>
+    </fieldset>
+  )
+}
+
 function AnalyzerToolbar({ state, plot, actions }: AnalyzerViewProps): React.JSX.Element {
   const hasDatasets = state.datasets.length > 0
   const comparing = isComparing(state.mode)
-  const showingAll = isShowingAll(state.mode)
-  const showingGQuality = isGQuality(state.mode)
 
   const zoomIn = () => {
     const span = plot.viewport.max - plot.viewport.min
@@ -140,77 +222,9 @@ function AnalyzerToolbar({ state, plot, actions }: AnalyzerViewProps): React.JSX
   }
 
   return (
-    <CommandBar
-      trailing={
-        <div className="command-bar__group">
-          <button
-            type="button"
-            className="button"
-            disabled={state.active === null}
-            onClick={() => void actions.exportData('xlsx')}
-          >
-            Excelで書き出す
-          </button>
-          <button
-            type="button"
-            className="button"
-            disabled={state.active === null}
-            onClick={() => void actions.exportData('csv')}
-          >
-            CSVで書き出す
-          </button>
-          <button
-            type="button"
-            className="button"
-            disabled={plot.canvas === null}
-            title={PNG_PARITY_NOTICE}
-            aria-describedby="png-parity-hint"
-            onClick={() => void actions.exportPng()}
-          >
-            PNGを保存
-          </button>
-          {/* A `title` tooltip never reaches touch or screen-reader users; the
-              parity caveat is worth one line of hidden text. */}
-          <span id="png-parity-hint" className="visually-hidden">
-            {PNG_PARITY_NOTICE}
-          </span>
-          <button type="button" className="button button--flat" onClick={() => actions.setSettingsOpen(true)}>
-            設定
-          </button>
-        </div>
-      }
-    >
+    <CommandBar trailing={<ExportButtons state={state} plot={plot} actions={actions} />}>
       <FileOpenControl onFiles={actions.openFiles} />
-      <fieldset className="command-bar__group segmented">
-        <legend className="visually-hidden">表示モード</legend>
-        <button
-          type="button"
-          className="button"
-          aria-pressed={!showingAll && !showingGQuality}
-          disabled={!hasDatasets}
-          onClick={() => actions.applyModeEvent(showingAll ? 'SHOW_ALL_OFF' : 'G_QUALITY_OFF')}
-        >
-          通常
-        </button>
-        <button
-          type="button"
-          className="button"
-          aria-pressed={showingAll}
-          disabled={!hasDatasets || showingGQuality}
-          onClick={() => actions.applyModeEvent(showingAll ? 'SHOW_ALL_OFF' : 'SHOW_ALL_ON')}
-        >
-          全データ
-        </button>
-        <button
-          type="button"
-          className="button"
-          aria-pressed={showingGQuality}
-          disabled={!hasDatasets}
-          onClick={() => actions.applyModeEvent(showingGQuality ? 'G_QUALITY_OFF' : 'G_QUALITY_ON')}
-        >
-          G-quality
-        </button>
-      </fieldset>
+      <ViewModeButtons state={state} actions={actions} />
       <div className="command-bar__group">
         <button
           type="button"
@@ -277,46 +291,59 @@ function FileOpenControl({ onFiles }: { onFiles: (files: File[]) => Promise<void
   )
 }
 
-function GraphArea({ state, plot, actions }: AnalyzerViewProps): React.JSX.Element {
-  const running = state.statuses.analysis.kind === 'running' ? state.statuses.analysis : null
-  // Dropping is how the second file of a comparison arrives; the full-size
-  // dropzone only exists for the first file, so the graph itself answers a
-  // file drag once datasets are open.
+/**
+ * The graph area's file-drop handlers. Dropping is how the second file of a
+ * comparison arrives; the full-size dropzone only exists for the first file,
+ * so the graph itself answers a file drag once datasets are open.
+ */
+function useFileDrop(onFiles: (files: File[]) => Promise<void>) {
   const [dropping, setDropping] = useState(false)
   const dropDepth = useRef(0)
   const isFileDrag = (event: React.DragEvent) => event.dataTransfer.types.includes('Files')
+  return {
+    dropping,
+    onDragEnter: (event: React.DragEvent) => {
+      if (!isFileDrag(event)) return
+      event.preventDefault()
+      // Counted rather than toggled: child boundaries fire enter/leave pairs.
+      dropDepth.current += 1
+      setDropping(true)
+    },
+    onDragOver: (event: React.DragEvent) => {
+      if (!isFileDrag(event)) return
+      event.preventDefault()
+      event.dataTransfer.dropEffect = 'copy'
+    },
+    onDragLeave: () => {
+      dropDepth.current = Math.max(0, dropDepth.current - 1)
+      if (dropDepth.current === 0) setDropping(false)
+    },
+    onDrop: (event: React.DragEvent) => {
+      if (!isFileDrag(event)) return
+      event.preventDefault()
+      dropDepth.current = 0
+      setDropping(false)
+      const files = csvFilesFrom(event.dataTransfer.files)
+      if (files.length > 0) void onFiles(files)
+    },
+  }
+}
+
+function GraphArea({ state, plot, actions }: AnalyzerViewProps): React.JSX.Element {
+  const running = state.statuses.analysis.kind === 'running' ? state.statuses.analysis : null
+  const fileDrop = useFileDrop(actions.openFiles)
   return (
     <main
       className="graph-area"
       id="aat-graph"
       tabIndex={-1}
-      onDragEnter={(event) => {
-        if (!isFileDrag(event)) return
-        event.preventDefault()
-        // Counted rather than toggled: child boundaries fire enter/leave pairs.
-        dropDepth.current += 1
-        setDropping(true)
-      }}
-      onDragOver={(event) => {
-        if (!isFileDrag(event)) return
-        event.preventDefault()
-        event.dataTransfer.dropEffect = 'copy'
-      }}
-      onDragLeave={() => {
-        dropDepth.current = Math.max(0, dropDepth.current - 1)
-        if (dropDepth.current === 0) setDropping(false)
-      }}
-      onDrop={(event) => {
-        if (!isFileDrag(event)) return
-        event.preventDefault()
-        dropDepth.current = 0
-        setDropping(false)
-        const files = csvFilesFrom(event.dataTransfer.files)
-        if (files.length > 0) void actions.openFiles(files)
-      }}
+      onDragEnter={fileDrop.onDragEnter}
+      onDragOver={fileDrop.onDragOver}
+      onDragLeave={fileDrop.onDragLeave}
+      onDrop={fileDrop.onDrop}
     >
       <h1 className="visually-hidden">加速度データ解析</h1>
-      {dropping ? (
+      {fileDrop.dropping ? (
         <div className="graph-area__drop-hint" aria-hidden="true">
           CSVファイルをドロップして追加
         </div>

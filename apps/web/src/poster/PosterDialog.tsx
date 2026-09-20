@@ -42,6 +42,8 @@ import {
   isPosterPresetVersion,
   POSTER_PRESET_VERSIONS,
   type PosterFigureSizeId,
+  type PosterFigureSizeOption,
+  type PosterFormDefaults,
   type PosterPresetVersion,
   posterDpiOptions,
   posterFigureSizeOptions,
@@ -49,14 +51,20 @@ import {
   posterTitleLine,
   type SeriesSelection,
 } from '@aat/plot-spec'
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useMemo, useState } from 'react'
 import { formatFixed } from '../app/format.ts'
 import type { PosterFigure } from '../cloud/gateway.ts'
 import { posterImageUrl } from '../cloud/gateway.ts'
 import { Dialog } from '../components/Dialog.tsx'
+import { useMountedRef } from '../components/hooks.ts'
 import type { SelectionRange } from '../graph/selection.ts'
-import type { PosterSpecAdvice } from './errors.ts'
-import { type CustomPosterRequest, generateCustomPoster, type PosterContext } from './requests.ts'
+import type { PosterRangeAction, PosterSpecAdvice } from './errors.ts'
+import {
+  type CustomPosterRequest,
+  generateCustomPoster,
+  type PosterContext,
+  type PosterRequestOutcome,
+} from './requests.ts'
 import { defaultSeriesFor, posterSeriesOptionsFor } from './source.ts'
 
 export interface PosterDialogProps {
@@ -98,6 +106,108 @@ function numberOrNull(text: string): number | null {
   return Number.isFinite(value) ? value : null
 }
 
+/** The four bound text fields a fresh dialog opens with. */
+function initialBounds(
+  selection: SelectionRange | null,
+  yRange: { min: number; max: number } | undefined,
+  defaults: PosterFormDefaults,
+): Bounds {
+  return {
+    xMin: selection === null ? '' : String(selection.xMin),
+    xMax: selection === null ? '' : String(selection.xMax),
+    yMin: String(yRange?.min ?? defaults.yMin),
+    yMax: String(yRange?.max ?? defaults.yMax),
+  }
+}
+
+/** The form's values at submit time, in the units the request type wants. */
+interface PosterFormValues {
+  series: SeriesSelection
+  title: string
+  showLegend: boolean
+  presetVersion: PosterPresetVersion
+  /** Undefined when the stored size id fell off the option list — the preset's size then. */
+  size: PosterFigureSizeOption | undefined
+  dpi: number
+  bounds: Bounds
+}
+
+/**
+ * The request a submit sends, or null when the required x bounds cannot be
+ * read — caught here rather than by the builder so the message can name the
+ * two fields the user can see, instead of the spec field names they cannot.
+ *
+ * Optional bounds are assigned conditionally: the builder's request type is
+ * exact, so "absent" and "present and undefined" are different requests. An
+ * absent bound takes the frozen preset's `-1 .. 1` G — never Matplotlib's
+ * autoscaling, which is a framing the desktop application cannot produce.
+ */
+function posterRequestFor(form: PosterFormValues, defaults: PosterFormDefaults): CustomPosterRequest | null {
+  const xMin = numberOrNull(form.bounds.xMin)
+  const xMax = numberOrNull(form.bounds.xMax)
+  if (xMin === null || xMax === null) return null
+  const yMin = numberOrNull(form.bounds.yMin)
+  const yMax = numberOrNull(form.bounds.yMax)
+  return {
+    series: form.series,
+    xMin,
+    xMax,
+    title: form.title,
+    showLegend: form.showLegend,
+    posterPresetVersion: form.presetVersion,
+    figureWidth: form.size?.widthInches ?? defaults.figureWidth,
+    figureHeight: form.size?.heightInches ?? defaults.figureHeight,
+    dpi: form.dpi,
+    ...(yMin === null ? {} : { yMin }),
+    ...(yMax === null ? {} : { yMax }),
+  }
+}
+
+/** Where a settled submit writes back. */
+interface PosterOutcomeSinks {
+  mounted: { readonly current: boolean }
+  onCreated: (poster: PosterFigure) => void
+  onFailed: ((message: string) => void) | undefined
+  setSubmitting: (submitting: boolean) => void
+  setCreated: (poster: PosterFigure | null) => void
+  setAdvice: (advice: PosterSpecAdvice | null) => void
+  setCloudMessage: (message: string | null) => void
+}
+
+/**
+ * Route a submit's outcome. The dialog can be closed mid-render — the poll
+ * continues regardless — so an outcome that lands after that goes to the
+ * notice stack: nobody can see a form-level message, and the result still
+ * belongs to the user.
+ */
+function settlePosterOutcome(outcome: PosterRequestOutcome, sinks: PosterOutcomeSinks): void {
+  if (!sinks.mounted.current) {
+    if (outcome.ok) sinks.onCreated(outcome.poster)
+    else sinks.onFailed?.(outcome.kind === 'spec' ? outcome.advice.message : outcome.message)
+    return
+  }
+  sinks.setSubmitting(false)
+  if (outcome.ok) {
+    sinks.setCreated(outcome.poster)
+    sinks.onCreated(outcome.poster)
+    return
+  }
+  if (outcome.kind === 'spec') {
+    sinks.setAdvice(outcome.advice)
+    return
+  }
+  sinks.setCloudMessage(outcome.message)
+}
+
+/** The bounds an advice action applies: narrow to the limit, or move to the data. */
+function boundsAfterAdvice(action: PosterRangeAction, current: Bounds): Bounds {
+  if (action.kind === 'narrow-range') {
+    const start = numberOrNull(current.xMin) ?? 0
+    return { ...current, xMax: String(start + action.maxSpanSeconds) }
+  }
+  return { ...current, xMin: String(action.xMin), xMax: String(action.xMax) }
+}
+
 export function PosterDialog(props: PosterDialogProps): React.JSX.Element {
   const { context, selection } = props
   const { dataset, runCode } = context
@@ -117,21 +227,10 @@ export function PosterDialog(props: PosterDialogProps): React.JSX.Element {
 
   // Prefilled from the selection, then owned by the form: a researcher typing exact bounds for a
   // method section must not have them snap back when the pointer grazes the graph behind the modal.
-  const [bounds, setBounds] = useState<Bounds>(() => ({
-    xMin: selection === null ? '' : String(selection.xMin),
-    xMax: selection === null ? '' : String(selection.xMax),
-    yMin: String(props.yRange?.min ?? defaults.yMin),
-    yMax: String(props.yRange?.max ?? defaults.yMax),
-  }))
+  const [bounds, setBounds] = useState<Bounds>(() => initialBounds(selection, props.yRange, defaults))
 
   // The dialog can be closed mid-render; the poll continues regardless.
-  const mounted = useRef(true)
-  useEffect(
-    () => () => {
-      mounted.current = false
-    },
-    [],
-  )
+  const mounted = useMountedRef()
 
   const [submitting, setSubmitting] = useState(false)
   const [advice, setAdvice] = useState<PosterSpecAdvice | null>(null)
@@ -150,66 +249,32 @@ export function PosterDialog(props: PosterDialogProps): React.JSX.Element {
     setCloudMessage(null)
     setCreated(null)
 
-    const xMin = numberOrNull(bounds.xMin)
-    const xMax = numberOrNull(bounds.xMax)
-    if (xMin === null || xMax === null) {
-      // Caught here rather than by the builder so the message names the two fields the user can
-      // see, instead of the spec field names they cannot.
+    const request = posterRequestFor(
+      { series, title, showLegend, presetVersion, size, dpi, bounds },
+      defaults,
+    )
+    if (request === null) {
       setCloudMessage('開始時刻と終了時刻を入力してください。')
       return
-    }
-    const yMin = numberOrNull(bounds.yMin)
-    const yMax = numberOrNull(bounds.yMax)
-
-    const request: CustomPosterRequest = {
-      series,
-      xMin,
-      xMax,
-      title,
-      showLegend,
-      posterPresetVersion: presetVersion,
-      figureWidth: size?.widthInches ?? defaults.figureWidth,
-      figureHeight: size?.heightInches ?? defaults.figureHeight,
-      dpi,
-      // Assigned conditionally: the builder's request type is exact, so "absent" and "present and
-      // undefined" are different requests. An absent bound takes the frozen preset's `-1 .. 1` G —
-      // never Matplotlib's autoscaling, which is a framing the desktop application cannot produce.
-      ...(yMin === null ? {} : { yMin }),
-      ...(yMax === null ? {} : { yMax }),
     }
 
     setSubmitting(true)
     const outcome = await generateCustomPoster(context, request)
-    if (!mounted.current) {
-      // Nobody can see a form-level message; the result still belongs to the
-      // user, so report it where the app reports everything else.
-      if (outcome.ok) props.onCreated(outcome.poster)
-      else props.onFailed?.(outcome.kind === 'spec' ? outcome.advice.message : outcome.message)
-      return
-    }
-    setSubmitting(false)
-
-    if (outcome.ok) {
-      setCreated(outcome.poster)
-      props.onCreated(outcome.poster)
-      return
-    }
-    if (outcome.kind === 'spec') {
-      setAdvice(outcome.advice)
-      return
-    }
-    setCloudMessage(outcome.message)
+    settlePosterOutcome(outcome, {
+      mounted,
+      onCreated: props.onCreated,
+      onFailed: props.onFailed,
+      setSubmitting,
+      setCreated,
+      setAdvice,
+      setCloudMessage,
+    })
   }
 
   const applyAdviceAction = () => {
     const action = advice?.action
     if (action === undefined || action === null) return
-    if (action.kind === 'narrow-range') {
-      const start = numberOrNull(bounds.xMin) ?? 0
-      setBounds((current) => ({ ...current, xMax: String(start + action.maxSpanSeconds) }))
-    } else {
-      setBounds((current) => ({ ...current, xMin: String(action.xMin), xMax: String(action.xMax) }))
-    }
+    setBounds((current) => boundsAfterAdvice(action, current))
     setAdvice(null)
   }
 
@@ -237,188 +302,281 @@ export function PosterDialog(props: PosterDialogProps): React.JSX.Element {
         </>
       }
     >
-      <section className="dialog__section">
-        <h3 className="panel__title">範囲</h3>
-        <p className="panel__hint">
-          {selection === null
-            ? 'グラフ上をドラッグして範囲を選ぶと、ここに反映されます。数値を直接入力することもできます。'
-            : `グラフの選択範囲: ${formatFixed(selection.xMin, 4)} 秒 ～ ${formatFixed(selection.xMax, 4)} 秒`}
-        </p>
-        <div className="dialog__grid">
-          <label className="field">
-            <span className="field__label">開始 (s)</span>
-            <input
-              className="input input--numeric"
-              type="number"
-              step="0.001"
-              value={bounds.xMin}
-              onChange={(event) => setBound('xMin', event.target.value)}
-            />
-          </label>
-          <label className="field">
-            <span className="field__label">終了 (s)</span>
-            <input
-              className="input input--numeric"
-              type="number"
-              step="0.001"
-              value={bounds.xMax}
-              onChange={(event) => setBound('xMax', event.target.value)}
-            />
-          </label>
-        </div>
-        {selection === null ? null : (
-          <button
-            type="button"
-            className="button button--flat"
-            onClick={() =>
-              setBounds((current) => ({
-                ...current,
-                xMin: String(selection.xMin),
-                xMax: String(selection.xMax),
-              }))
-            }
-          >
-            グラフの選択範囲を取り込む
-          </button>
-        )}
-      </section>
+      <RangeSection
+        bounds={bounds}
+        selection={selection}
+        onBound={setBound}
+        onImportSelection={(picked) =>
+          setBounds((current) => ({ ...current, xMin: String(picked.xMin), xMax: String(picked.xMax) }))
+        }
+      />
+      <YRangeSection bounds={bounds} defaults={defaults} onBound={setBound} />
+      <ContentSection
+        series={series}
+        seriesOptions={seriesOptions}
+        title={title}
+        runCode={runCode}
+        titlePreview={titlePreview}
+        showLegend={showLegend}
+        onSeries={setSeries}
+        onTitle={setTitle}
+        onShowLegend={setShowLegend}
+      />
+      <FormatSection
+        presetVersion={presetVersion}
+        figureSizeId={figureSizeId}
+        dpi={dpi}
+        sizeOptions={sizeOptions}
+        dpiOptions={dpiOptions}
+        onPresetVersion={setPresetVersion}
+        onFigureSizeId={setFigureSizeId}
+        onDpi={setDpi}
+      />
+      <PosterOutcome
+        advice={advice}
+        cloudMessage={cloudMessage}
+        created={created}
+        titlePreview={titlePreview}
+        onApplyAdvice={applyAdviceAction}
+      />
+    </Dialog>
+  )
+}
 
-      <section className="dialog__section">
-        <h3 className="panel__title">Y軸の範囲 (G)</h3>
-        <p className="panel__hint">
-          初期値は画面のグラフと同じ範囲です。空欄にすると既定値（
-          {defaults.yMin} 〜 {defaults.yMax} G）が使われます。デスクトップ版と同じく、
-          データに合わせて自動で決まることはありません。
-        </p>
-        <div className="dialog__grid">
-          <label className="field">
-            <span className="field__label">下限 (G)</span>
-            <input
-              className="input input--numeric"
-              type="number"
-              step="0.001"
-              value={bounds.yMin}
-              onChange={(event) => setBound('yMin', event.target.value)}
-            />
-          </label>
-          <label className="field">
-            <span className="field__label">上限 (G)</span>
-            <input
-              className="input input--numeric"
-              type="number"
-              step="0.001"
-              value={bounds.yMax}
-              onChange={(event) => setBound('yMax', event.target.value)}
-            />
-          </label>
-        </div>
-      </section>
-
-      <section className="dialog__section">
-        <h3 className="panel__title">内容</h3>
-        <div className="dialog__grid">
-          <label className="field">
-            <span className="field__label">表示するセンサー</span>
-            <select
-              className="select"
-              value={series}
-              onChange={(event) => setSeries(event.target.value as SeriesSelection)}
-            >
-              {seriesOptions.map((option) => (
-                <option key={option.value} value={option.value}>
-                  {option.label.ja}
-                </option>
-              ))}
-            </select>
-          </label>
-          <label className="field">
-            <span className="field__label">図の名前</span>
-            <input
-              className="input"
-              type="text"
-              maxLength={120}
-              placeholder={runCode}
-              value={title}
-              onChange={(event) => setTitle(event.target.value)}
-            />
-            <span className="panel__hint">
-              タイトルそのものではなく、タイトルと凡例に差し込まれる名前です。空欄ならラン番号（
-              {runCode}）が使われます。
-            </span>
-          </label>
-        </div>
-        <p className="panel__hint">
-          タイトル: {titlePreview}　/　凡例: {title === '' ? runCode : title} (Inner Capsule)
-        </p>
-        <div className="checkbox-row">
-          <label htmlFor="poster-legend">凡例を表示する</label>
+/** The x-bounds fields, and the button that adopts the graph's selection. */
+function RangeSection(props: {
+  bounds: Bounds
+  selection: SelectionRange | null
+  onBound: (key: keyof Bounds, value: string) => void
+  onImportSelection: (selection: SelectionRange) => void
+}): React.JSX.Element {
+  const { bounds, selection, onBound, onImportSelection } = props
+  return (
+    <section className="dialog__section">
+      <h3 className="panel__title">範囲</h3>
+      <p className="panel__hint">
+        {selection === null
+          ? 'グラフ上をドラッグして範囲を選ぶと、ここに反映されます。数値を直接入力することもできます。'
+          : `グラフの選択範囲: ${formatFixed(selection.xMin, 4)} 秒 ～ ${formatFixed(selection.xMax, 4)} 秒`}
+      </p>
+      <div className="dialog__grid">
+        <label className="field">
+          <span className="field__label">開始 (s)</span>
           <input
-            id="poster-legend"
-            type="checkbox"
-            checked={showLegend}
-            onChange={(event) => setShowLegend(event.target.checked)}
+            className="input input--numeric"
+            type="number"
+            step="0.001"
+            value={bounds.xMin}
+            onChange={(event) => onBound('xMin', event.target.value)}
           />
-        </div>
-      </section>
+        </label>
+        <label className="field">
+          <span className="field__label">終了 (s)</span>
+          <input
+            className="input input--numeric"
+            type="number"
+            step="0.001"
+            value={bounds.xMax}
+            onChange={(event) => onBound('xMax', event.target.value)}
+          />
+        </label>
+      </div>
+      {selection === null ? null : (
+        <button type="button" className="button button--flat" onClick={() => onImportSelection(selection)}>
+          グラフの選択範囲を取り込む
+        </button>
+      )}
+    </section>
+  )
+}
 
-      <section className="dialog__section">
-        <h3 className="panel__title">体裁</h3>
-        <div className="dialog__grid">
-          <label className="field">
-            <span className="field__label">プリセット</span>
-            <select
-              className="select"
-              value={presetVersion}
-              onChange={(event) => {
-                const next = event.target.value
-                setPresetVersion(isPosterPresetVersion(next) ? next : DEFAULT_POSTER_PRESET_VERSION)
-              }}
-            >
-              {POSTER_PRESET_VERSIONS.map((version) => (
-                <option key={version} value={version}>
-                  {version}
-                </option>
-              ))}
-            </select>
-          </label>
-          <label className="field">
-            <span className="field__label">図のサイズ</span>
-            <select
-              className="select"
-              value={figureSizeId}
-              onChange={(event) => setFigureSizeId(event.target.value as PosterFigureSizeId)}
-            >
-              {sizeOptions.map((option) => (
-                <option key={option.id} value={option.id}>
-                  {option.label.ja} — {option.widthInches} × {option.heightInches} in
-                </option>
-              ))}
-            </select>
-          </label>
-          <label className="field">
-            <span className="field__label">解像度</span>
-            <select
-              className="select"
-              value={String(dpi)}
-              onChange={(event) => setDpi(Number(event.target.value))}
-            >
-              {dpiOptions.map((option) => (
-                <option key={option.dpi} value={option.dpi}>
-                  {option.dpi} dpi — {option.label.ja}
-                </option>
-              ))}
-            </select>
-          </label>
-        </div>
-      </section>
+/** The y-bounds fields; blank defers to the frozen preset's frame. */
+function YRangeSection(props: {
+  bounds: Bounds
+  defaults: PosterFormDefaults
+  onBound: (key: keyof Bounds, value: string) => void
+}): React.JSX.Element {
+  const { bounds, defaults, onBound } = props
+  return (
+    <section className="dialog__section">
+      <h3 className="panel__title">Y軸の範囲 (G)</h3>
+      <p className="panel__hint">
+        初期値は画面のグラフと同じ範囲です。空欄にすると既定値（
+        {defaults.yMin} 〜 {defaults.yMax} G）が使われます。デスクトップ版と同じく、
+        データに合わせて自動で決まることはありません。
+      </p>
+      <div className="dialog__grid">
+        <label className="field">
+          <span className="field__label">下限 (G)</span>
+          <input
+            className="input input--numeric"
+            type="number"
+            step="0.001"
+            value={bounds.yMin}
+            onChange={(event) => onBound('yMin', event.target.value)}
+          />
+        </label>
+        <label className="field">
+          <span className="field__label">上限 (G)</span>
+          <input
+            className="input input--numeric"
+            type="number"
+            step="0.001"
+            value={bounds.yMax}
+            onChange={(event) => onBound('yMax', event.target.value)}
+          />
+        </label>
+      </div>
+    </section>
+  )
+}
 
+/** What the figure shows: the sensors, the name, the legend. */
+function ContentSection(props: {
+  series: SeriesSelection
+  seriesOptions: ReturnType<typeof posterSeriesOptionsFor>
+  title: string
+  runCode: string
+  titlePreview: string
+  showLegend: boolean
+  onSeries: (series: SeriesSelection) => void
+  onTitle: (title: string) => void
+  onShowLegend: (show: boolean) => void
+}): React.JSX.Element {
+  return (
+    <section className="dialog__section">
+      <h3 className="panel__title">内容</h3>
+      <div className="dialog__grid">
+        <label className="field">
+          <span className="field__label">表示するセンサー</span>
+          <select
+            className="select"
+            value={props.series}
+            onChange={(event) => props.onSeries(event.target.value as SeriesSelection)}
+          >
+            {props.seriesOptions.map((option) => (
+              <option key={option.value} value={option.value}>
+                {option.label.ja}
+              </option>
+            ))}
+          </select>
+        </label>
+        <label className="field">
+          <span className="field__label">図の名前</span>
+          <input
+            className="input"
+            type="text"
+            maxLength={120}
+            placeholder={props.runCode}
+            value={props.title}
+            onChange={(event) => props.onTitle(event.target.value)}
+          />
+          <span className="panel__hint">
+            タイトルそのものではなく、タイトルと凡例に差し込まれる名前です。空欄ならラン番号（
+            {props.runCode}）が使われます。
+          </span>
+        </label>
+      </div>
+      <p className="panel__hint">
+        タイトル: {props.titlePreview}　/　凡例: {props.title === '' ? props.runCode : props.title} (Inner
+        Capsule)
+      </p>
+      <div className="checkbox-row">
+        <label htmlFor="poster-legend">凡例を表示する</label>
+        <input
+          id="poster-legend"
+          type="checkbox"
+          checked={props.showLegend}
+          onChange={(event) => props.onShowLegend(event.target.checked)}
+        />
+      </div>
+    </section>
+  )
+}
+
+/** The frozen-preset's presentation knobs: preset version, size, resolution. */
+function FormatSection(props: {
+  presetVersion: PosterPresetVersion
+  figureSizeId: PosterFigureSizeId
+  dpi: number
+  sizeOptions: readonly PosterFigureSizeOption[]
+  dpiOptions: ReturnType<typeof posterDpiOptions>
+  onPresetVersion: (version: PosterPresetVersion) => void
+  onFigureSizeId: (id: PosterFigureSizeId) => void
+  onDpi: (dpi: number) => void
+}): React.JSX.Element {
+  return (
+    <section className="dialog__section">
+      <h3 className="panel__title">体裁</h3>
+      <div className="dialog__grid">
+        <label className="field">
+          <span className="field__label">プリセット</span>
+          <select
+            className="select"
+            value={props.presetVersion}
+            onChange={(event) => {
+              const next = event.target.value
+              props.onPresetVersion(isPosterPresetVersion(next) ? next : DEFAULT_POSTER_PRESET_VERSION)
+            }}
+          >
+            {POSTER_PRESET_VERSIONS.map((version) => (
+              <option key={version} value={version}>
+                {version}
+              </option>
+            ))}
+          </select>
+        </label>
+        <label className="field">
+          <span className="field__label">図のサイズ</span>
+          <select
+            className="select"
+            value={props.figureSizeId}
+            onChange={(event) => props.onFigureSizeId(event.target.value as PosterFigureSizeId)}
+          >
+            {props.sizeOptions.map((option) => (
+              <option key={option.id} value={option.id}>
+                {option.label.ja} — {option.widthInches} × {option.heightInches} in
+              </option>
+            ))}
+          </select>
+        </label>
+        <label className="field">
+          <span className="field__label">解像度</span>
+          <select
+            className="select"
+            value={String(props.dpi)}
+            onChange={(event) => props.onDpi(Number(event.target.value))}
+          >
+            {props.dpiOptions.map((option) => (
+              <option key={option.dpi} value={option.dpi}>
+                {option.dpi} dpi — {option.label.ja}
+              </option>
+            ))}
+          </select>
+        </label>
+      </div>
+    </section>
+  )
+}
+
+/** What a submit produced: advice, an error, or the finished figure. */
+function PosterOutcome(props: {
+  advice: PosterSpecAdvice | null
+  cloudMessage: string | null
+  created: PosterFigure | null
+  titlePreview: string
+  onApplyAdvice: () => void
+}): React.JSX.Element {
+  const { advice, cloudMessage, created, titlePreview, onApplyAdvice } = props
+  return (
+    <>
       {advice === null ? null : (
         <div className="notice notice--warning" role="status">
           <div className="notice__body">
             <p>{advice.message}</p>
             {advice.detail === null ? null : <p>{advice.detail}</p>}
             {advice.action === null ? null : (
-              <button type="button" className="button" onClick={applyAdviceAction}>
+              <button type="button" className="button" onClick={onApplyAdvice}>
                 {advice.action.label}
               </button>
             )}
@@ -450,6 +608,6 @@ export function PosterDialog(props: PosterDialogProps): React.JSX.Element {
           </p>
         </section>
       )}
-    </Dialog>
+    </>
   )
 }

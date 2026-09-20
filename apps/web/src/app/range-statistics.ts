@@ -30,6 +30,19 @@ export interface RangeStatisticsResult {
 }
 
 /**
+ * The selection's statistics, or null while there is nothing valid to measure:
+ * no dataset, no selection, or a view mode that does not support selecting.
+ */
+export function rangeResultFor(
+  dataset: Dataset | null,
+  selection: SelectionRange | null,
+  selectionEnabled: boolean,
+): RangeStatisticsResult | null {
+  if (dataset === null || selection === null || !selectionEnabled) return null
+  return rangeStatisticsFor(dataset, selection)
+}
+
+/**
  * Compute both sensors' statistics for a selection.
  *
  * Returns null when the selection is unusable — shorter than the desktop's
