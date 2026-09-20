@@ -11,7 +11,7 @@
  */
 
 import { valueToPixel } from '../graph/geometry.ts'
-import { isComparing, type ViewMode } from '../graph/view-mode.ts'
+import { isComparing } from '../graph/view-mode.ts'
 import type { DemoDataset } from './demo-data.ts'
 import type { TourDriver, TourSnapshot } from './tour-driver.ts'
 

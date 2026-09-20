@@ -235,9 +235,7 @@ test.describe('onboarding tour', () => {
     await expect(datasets(page).getByRole('button', { name: /sample-a-tour|sample-b/ })).toHaveCount(0)
   })
 
-  test("a file named sample-a.csv opened after the demo closed is the researcher's", async ({
-    page,
-  }) => {
+  test("a file named sample-a.csv opened after the demo closed is the researcher's", async ({ page }) => {
     await page.goto('/')
     const stage = tourStage(page)
     // Shortest path to a kept demo: keep the sample rather than watching it.
@@ -258,9 +256,7 @@ test.describe('onboarding tour', () => {
     await expect(tourCaption(replay)).toHaveAttribute('data-scene', 'graph')
     // The demo must land as its own dataset — a cache hit on identical bytes
     // that installs under the request's name, not the cached payload's.
-    await expect(
-      datasets(page).getByRole('button', { name: 'sample-a-tour', exact: true }),
-    ).toBeVisible()
+    await expect(datasets(page).getByRole('button', { name: 'sample-a-tour', exact: true })).toBeVisible()
 
     await page.keyboard.press('Escape')
     await expect(replay).toHaveCount(0)
