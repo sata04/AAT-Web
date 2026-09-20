@@ -48,6 +48,38 @@ function topmostDialogPanel(): HTMLElement | null {
   return topmost
 }
 
+/**
+ * Escape closes a dialog and Tab cycles inside it — but only for the one
+ * painted on top. Every open dialog hears the same document keydown, since a
+ * second listener on one node is not stopped by `stopPropagation`, so which
+ * dialog answers is decided by document order rather than firing order.
+ * Panel registration folds in here so a dialog participates in the stacking
+ * order for exactly its lifetime; the panel element itself is stable.
+ */
+function useTopmostDialogKeys(panelRef: React.RefObject<HTMLDivElement | null>, onClose: () => void): void {
+  useEffect(() => {
+    const panel = panelRef.current
+    if (panel === null) return
+    openDialogPanels.add(panel)
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== 'Escape' && event.key !== 'Tab') return
+      // One Escape must not close a second dialog behind the topmost.
+      if (topmostDialogPanel() !== panel) return
+      if (event.key === 'Escape') {
+        event.stopPropagation()
+        onClose()
+        return
+      }
+      keepTabInsideDialog(panel, event)
+    }
+    document.addEventListener('keydown', onKeyDown, true)
+    return () => {
+      openDialogPanels.delete(panel)
+      document.removeEventListener('keydown', onKeyDown, true)
+    }
+  }, [panelRef, onClose])
+}
+
 // Keep Tab inside the dialog: the content behind it is inert to the mouse
 // but not to the keyboard unless something holds the cycle closed.
 function keepTabInsideDialog(panel: HTMLElement, event: KeyboardEvent): void {
@@ -96,34 +128,7 @@ export function Dialog(props: DialogProps): React.JSX.Element {
     }
   }, [])
 
-  // Register for the topmost check the key handler consults. The panel
-  // element is stable for the dialog's lifetime.
-  useEffect(() => {
-    const panel = panelRef.current
-    if (panel === null) return
-    openDialogPanels.add(panel)
-    return () => {
-      openDialogPanels.delete(panel)
-    }
-  }, [])
-
-  useEffect(() => {
-    const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key !== 'Escape' && event.key !== 'Tab') return
-      // Every open dialog hears this keydown, but only the one painted on top
-      // answers — one Escape must not close a second dialog behind it.
-      const panel = panelRef.current
-      if (panel === null || topmostDialogPanel() !== panel) return
-      if (event.key === 'Escape') {
-        event.stopPropagation()
-        props.onClose()
-        return
-      }
-      keepTabInsideDialog(panel, event)
-    }
-    document.addEventListener('keydown', onKeyDown, true)
-    return () => document.removeEventListener('keydown', onKeyDown, true)
-  }, [props])
+  useTopmostDialogKeys(panelRef, props.onClose)
 
   return (
     // The backdrop's pointer handler is a convenience duplicate of the Escape
