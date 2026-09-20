@@ -624,21 +624,13 @@ revisionRoutes.put(
         throw new ApiError('INVALID_CSV', { details: { reason: 'sha256_mismatch' } })
       }
 
-      const putObject = () =>
-        context.env.AAT_OBJECTS.put(key, body.bytes as ArrayBufferView, {
-          httpMetadata: { contentType: 'text/csv' },
-          sha256: body.sha256,
-          customMetadata: { runId: run.id, ownerUserId },
-        })
-      const put = await putObject()
-      const actualBytes = put?.size ?? body.bytes.length
-
       const objectValues = {
         id: objectId,
         ownerUserId,
         kind: 'source' as const,
         r2Key: key,
-        byteSize: actualBytes,
+        // Provisional until R2 reports what it stored — corrected below before the commit.
+        byteSize: body.bytes.length,
         sha256: body.sha256,
         contentType: 'text/csv',
         // Metadata only. Never a key component — see services/storage.ts.
@@ -647,11 +639,25 @@ revisionRoutes.put(
         reservationId: reservation.id,
         createdAt: now,
       }
-      // The key is per-attempt random, so the only blocker is a wedged predecessor row —
-      // insertObjectRowClaimingKey finishes its eviction. Our bytes are already written and are
-      // sha-guarded against every cleanup path, so no re-put is needed.
+      // The row claims the key BEFORE the bytes exist — the ordering the snapshot and poster
+      // paths use — so a failed insert cannot strand untracked bytes, and a failed put unwinds
+      // a row that never committed.
       await insertObjectRowClaimingKey(db, key, objectValues, now)
-      uploaded = { id: objectId, byteSize: actualBytes, sha256: body.sha256 }
+      uploaded = { id: objectId, byteSize: body.bytes.length, sha256: body.sha256 }
+
+      const put = await context.env.AAT_OBJECTS.put(key, body.bytes as ArrayBufferView, {
+        httpMetadata: { contentType: 'text/csv' },
+        sha256: body.sha256,
+        customMetadata: { runId: run.id, ownerUserId },
+      })
+      const actualBytes = put?.size ?? body.bytes.length
+      if (actualBytes !== uploaded.byteSize) {
+        await db
+          .update(cloudObjects)
+          .set({ byteSize: actualBytes })
+          .where(eq(cloudObjects.id, objectId))
+        uploaded.byteSize = actualBytes
+      }
       await commitUploadedObject(
         db,
         context.env.AAT_OBJECTS,
