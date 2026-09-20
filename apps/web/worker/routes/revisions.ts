@@ -652,10 +652,7 @@ revisionRoutes.put(
       })
       const actualBytes = put?.size ?? body.bytes.length
       if (actualBytes !== uploaded.byteSize) {
-        await db
-          .update(cloudObjects)
-          .set({ byteSize: actualBytes })
-          .where(eq(cloudObjects.id, objectId))
+        await db.update(cloudObjects).set({ byteSize: actualBytes }).where(eq(cloudObjects.id, objectId))
         uploaded.byteSize = actualBytes
       }
       await commitUploadedObject(
