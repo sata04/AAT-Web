@@ -471,6 +471,28 @@ export async function evictDeadObject(db: Database, r2Key: string, now: Date = n
   return true
 }
 
+/**
+ * Insert the object row that claims a deterministic key, finishing a dead predecessor's eviction
+ * to take the key back when the unique index still blocks the insert.
+ *
+ * The row is written BEFORE the bytes are put: a second contender for the same key fails its
+ * insert rather than its put, so it can never leave its bytes under the winner's checksum. A live
+ * predecessor keeps its key and the original error flies.
+ */
+export async function insertObjectRowClaimingKey(
+  db: Database,
+  r2Key: string,
+  values: typeof cloudObjects.$inferInsert,
+  now: Date = new Date(),
+): Promise<void> {
+  try {
+    await db.insert(cloudObjects).values(values)
+  } catch (insertError) {
+    if (!(await evictDeadObject(db, r2Key, now))) throw insertError
+    await db.insert(cloudObjects).values(values)
+  }
+}
+
 export interface SweepResult {
   reservationsReleased: number
   orphanedObjectsDeleted: number

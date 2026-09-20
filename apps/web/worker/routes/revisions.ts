@@ -61,7 +61,7 @@ import { writeAuditLog } from '../services/audit.ts'
 import {
   commitUploadedObject,
   ensureQuotaRow,
-  evictDeadObject,
+  insertObjectRowClaimingKey,
   releaseObjectAccounting,
   releaseReservation,
   reserveQuota,
@@ -462,15 +462,7 @@ revisionRoutes.put(
         reservationId: reservation.id,
         createdAt: now,
       }
-      try {
-        await db.insert(cloudObjects).values(objectValues)
-      } catch (insertError) {
-        // A wedged predecessor — an unwind that died mid-cleanup — still holds this deterministic
-        // key. Finish its eviction and take the key; a live row keeps its key and the original
-        // error flies.
-        if (!(await evictDeadObject(db, key, now))) throw insertError
-        await db.insert(cloudObjects).values(objectValues)
-      }
+      await insertObjectRowClaimingKey(db, key, objectValues, now)
       uploaded = { id: objectId, byteSize: body.bytes.length, sha256: body.sha256 }
 
       const put = await putObject()
@@ -655,16 +647,10 @@ revisionRoutes.put(
         reservationId: reservation.id,
         createdAt: now,
       }
-      try {
-        await db.insert(cloudObjects).values(objectValues)
-      } catch (insertError) {
-        // A wedged predecessor — an unwind that died mid-cleanup — still holds this deterministic
-        // key. Finish its eviction, re-put (that cleanup may have removed the bytes we just
-        // wrote), and take the key. A live row keeps its key and the original error flies.
-        if (!(await evictDeadObject(db, key, now))) throw insertError
-        await putObject()
-        await db.insert(cloudObjects).values(objectValues)
-      }
+      // The key is per-attempt random, so the only blocker is a wedged predecessor row —
+      // insertObjectRowClaimingKey finishes its eviction. Our bytes are already written and are
+      // sha-guarded against every cleanup path, so no re-put is needed.
+      await insertObjectRowClaimingKey(db, key, objectValues, now)
       uploaded = { id: objectId, byteSize: actualBytes, sha256: body.sha256 }
       await commitUploadedObject(
         db,

@@ -102,9 +102,15 @@ function loadRevisions(
   void listRevisions(runId).then((outcome) => {
     if (!mounted.current || !outcome.ok) return
     sinks.setRevisions(outcome.value.revisions)
-    // The current analysis is the highest revision number — see `latestRevision` for why not the
-    // newest timestamp.
-    sinks.setSelectedRevisionId((current) => current ?? latestRevision(outcome.value.revisions)?.id ?? null)
+    // Keep an existing selection only when it belongs to this run — the screen is reused across
+    // run navigation, and a previous run's id resolves to nothing here. Otherwise take the current
+    // analysis, which is the highest revision number — see `latestRevision` for why not the newest
+    // timestamp.
+    sinks.setSelectedRevisionId((current) =>
+      current !== null && outcome.value.revisions.some((revision) => revision.id === current)
+        ? current
+        : (latestRevision(outcome.value.revisions)?.id ?? null),
+    )
   })
 }
 
