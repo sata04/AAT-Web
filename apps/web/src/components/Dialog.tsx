@@ -108,19 +108,21 @@ function keepTabInsideDialog(panel: HTMLElement, event: KeyboardEvent): void {
   }
   const first = focusable[0] as HTMLElement
   const last = focusable[focusable.length - 1] as HTMLElement
+  // Single-control dialogs are first *and* last — neither edge may return
+  // early or the other direction's wrap never gets checked.
   if (active === first) {
     if (event.shiftKey) {
       event.preventDefault()
       last.focus()
+      return
     }
-    return
   }
   if (active === last) {
     if (!event.shiftKey) {
       event.preventDefault()
       first.focus()
+      return
     }
-    return
   }
   // Focus drifted outside a modal that is still up — pull it back rather
   // than letting Tab continue through the inert page.
