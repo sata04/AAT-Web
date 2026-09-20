@@ -28,6 +28,26 @@ function initialFocusTarget(panel: HTMLElement | null): HTMLElement | null {
   return panel.querySelector<HTMLElement>('[data-autofocus]') ?? panel.querySelector<HTMLElement>(FOCUSABLE)
 }
 
+/**
+ * The panel of every mounted dialog. Two dialogs can be open at once — a
+ * modal raised while another was already up — and each hears the same
+ * document keydown, because a second listener on one node is not stopped by
+ * `stopPropagation`. So which dialog answers is decided here rather than by
+ * the listeners' firing order: the topmost dialog is the one whose panel
+ * comes last in document order, which is also the one painted above the rest.
+ */
+const openDialogPanels = new Set<HTMLElement>()
+
+function topmostDialogPanel(): HTMLElement | null {
+  let topmost: HTMLElement | null = null
+  for (const panel of openDialogPanels) {
+    const follows =
+      topmost === null || (topmost.compareDocumentPosition(panel) & Node.DOCUMENT_POSITION_FOLLOWING) !== 0
+    if (follows) topmost = panel
+  }
+  return topmost
+}
+
 export function Dialog(props: DialogProps): React.JSX.Element {
   const titleId = useId()
   const descriptionId = useId()
@@ -60,18 +80,31 @@ export function Dialog(props: DialogProps): React.JSX.Element {
     }
   }, [])
 
+  // Register for the topmost check the key handler consults. The panel
+  // element is stable for the dialog's lifetime.
+  useEffect(() => {
+    const panel = panelRef.current
+    if (panel === null) return
+    openDialogPanels.add(panel)
+    return () => {
+      openDialogPanels.delete(panel)
+    }
+  }, [])
+
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== 'Escape' && event.key !== 'Tab') return
+      // Every open dialog hears this keydown, but only the one painted on top
+      // answers — one Escape must not close a second dialog behind it.
+      const panel = panelRef.current
+      if (panel === null || topmostDialogPanel() !== panel) return
       if (event.key === 'Escape') {
         event.stopPropagation()
         props.onClose()
         return
       }
-      if (event.key !== 'Tab') return
       // Keep Tab inside the dialog: the content behind it is inert to the mouse
       // but not to the keyboard unless something holds the cycle closed.
-      const panel = panelRef.current
-      if (panel === null) return
       const focusable = [...panel.querySelectorAll<HTMLElement>(FOCUSABLE)]
       if (focusable.length === 0) return
       const first = focusable[0] as HTMLElement
