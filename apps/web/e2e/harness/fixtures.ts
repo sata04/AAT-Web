@@ -20,9 +20,39 @@ import { addVirtualAuthenticator, type VirtualAuthenticator } from './webauthn.t
 export interface AatFixtures {
   harness: Harness
   authenticator: VirtualAuthenticator
+  /**
+   * Seed `aat.onboarding.v1` as fully seen, so specs written before
+   * onboarding existed keep landing on the bare analyzer. Specs that exercise
+   * the welcome itself set `onboardingComplete: false` via `test.use`.
+   */
+  onboardingComplete: boolean
 }
 
 export const test = base.extend<AatFixtures>({
+  onboardingComplete: [true, { option: true }],
+
+  page: async ({ page, onboardingComplete }, use) => {
+    if (onboardingComplete) {
+      await page.addInitScript(() => {
+        try {
+          window.localStorage.setItem(
+            'aat.onboarding.v1',
+            JSON.stringify({
+              welcomeSeen: true,
+              graphHintSeen: true,
+              rangeHintSeen: true,
+              compareHintSeen: true,
+            }),
+          )
+        } catch {
+          // Storage denied — the app treats unreadable onboarding as unseen,
+          // which for these specs simply means the welcome may appear.
+        }
+      })
+    }
+    await use(page)
+  },
+
   // Playwright reads this parameter's destructuring pattern to work out which fixtures are wanted,
   // and rejects anything that is not an object pattern — even when the answer is "none".
   // biome-ignore lint/correctness/noEmptyPattern: required by Playwright's fixture parameter parser

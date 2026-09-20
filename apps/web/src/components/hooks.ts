@@ -32,6 +32,7 @@ export function useNotices(limit: number): {
   notices: readonly NoticeItem[]
   notify: (tone: NoticeItem['tone'], text: string) => void
   dismissNotice: (id: number) => void
+  dismissAllNotices: () => void
 } {
   const [notices, setNotices] = useState<readonly NoticeItem[]>([])
   const noticeId = useRef(0)
@@ -49,7 +50,11 @@ export function useNotices(limit: number): {
     setNotices((current) => current.filter((n) => n.id !== id))
   }, [])
 
-  return { notices, notify, dismissNotice }
+  const dismissAllNotices = useCallback(() => {
+    setNotices([])
+  }, [])
+
+  return { notices, notify, dismissNotice, dismissAllNotices }
 }
 
 /**

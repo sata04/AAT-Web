@@ -2,31 +2,28 @@ import type { AnalysisConfig } from '@aat/shared'
 import { type Dispatch, type SetStateAction, useRef, useState } from 'react'
 import type { ColumnMapping, OpenedSource } from '../analysis/protocol.ts'
 import type { Dataset } from '../app/dataset.ts'
-import { openedSourceForDataset, sensorModeFrom } from '../app/dataset.ts'
+import { openedSourceForDataset } from '../app/dataset.ts'
 import type { RangeStatisticsResult } from '../app/range-statistics.ts'
-import { saveConfig } from '../app/settings.ts'
-import { clearCache } from '../cache/analysis-cache.ts'
 import type { PosterFigure } from '../cloud/gateway.ts'
 import type { CloudStatuses } from '../cloud/status.ts'
 import { CloudStatusBar } from '../components/CloudStatusBar.tsx'
-import { ColumnSelectorDialog } from '../components/ColumnSelectorDialog.tsx'
-import { CommandBar } from '../components/CommandBar.tsx'
 import { csvFilesFrom, FileDropZone } from '../components/FileDropZone.tsx'
+import { HintBar, Kbd } from '../components/HintBar.tsx'
 import { type NoticeItem, NoticeStack } from '../components/NoticeStack.tsx'
 import { RangeStatisticsPanel } from '../components/RangeStatisticsPanel.tsx'
-import { SettingsDialog } from '../components/SettingsDialog.tsx'
 import { StatisticsPanel } from '../components/StatisticsPanel.tsx'
 import { TABLE_SCROLL_PROPS } from '../components/table-scroll.ts'
-import { PNG_PARITY_NOTICE } from '../exporting/png.ts'
 import type { ChartGeometry } from '../graph/geometry.ts'
 import type { PlotModel } from '../graph/plot-model.ts'
 import { SelectionOverlay } from '../graph/SelectionOverlay.tsx'
 import type { SelectionRange } from '../graph/selection.ts'
 import type { GraphPalette } from '../graph/theme.ts'
 import { type ChartViewport, UPlotChart } from '../graph/UPlotChart.tsx'
-import { isComparing, isGQuality, isShowingAll, type ViewMode } from '../graph/view-mode.ts'
+import { isComparing, type ViewMode } from '../graph/view-mode.ts'
 import { PosterPanel } from '../poster/PosterPanel.tsx'
 import type { PosterContext } from '../poster/requests.ts'
+import { AnalyzerDialogs } from './AnalyzerDialogs.tsx'
+import { AnalyzerToolbar } from './AnalyzerToolbar.tsx'
 
 export interface PendingColumnChoice {
   source: OpenedSource
@@ -52,7 +49,23 @@ interface AnalyzerViewState {
   activeCustomPosters: readonly PosterFigure[]
   pendingColumns: PendingColumnChoice | null
   settingsOpen: boolean
+  /** First-run modal; once dismissed it is a persisted flag, not a state machine. */
+  welcomeOpen: boolean
+  helpOpen: boolean
+  /** The one contextual hint currently allowed to show, or null. */
+  hint: AnalyzerHint | null
 }
+
+export type AnalyzerHint = 'graph' | 'range' | 'compare'
+
+/** The actions `analyzer-actions.ts` does not build — the screen supplies them itself. */
+export type OnboardingActionKeys =
+  | 'dismissWelcome'
+  | 'openHelp'
+  | 'closeHelp'
+  | 'reopenWelcome'
+  | 'dismissHint'
+  | 'dismissAllNotices'
 
 interface AnalyzerPlotState {
   model: PlotModel
@@ -96,6 +109,14 @@ interface AnalyzerViewActions {
     configOverride?: AnalysisConfig,
   ) => Promise<void>
   setSettingsOpen: Dispatch<SetStateAction<boolean>>
+  dismissWelcome: () => void
+  /** Open help — from the toolbar, the welcome's CTA, or the quick start. */
+  openHelp: () => void
+  closeHelp: () => void
+  /** From help's "もう一度見る": close help and show the welcome again. */
+  reopenWelcome: () => void
+  dismissHint: (hint: AnalyzerHint) => void
+  dismissAllNotices: () => void
   /**
    * Apply a settings edit: persists it, and re-analyses open datasets when a
    * number-changing key moved. Implemented by the screen, which owns the
@@ -112,183 +133,42 @@ export interface AnalyzerViewProps {
   actions: AnalyzerViewActions
 }
 
-/** The export and settings controls on the toolbar's trailing side. */
-function ExportButtons({ state, plot, actions }: AnalyzerViewProps): React.JSX.Element {
-  return (
-    <div className="command-bar__group">
-      <button
-        type="button"
-        className="button"
-        disabled={state.active === null}
-        onClick={() => void actions.exportData('xlsx')}
-      >
-        Excelで書き出す
-      </button>
-      <button
-        type="button"
-        className="button"
-        disabled={state.active === null}
-        onClick={() => void actions.exportData('csv')}
-      >
-        CSVで書き出す
-      </button>
-      <button
-        type="button"
-        className="button"
-        disabled={plot.canvas === null}
-        title={PNG_PARITY_NOTICE}
-        aria-describedby="png-parity-hint"
-        onClick={() => void actions.exportPng()}
-      >
-        PNGを保存
-      </button>
-      {/* A `title` tooltip never reaches touch or screen-reader users; the
-          parity caveat is worth one line of hidden text. */}
-      <span id="png-parity-hint" className="visually-hidden">
-        {PNG_PARITY_NOTICE}
-      </span>
-      <button type="button" className="button button--flat" onClick={() => actions.setSettingsOpen(true)}>
-        設定
-      </button>
-    </div>
-  )
+/**
+ * What each hint says. A table rather than a switch: the three differ only in
+ * their copy, and the bar around them is identical.
+ */
+const HINT_COPY: Record<AnalyzerHint, React.JSX.Element> = {
+  // Written to match UPlotChart/SelectionOverlay exactly — drag selects only
+  // because the normal view reserves the primary drag for it.
+  graph: (
+    <>
+      <b>グラフ操作</b>
+      ドラッグで範囲を選択、ホイールでポインタ位置を中心にズーム、<Kbd>Shift</Kbd>
+      ＋ドラッグでパン。「全体表示」で範囲をリセットします。
+    </>
+  ),
+  range: (
+    <>
+      <b>範囲の統計</b>
+      グラフ上をドラッグすると、その区間の統計が「選択範囲の統計情報」に表示されます。
+    </>
+  ),
+  compare: (
+    <>
+      <b>比較</b>
+      2つ目のデータセットを開きました。ツールバーの「比較」で同じグラフに重ねて表示できます。
+    </>
+  ),
 }
 
-/** The normal / show-all / G-quality segmented control. */
-function ViewModeButtons({
-  state,
-  actions,
-}: Pick<AnalyzerViewProps, 'state' | 'actions'>): React.JSX.Element {
-  const hasDatasets = state.datasets.length > 0
-  const showingAll = isShowingAll(state.mode)
-  const showingGQuality = isGQuality(state.mode)
-  return (
-    <fieldset className="command-bar__group segmented">
-      <legend className="visually-hidden">表示モード</legend>
-      <button
-        type="button"
-        className="button"
-        aria-pressed={!showingAll && !showingGQuality}
-        disabled={!hasDatasets}
-        onClick={() => actions.applyModeEvent(showingAll ? 'SHOW_ALL_OFF' : 'G_QUALITY_OFF')}
-      >
-        通常
-      </button>
-      <button
-        type="button"
-        className="button"
-        aria-pressed={showingAll}
-        disabled={!hasDatasets || showingGQuality}
-        onClick={() => actions.applyModeEvent(showingAll ? 'SHOW_ALL_OFF' : 'SHOW_ALL_ON')}
-      >
-        全データ
-      </button>
-      <button
-        type="button"
-        className="button"
-        aria-pressed={showingGQuality}
-        disabled={!hasDatasets}
-        onClick={() => actions.applyModeEvent(showingGQuality ? 'G_QUALITY_OFF' : 'G_QUALITY_ON')}
-      >
-        G-quality
-      </button>
-    </fieldset>
-  )
-}
-
-function AnalyzerToolbar({ state, plot, actions }: AnalyzerViewProps): React.JSX.Element {
-  const hasDatasets = state.datasets.length > 0
-  const comparing = isComparing(state.mode)
-
-  const zoomIn = () => {
-    const span = plot.viewport.max - plot.viewport.min
-    const centre = (plot.viewport.max + plot.viewport.min) / 2
-    actions.setViewport({ min: centre - span / 4, max: centre + span / 4 })
-  }
-
-  const zoomOut = () => {
-    const span = plot.viewport.max - plot.viewport.min
-    const centre = (plot.viewport.max + plot.viewport.min) / 2
-    actions.setViewport({
-      min: Math.max(plot.bounds.min, centre - span),
-      max: Math.min(plot.bounds.max, centre + span),
-    })
-  }
-
-  const changeSensor = (value: string) => {
-    const next = { ...state.config, graph_sensor_mode: sensorModeFrom(value) }
-    actions.setConfig(next)
-    saveConfig(next)
-  }
-
-  return (
-    <CommandBar trailing={<ExportButtons state={state} plot={plot} actions={actions} />}>
-      <FileOpenControl onFiles={actions.openFiles} />
-      <ViewModeButtons state={state} actions={actions} />
-      <div className="command-bar__group">
-        <button
-          type="button"
-          className="button"
-          aria-pressed={comparing}
-          disabled={state.datasets.length < 2 && !comparing}
-          onClick={() => (comparing ? actions.applyModeEvent('LEAVE_COMPARING') : actions.startComparison())}
-        >
-          比較
-        </button>
-      </div>
-      <div className="command-bar__group">
-        <label className="field">
-          <span className="visually-hidden">表示するセンサー</span>
-          <select
-            className="select"
-            value={state.config.graph_sensor_mode}
-            onChange={(event) => changeSensor(event.target.value)}
-          >
-            <option value="both">両方</option>
-            <option value="inner_only">Inner Capsule のみ</option>
-            <option value="drag_only">Drag Shield のみ</option>
-          </select>
-        </label>
-      </div>
-      <div className="command-bar__group">
-        <button
-          type="button"
-          className="button"
-          onClick={() => actions.setViewport(null)}
-          disabled={!hasDatasets}
-        >
-          全体表示
-        </button>
-        <button type="button" className="button" disabled={!hasDatasets} onClick={zoomIn}>
-          拡大
-        </button>
-        <button type="button" className="button" disabled={!hasDatasets} onClick={zoomOut}>
-          縮小
-        </button>
-      </div>
-    </CommandBar>
-  )
-}
-
-function FileOpenControl({ onFiles }: { onFiles: (files: File[]) => Promise<void> }): React.JSX.Element {
-  return (
-    <div className="command-bar__group">
-      <label className="button">
-        ファイルを開く
-        <input
-          className="visually-hidden"
-          type="file"
-          accept=".csv,text/csv"
-          multiple
-          onChange={(event) => {
-            const files = [...(event.target.files ?? [])]
-            if (files.length > 0) void onFiles(files)
-            event.target.value = ''
-          }}
-        />
-      </label>
-    </div>
-  )
+function AnalyzerHintBar({
+  hint,
+  onDismiss,
+}: {
+  hint: AnalyzerHint
+  onDismiss: (hint: AnalyzerHint) => void
+}): React.JSX.Element {
+  return <HintBar onDismiss={() => onDismiss(hint)}>{HINT_COPY[hint]}</HintBar>
 }
 
 /**
@@ -329,8 +209,45 @@ function useFileDrop(onFiles: (files: File[]) => Promise<void>) {
   }
 }
 
-function GraphArea({ state, plot, actions }: AnalyzerViewProps): React.JSX.Element {
+/**
+ * Everything layered over the plot: the drop affordance, the notice stack, the
+ * one contextual hint, and the progress bar. Kept apart from the plot itself so
+ * the graph area reads as "the chrome, then either the drop zone or the chart".
+ */
+function GraphOverlays({
+  state,
+  actions,
+  dropping,
+}: Pick<AnalyzerViewProps, 'state' | 'actions'> & { dropping: boolean }): React.JSX.Element {
   const running = state.statuses.analysis.kind === 'running' ? state.statuses.analysis : null
+  return (
+    <>
+      {dropping ? (
+        <div className="graph-area__drop-hint" aria-hidden="true">
+          CSVファイルをドロップして追加
+        </div>
+      ) : null}
+      <NoticeStack
+        notices={state.notices}
+        onDismiss={actions.dismissNotice}
+        onDismissAll={actions.dismissAllNotices}
+      />
+      {state.hint === null ? null : <AnalyzerHintBar hint={state.hint} onDismiss={actions.dismissHint} />}
+      {running === null ? null : (
+        <div className="analysis-progress">
+          <progress className="progress" max={100} value={running.percent}>
+            {running.percent}%
+          </progress>
+          <button type="button" className="button button--flat" onClick={actions.cancelAnalysis}>
+            中止
+          </button>
+        </div>
+      )}
+    </>
+  )
+}
+
+function GraphArea({ state, plot, actions }: AnalyzerViewProps): React.JSX.Element {
   const fileDrop = useFileDrop(actions.openFiles)
   return (
     <main
@@ -343,24 +260,13 @@ function GraphArea({ state, plot, actions }: AnalyzerViewProps): React.JSX.Eleme
       onDrop={fileDrop.onDrop}
     >
       <h1 className="visually-hidden">加速度データ解析</h1>
-      {fileDrop.dropping ? (
-        <div className="graph-area__drop-hint" aria-hidden="true">
-          CSVファイルをドロップして追加
-        </div>
-      ) : null}
-      <NoticeStack notices={state.notices} onDismiss={actions.dismissNotice} />
-      {running === null ? null : (
-        <div className="analysis-progress">
-          <progress className="progress" max={100} value={running.percent}>
-            {running.percent}%
-          </progress>
-          <button type="button" className="button button--flat" onClick={actions.cancelAnalysis}>
-            中止
-          </button>
-        </div>
-      )}
+      <GraphOverlays state={state} actions={actions} dropping={fileDrop.dropping} />
       {state.datasets.length === 0 ? (
-        <FileDropZone onFiles={(files) => void actions.openFiles(files)} disabled={false} />
+        <FileDropZone
+          onFiles={(files) => void actions.openFiles(files)}
+          disabled={false}
+          onHelp={actions.openHelp}
+        />
       ) : (
         <UPlotChart
           model={plot.model}
@@ -425,6 +331,11 @@ function DatasetPanel({ state, actions }: Pick<AnalyzerViewProps, 'state' | 'act
   )
 }
 
+/** A mapping row's value: the chosen column, or the word for "not used". */
+function columnLabel(used: boolean, column: string): string {
+  return used ? column : '未使用'
+}
+
 function FileInfoPanel({ state, actions }: Pick<AnalyzerViewProps, 'state' | 'actions'>): React.JSX.Element {
   const editColumns = () => {
     if (state.active === null) return
@@ -459,11 +370,11 @@ function FileInfoPanel({ state, actions }: Pick<AnalyzerViewProps, 'state' | 'ac
               </tr>
               <tr>
                 <th scope="row">Inner Capsule</th>
-                <td>{state.active.mapping.useInner ? state.active.mapping.innerColumn : '未使用'}</td>
+                <td>{columnLabel(state.active.mapping.useInner, state.active.mapping.innerColumn)}</td>
               </tr>
               <tr>
                 <th scope="row">Drag Shield</th>
-                <td>{state.active.mapping.useDrag ? state.active.mapping.dragColumn : '未使用'}</td>
+                <td>{columnLabel(state.active.mapping.useDrag, state.active.mapping.dragColumn)}</td>
               </tr>
             </tbody>
           </table>
@@ -476,15 +387,24 @@ function FileInfoPanel({ state, actions }: Pick<AnalyzerViewProps, 'state' | 'ac
   )
 }
 
+/**
+ * Which datasets the statistics panel describes: every open one while
+ * comparing, otherwise the active one alone — and nothing when none is active.
+ */
+function statisticsDatasetsFor(
+  mode: ViewMode,
+  datasets: readonly Dataset[],
+  active: Dataset | null,
+): readonly Dataset[] {
+  if (isComparing(mode)) return datasets
+  return active === null ? [] : [active]
+}
+
 function AnalyzerSidebar({
   state,
   actions,
 }: Pick<AnalyzerViewProps, 'state' | 'actions'>): React.JSX.Element {
-  const statisticsDatasets = isComparing(state.mode)
-    ? state.datasets
-    : state.active === null
-      ? []
-      : [state.active]
+  const statisticsDatasets = statisticsDatasetsFor(state.mode, state.datasets, state.active)
   const posterStatus = state.posterContext === null ? { kind: 'unavailable' as const } : state.statuses.poster
   return (
     <aside className="side-panel" aria-label="データセットと統計">
@@ -513,39 +433,6 @@ function AnalyzerSidebar({
       />
       <FileInfoPanel state={state} actions={actions} />
     </aside>
-  )
-}
-
-function AnalyzerDialogs({
-  state,
-  actions,
-}: Pick<AnalyzerViewProps, 'state' | 'actions'>): React.JSX.Element {
-  const applySettings = (next: AnalysisConfig) => {
-    // Save + possible re-analysis are the screen's business; see applyConfig.
-    actions.applyConfig(next)
-  }
-  return (
-    <>
-      {state.pendingColumns === null ? null : (
-        <ColumnSelectorDialog
-          source={state.pendingColumns.source}
-          initial={state.pendingColumns.initial}
-          reason={state.pendingColumns.reason}
-          onCancel={actions.cancelPendingColumns}
-          onConfirm={actions.confirmPendingColumns}
-        />
-      )}
-      {state.settingsOpen ? (
-        <SettingsDialog
-          config={state.config}
-          onCancel={() => actions.setSettingsOpen(false)}
-          onApply={applySettings}
-          onClearCache={() =>
-            void clearCache().then(() => actions.notify('info', 'ローカルキャッシュを削除しました。'))
-          }
-        />
-      ) : null}
-    </>
   )
 }
 

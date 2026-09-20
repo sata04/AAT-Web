@@ -14,6 +14,7 @@ describe('notice stack', () => {
           { id: 9, tone: 'error', text: '処理できませんでした' },
         ]}
         onDismiss={onDismiss}
+        onDismissAll={() => {}}
       />,
     )
 
@@ -24,8 +25,35 @@ describe('notice stack', () => {
     expect(onDismiss).toHaveBeenCalledWith(9)
   })
 
+  it('offers a batch dismiss only when more than one notice is showing', async () => {
+    const onDismissAll = vi.fn()
+    const { rerender } = renderComponent(
+      <NoticeStack
+        notices={[{ id: 1, tone: 'info', text: '一件だけ' }]}
+        onDismiss={() => {}}
+        onDismissAll={onDismissAll}
+      />,
+    )
+    expect(screen.queryByRole('button', { name: 'すべて閉じる' })).toBeNull()
+
+    rerender(
+      <NoticeStack
+        notices={[
+          { id: 1, tone: 'info', text: '一件目' },
+          { id: 2, tone: 'info', text: '二件目' },
+        ]}
+        onDismiss={() => {}}
+        onDismissAll={onDismissAll}
+      />,
+    )
+    await userEvent.setup().click(screen.getByRole('button', { name: 'すべて閉じる' }))
+    expect(onDismissAll).toHaveBeenCalledOnce()
+  })
+
   it('renders nothing for an empty list', () => {
-    const { container } = renderComponent(<NoticeStack notices={[]} onDismiss={() => {}} />)
+    const { container } = renderComponent(
+      <NoticeStack notices={[]} onDismiss={() => {}} onDismissAll={() => {}} />,
+    )
     expect(container.firstChild).toBeNull()
   })
 })

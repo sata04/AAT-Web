@@ -1571,3 +1571,253 @@ textarea {
   flex-direction: column;
   gap: var(--space-md);
 }
+
+/* ===== Onboarding, hints and inline explainers ===== */
+
+/* A plain-text label for the control it precedes in the toolbar. */
+.command-bar__label {
+  font-size: var(--size-small);
+  color: var(--text-secondary);
+  white-space: nowrap;
+}
+
+/* The quick-start layout wraps the drop zone: the zone stays the CTA and the
+   steps read as the order of operations, not as feature cards. */
+.quickstart {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-sm);
+  height: 100%;
+}
+
+.quickstart > .dropzone {
+  flex: 1 1 auto;
+  min-height: 12rem;
+}
+
+.quickstart__steps {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: var(--space-sm) var(--space-xl);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  counter-reset: quickstart-step;
+  font-size: var(--size-small);
+}
+
+.quickstart__steps li {
+  display: flex;
+  align-items: center;
+  gap: var(--space-xs);
+  color: var(--text-secondary);
+}
+
+.quickstart__steps li::before {
+  counter-increment: quickstart-step;
+  content: counter(quickstart-step);
+  display: grid;
+  place-items: center;
+  width: 1.4rem;
+  height: 1.4rem;
+  border: 1px solid var(--border-strong);
+  border-radius: 50%;
+  font-family: var(--font-mono);
+}
+
+.quickstart__help {
+  margin: 0;
+  text-align: center;
+}
+
+/* A one-line numbered list inside the welcome dialog. */
+.welcome-steps {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-xs);
+  margin: 0;
+  padding-left: var(--space-xl);
+}
+
+.welcome-steps li {
+  padding-left: var(--space-xs);
+}
+
+/* Help dialog sections. */
+.help-section__title {
+  margin: 0 0 var(--space-2xs);
+  font-size: var(--size-subheader);
+  font-weight: var(--weight-bold);
+}
+
+.help-section p,
+.help-section ul {
+  margin: 0;
+}
+
+.help-section ul {
+  padding-left: var(--space-xl);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3xs);
+}
+
+.help-section kbd,
+.kbd {
+  display: inline-block;
+  padding: 0 var(--space-xs);
+  border: 1px solid var(--border-strong);
+  border-bottom-width: 2px;
+  border-radius: var(--radius-inner);
+  background: var(--bg-primary);
+  font-family: var(--font-mono);
+  font-size: var(--size-small);
+}
+
+/* Notices stack with a little air, and a batch dismiss below them. */
+.notice-stack {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-xs);
+}
+
+.notice-stack__footer {
+  display: flex;
+  justify-content: flex-end;
+}
+
+/* A single contextual hint inside the graph area — notice-like, but accent
+   bordered because it is guidance, not a warning. */
+.graph-hint {
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+  padding: var(--space-sm) var(--space-md);
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--accent);
+  border-radius: var(--radius-form);
+  background: var(--bg-secondary);
+  font-size: var(--size-small);
+}
+
+.graph-hint__body {
+  flex: 1 1 auto;
+  min-width: 0;
+  line-height: 1.5;
+}
+
+.graph-hint__body > b {
+  margin-right: var(--space-sm);
+  font-weight: var(--weight-bold);
+}
+
+/* InfoTip — a `?` affordance whose bubble opens on hover or focus. */
+.info-tip {
+  position: relative;
+  display: inline-flex;
+}
+
+.info-tip__button {
+  display: grid;
+  place-items: center;
+  width: 1.3rem;
+  height: 1.3rem;
+  padding: 0;
+  border: 1px solid var(--border-strong);
+  border-radius: 50%;
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: var(--size-small);
+  line-height: 1;
+  cursor: pointer;
+}
+
+.info-tip__button:hover:not(:disabled) {
+  border-color: var(--text-secondary);
+  color: var(--text-primary);
+}
+
+.info-tip__bubble {
+  position: absolute;
+  top: calc(100% + var(--space-xs));
+  left: 0;
+  z-index: 18;
+  width: 16rem;
+  padding: var(--space-sm) var(--space-md);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-form);
+  background: var(--bg-primary);
+  box-shadow: 0 4px 12px rgb(0 0 0 / 12%);
+  color: var(--text-primary);
+  font-size: var(--size-small);
+  font-weight: var(--weight-normal);
+  line-height: 1.5;
+  text-align: left;
+  white-space: normal;
+}
+
+.info-tip[data-align="end"] .info-tip__bubble {
+  right: 0;
+  left: auto;
+}
+
+/* Closed, but never gone: `display: none` would take the bubble out of the
+   accessibility tree, and the trigger's `aria-describedby` would then point at
+   nothing — the opposite of what InfoTip promises. Clip it the way
+   `.visually-hidden` does, so the description is still readable while the
+   bubble is off screen and cannot intercept a click on the trigger. */
+.info-tip__bubble--hidden {
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  border: 0;
+  box-shadow: none;
+  overflow: hidden;
+  clip-path: inset(50%);
+  pointer-events: none;
+}
+
+/* Motion is only allowed to explain an appearance: dialog open, tooltip,
+   hint arrival. Everything else stays instant, and all of it is off under
+   reduced motion. */
+@media (prefers-reduced-motion: no-preference) {
+  .dialog {
+    animation: aat-dialog-in var(--transition) ease-out;
+  }
+
+  .graph-hint {
+    animation: aat-fade-in var(--transition) ease-out;
+  }
+
+  .info-tip__bubble:not(.info-tip__bubble--hidden) {
+    animation: aat-fade-in var(--transition) ease-out;
+  }
+}
+
+@keyframes aat-dialog-in {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@keyframes aat-fade-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+/* A hidden file input inside a button-styled label is focusable but invisible;
+   draw the ring on the label that presents as the control. */
+.button:focus-within {
+  outline: 2px solid var(--border-focus);
+  outline-offset: 1px;
+}

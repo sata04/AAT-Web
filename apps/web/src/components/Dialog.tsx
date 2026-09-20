@@ -22,6 +22,12 @@ export interface DialogProps {
 const FOCUSABLE =
   'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])'
 
+/** An explicit `data-autofocus` wins over DOM order. */
+function initialFocusTarget(panel: HTMLElement | null): HTMLElement | null {
+  if (panel === null) return null
+  return panel.querySelector<HTMLElement>('[data-autofocus]') ?? panel.querySelector<HTMLElement>(FOCUSABLE)
+}
+
 export function Dialog(props: DialogProps): React.JSX.Element {
   const titleId = useId()
   const descriptionId = useId()
@@ -30,12 +36,27 @@ export function Dialog(props: DialogProps): React.JSX.Element {
 
   useEffect(() => {
     restoreFocusTo.current = document.activeElement
-    const panel = panelRef.current
-    const first = panel?.querySelector<HTMLElement>(FOCUSABLE)
-    first?.focus()
+    initialFocusTarget(panelRef.current)?.focus()
     return () => {
       const previous = restoreFocusTo.current
       if (previous instanceof HTMLElement) previous.focus()
+    }
+  }, [])
+
+  // The backdrop covers the analyzer, drop targets included. A file dropped
+  // anywhere while a dialog is up would otherwise reach the browser's default
+  // handler, which navigates to the file and takes every open dataset with it —
+  // a first-run user dragging a CSV onto the welcome would lose the session.
+  // Cancelling the drop only works if `dragover` was cancelled first.
+  useEffect(() => {
+    const swallowFileDrag = (event: DragEvent) => {
+      if (event.dataTransfer?.types.includes('Files') === true) event.preventDefault()
+    }
+    document.addEventListener('dragover', swallowFileDrag)
+    document.addEventListener('drop', swallowFileDrag)
+    return () => {
+      document.removeEventListener('dragover', swallowFileDrag)
+      document.removeEventListener('drop', swallowFileDrag)
     }
   }, [])
 
