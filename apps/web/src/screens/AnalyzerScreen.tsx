@@ -48,8 +48,8 @@ import { type GraphPalette, themeSettingFrom } from '../graph/theme.ts'
 import type { ChartViewport } from '../graph/UPlotChart.tsx'
 import { useThemePalette } from '../graph/use-theme-palette.ts'
 import { canSelectRange, isComparing, type ViewMode } from '../graph/view-mode.ts'
-import { DEMO_DATASET_NAMES } from '../onboarding/demo-data.ts'
-import type { TourDriver, TourSnapshot } from '../onboarding/tour-driver.ts'
+import { type DemoDataset, demoCsvFile, demoFilename } from '../onboarding/demo-data.ts'
+import { type TourDriver, type TourSnapshot, type TourView, tourViewOf } from '../onboarding/tour-driver.ts'
 import type { PosterContext } from '../poster/requests.ts'
 import { type SessionStatus, useSession } from '../session/SessionProvider.tsx'
 import { type AnalyzerHint, AnalyzerView } from './AnalyzerView.tsx'
@@ -312,6 +312,9 @@ export function AnalyzerScreen(): React.JSX.Element {
   const tourSnapshotRef = useRef<TourSnapshot>({
     datasets,
     mode,
+    activeName,
+    selection,
+    viewport,
     analysisReady,
     dataRange: null,
     geometry: null,
@@ -321,50 +324,142 @@ export function AnalyzerScreen(): React.JSX.Element {
     tourSnapshotRef.current = {
       datasets,
       mode,
+      activeName,
+      selection,
+      viewport,
       analysisReady,
       dataRange: derived.dataRange,
       geometry,
       gestureLayer,
     }
+    // Reconcile tour installs at the commit boundary — the only place that
+    // observes every datasets array. `openDemo` cannot adopt inside its own
+    // continuation: `loop.openFiles` resolves before this commit lands, so a
+    // same-tick read would miss the install entirely.
+    const tracker = tourOwnedRef.current
+    for (const [filename, pending] of tracker.pending) {
+      const installed = datasets.find((dataset) => dataset.filename === filename)
+      if (installed !== undefined) {
+        tracker.owned.set(pending.which, filename)
+        tracker.pending.delete(filename)
+        if (pending.epoch !== tracker.epoch || !tracker.keep.has(pending.which)) {
+          loop.closeDataset(installed)
+        }
+      } else if (pending.settled) {
+        // The open finished without this install — `installAnalysisResult`
+        // dropped it into `closedSources` — so nothing is coming.
+        tracker.pending.delete(filename)
+      }
+    }
   })
 
-  const tourDriver = useMemo<TourDriver>(
-    () => ({
-      snapshot: () => tourSnapshotRef.current,
+  // Which datasets this run installed, role → filename it landed under; which
+  // opens are still in flight; and the epoch a stale open checks before it
+  // stays. In a ref because `loop` is recreated every commit — `useMemo`
+  // state tied to it would reset each render.
+  const tourOwnedRef = useRef({
+    owned: new Map<DemoDataset, string>(),
+    keep: new Set<DemoDataset>(),
+    pending: new Map<string, { which: DemoDataset; epoch: number; settled: boolean }>(),
+    epoch: 0,
+  })
+
+  // What the workspace looked like when the stage opened — a skipped replay
+  // restores this, so driving a researcher's session gives the view back.
+  // Captured on the open commit: scenes have not run yet (the intro is
+  // pinned), so this is always the pre-tour state.
+  const tourBaselineRef = useRef<TourView | null>(null)
+  useEffect(() => {
+    tourBaselineRef.current = tourOpen ? tourViewOf(tourSnapshotRef.current) : null
+  }, [tourOpen])
+
+  const tourDriver = useMemo<TourDriver>(() => {
+    // Datasets this run opened, by role → the filename they landed under.
+    // Ownership is recorded at install: a researcher's file with a colliding
+    // name is never mistaken for the demo, and `discardPending` bumps the
+    // epoch so an open still in flight when the stage exits self-closes the
+    // moment it installs instead of appearing on a pristine workspace.
+    // `tracker` lives in a ref, not this memo's closure: `loop` is a new
+    // object every commit, so maps captured here would be silently discarded
+    // on every render — and cleanup would iterate an empty `owned`.
+    const tracker = tourOwnedRef.current
+    const snapshot = tourSnapshotRef
+    return {
+      snapshot: () => snapshot.current,
       openFiles: (files) => loop.openFiles(files),
-      closeDatasets: (filenames) => {
-        for (const dataset of tourSnapshotRef.current.datasets) {
-          if (filenames.includes(dataset.filename)) loop.closeDataset(dataset)
+      openDemo: async (which) => {
+        const mine = new Set(tracker.owned.values())
+        const taken = new Set(
+          snapshot.current.datasets
+            .filter((dataset) => !mine.has(dataset.filename))
+            .map((dataset) => dataset.name),
+        )
+        const filename = demoFilename(which, taken)
+        tracker.keep.add(which)
+        // Adoption happens in the snapshot-sync effect — the commit boundary —
+        // because `openFiles` resolves before the install commits.
+        const pending = { which, epoch: tracker.epoch, settled: false }
+        tracker.pending.set(filename, pending)
+        try {
+          await loop.openFiles([demoCsvFile(which, filename)])
+        } finally {
+          pending.settled = true
+        }
+        return filename
+      },
+      closeTourDatasets: (except = []) => {
+        tracker.keep.clear()
+        for (const which of except) tracker.keep.add(which)
+        for (const [which, filename] of tracker.owned) {
+          if (tracker.keep.has(which)) continue
+          const dataset = snapshot.current.datasets.find((entry) => entry.filename === filename)
+          if (dataset !== undefined) loop.closeDataset(dataset)
+          tracker.owned.delete(which)
         }
       },
-      applyModeEvent: (event) =>
-        applyViewEvent(tourSnapshotRef.current.mode, event, { setMode, setSelection, setViewport }),
-      activateDataset: (filename) => {
-        const dataset = tourSnapshotRef.current.datasets.find((entry) => entry.filename === filename)
+      discardPending: () => {
+        tracker.epoch += 1
+      },
+      activateDemo: (which) => {
+        const filename = tracker.owned.get(which)
+        if (filename === undefined) return
+        const dataset = snapshot.current.datasets.find((entry) => entry.filename === filename)
         if (dataset === undefined) return
         setActiveName(dataset.name)
         setSelection(null)
         setViewport(null)
       },
+      applyModeEvent: (event) =>
+        applyViewEvent(snapshot.current.mode, event, { setMode, setSelection, setViewport }),
       setSelection,
       setViewport,
-      resetView: () => {
-        setMode('NORMAL')
-        setSelection(null)
-        setViewport(null)
+      restoreBaseline: () => {
+        const baseline = tourBaselineRef.current
+        const remaining = snapshot.current.datasets
+        const active =
+          baseline !== null &&
+          baseline.activeName !== null &&
+          remaining.some((dataset) => dataset.name === baseline.activeName)
+            ? baseline.activeName
+            : (remaining[0]?.name ?? null)
+        setMode(baseline?.mode ?? 'NORMAL')
+        setActiveName(active)
+        setSelection(baseline?.selection ?? null)
+        setViewport(baseline?.viewport ?? null)
       },
       openFilePicker: () => document.getElementById('aat-file-open')?.click(),
-    }),
-    [loop],
-  )
+    }
+  }, [loop])
 
   const finishTour = useCallback(
     (kind: 'keep' | 'skip', drove: boolean) => {
       if (kind === 'skip' && drove) {
-        // Mid-tour exits leave the workspace pristine — whatever the scenes
-        // opened goes back out with the stage.
-        tourDriver.closeDatasets(DEMO_DATASET_NAMES)
-        tourDriver.resetView()
+        // Mid-tour exits leave the workspace pristine: kill pending demo
+        // opens, close what the scenes installed, and hand the view back as
+        // the stage found it.
+        tourDriver.discardPending()
+        tourDriver.closeTourDatasets()
+        tourDriver.restoreBaseline()
       }
       if (kind === 'keep' && drove) {
         // The tour already demonstrated selection, gestures and compare live;

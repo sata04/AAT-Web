@@ -12,7 +12,7 @@
 
 import { valueToPixel } from '../graph/geometry.ts'
 import { isComparing, isGQuality, isShowingAll, leaveComparing, type ViewMode } from '../graph/view-mode.ts'
-import { DEMO_DATASET_NAMES, demoCsvFile } from './demo-data.ts'
+import type { DemoDataset } from './demo-data.ts'
 import type { TourDriver, TourSnapshot } from './tour-driver.ts'
 
 export type SceneId =
@@ -80,10 +80,6 @@ export interface TourCtx {
   }
 }
 
-/** The demo files land in the real pipeline under these names. */
-const SAMPLE_A = DEMO_DATASET_NAMES[0]
-const SAMPLE_B = DEMO_DATASET_NAMES[1]
-
 /** `leaveComparing` knows the overlay to keep; applying it lands us in NORMAL's neighbourhood. */
 function toNormalMode(driver: TourDriver, mode: ViewMode): void {
   let current = mode
@@ -96,17 +92,18 @@ function toNormalMode(driver: TourDriver, mode: ViewMode): void {
 }
 
 /**
- * Canonical baseline for a driving scene: only the named demo datasets open
- * (the tour never touches a researcher's own files), plain view, no selection.
+ * Canonical baseline for a driving scene: only the listed demo roles open
+ * (the tour never touches a researcher's own files — ownership is what the
+ * driver tracked at install, never a matching filename), plain view, no
+ * selection.
  */
-function prepare(ctx: TourCtx, demoDatasets: readonly string[]): void {
+function prepare(ctx: TourCtx, keep: readonly DemoDataset[]): void {
   const snapshot = ctx.driver.snapshot()
-  const demoToClose = DEMO_DATASET_NAMES.filter((name) => !demoDatasets.includes(name))
-  ctx.driver.closeDatasets(demoToClose)
+  ctx.driver.closeTourDatasets(keep)
   toNormalMode(ctx.driver, snapshot.mode)
   ctx.driver.setSelection(null)
   ctx.driver.setViewport(null)
-  for (const filename of demoDatasets) ctx.driver.activateDataset(filename)
+  for (const which of keep) ctx.driver.activateDemo(which)
 }
 
 /** Screen point of a data x value, for the cursor sweep during `select`. */
@@ -121,21 +118,22 @@ function plotPoint(snapshot: TourSnapshot, x: number): { x: number; y: number } 
 
 async function enterIngest(ctx: TourCtx): Promise<void> {
   prepare(ctx, [])
-  ctx.driver.openFiles([demoCsvFile('a')])
+  const filename = await ctx.driver.openDemo('a')
+  if (ctx.signal.aborted) return
   await ctx.waitFor(
     (snapshot) =>
-      snapshot.analysisReady && snapshot.datasets.some((dataset) => dataset.filename === SAMPLE_A),
+      snapshot.analysisReady && snapshot.datasets.some((dataset) => dataset.filename === filename),
   )
   if (ctx.signal.aborted) return
-  ctx.driver.activateDataset(SAMPLE_A)
+  ctx.driver.activateDemo('a')
 }
 
 function enterGraph(ctx: TourCtx): void {
-  prepare(ctx, [SAMPLE_A])
+  prepare(ctx, ['a'])
 }
 
 async function enterSelect(ctx: TourCtx): Promise<void> {
-  prepare(ctx, [SAMPLE_A])
+  prepare(ctx, ['a'])
   const range = ctx.driver.snapshot().dataRange
   if (range === null) return
   const span = range.max - range.min
@@ -153,7 +151,7 @@ async function enterSelect(ctx: TourCtx): Promise<void> {
 }
 
 function enterStats(ctx: TourCtx): void {
-  prepare(ctx, [SAMPLE_A])
+  prepare(ctx, ['a'])
   const snapshot = ctx.driver.snapshot()
   if (snapshot.dataRange !== null) {
     const span = snapshot.dataRange.max - snapshot.dataRange.min
@@ -165,7 +163,7 @@ function enterStats(ctx: TourCtx): void {
 }
 
 async function enterGestures(ctx: TourCtx): Promise<void> {
-  prepare(ctx, [SAMPLE_A])
+  prepare(ctx, ['a'])
   const range = ctx.driver.snapshot().dataRange
   if (range === null) return
   const span = range.max - range.min
@@ -193,18 +191,19 @@ async function enterGestures(ctx: TourCtx): Promise<void> {
 }
 
 async function enterGQuality(ctx: TourCtx): Promise<void> {
-  prepare(ctx, [SAMPLE_A])
+  prepare(ctx, ['a'])
   ctx.driver.applyModeEvent('G_QUALITY_ON')
   await ctx.wait(1700)
   ctx.driver.applyModeEvent('G_QUALITY_OFF')
 }
 
 async function enterCompare(ctx: TourCtx): Promise<void> {
-  prepare(ctx, [SAMPLE_A])
-  ctx.driver.openFiles([demoCsvFile('b')])
+  prepare(ctx, ['a'])
+  const filename = await ctx.driver.openDemo('b')
+  if (ctx.signal.aborted) return
   const opened = await ctx.waitFor(
     (snapshot) =>
-      snapshot.analysisReady && snapshot.datasets.some((dataset) => dataset.filename === SAMPLE_B),
+      snapshot.analysisReady && snapshot.datasets.some((dataset) => dataset.filename === filename),
   )
   if (!opened || ctx.signal.aborted) return
   ctx.driver.applyModeEvent('ENTER_COMPARING')

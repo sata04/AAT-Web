@@ -11,7 +11,6 @@
  */
 
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { DEMO_DATASET_NAMES } from './demo-data.ts'
 import type { TourDriver } from './tour-driver.ts'
 import { cursorTargetFor, SCENES, type SceneDef, type TourCtx } from './tour-scenes.ts'
 
@@ -41,6 +40,13 @@ export interface TourMachine {
 
 const ABORTED = new Error('tour scene aborted')
 
+/**
+ * Longest frame gap the clocks will ever accrue. Anything longer means the
+ * tab was hidden or stalled — rAF stops while hidden but its timestamps do
+ * not, so the resumed first frame would otherwise fast-forward the scene.
+ */
+const MAX_FRAME_MS = 100
+
 function isAbort(error: unknown): boolean {
   return error === ABORTED
 }
@@ -57,7 +63,10 @@ function clockWait(ms: number, signal: AbortSignal, gate: () => boolean, instant
     let last = -1
     const step = (now: number) => {
       if (signal.aborted) return reject(ABORTED)
-      if (last >= 0 && gate()) accrued += now - last
+      // The first frame after a hidden tab resumes carries the whole hidden
+      // span in `now - last`; clamping the delta freezes the timeline instead
+      // of letting the tour fast-forward through it.
+      if (last >= 0 && gate()) accrued += Math.min(now - last, MAX_FRAME_MS)
       last = now
       if (accrued >= ms) return resolve()
       requestAnimationFrame(step)
@@ -88,7 +97,7 @@ function clockTween(
     let last = -1
     const step = (now: number) => {
       if (signal.aborted) return reject(ABORTED)
-      if (last >= 0 && gate()) accrued += now - last
+      if (last >= 0 && gate()) accrued += Math.min(now - last, MAX_FRAME_MS)
       last = now
       if (accrued >= ms) {
         apply(1)
@@ -247,8 +256,8 @@ export function useTour(input: {
 
   const restart = useCallback(() => {
     const current = driverRef.current
-    current.closeDatasets(DEMO_DATASET_NAMES)
-    current.resetView()
+    current.closeTourDatasets()
+    current.restoreBaseline()
     setPlaying(false)
     setPaused(false)
     setCursor({ visible: false, x: 0, y: 0 })

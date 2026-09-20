@@ -21,7 +21,6 @@ import { initialFocusTarget, useTopmostDialogKeys } from '../components/Dialog.t
 import { csvFilesFrom } from '../components/FileDropZone.tsx'
 import './onboarding.css'
 import { DemoCursor } from './DemoCursor.tsx'
-import { demoCsvFile } from './demo-data.ts'
 import type { TourDriver } from './tour-driver.ts'
 import { type TourFinish, useTour } from './use-tour.ts'
 
@@ -132,7 +131,9 @@ function IntroCard({
           type="button"
           className="button"
           onClick={() => {
-            void driver.openFiles([demoCsvFile('a')])
+            // openDemo picks a non-colliding name, so a researcher's own
+            // sample-a.csv is never overwritten by the demo.
+            void driver.openDemo('a')
             onFinish('keep')
           }}
         >

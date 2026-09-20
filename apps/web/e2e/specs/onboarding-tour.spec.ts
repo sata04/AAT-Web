@@ -11,7 +11,7 @@
  */
 
 import type { Locator, Page } from '@playwright/test'
-import { waitForAnalysis } from '../harness/app.ts'
+import { openCsv, repoCsv, setRange, waitForAnalysis } from '../harness/app.ts'
 import { expect, test } from '../harness/fixtures.ts'
 
 /**
@@ -188,6 +188,79 @@ test.describe('onboarding tour', () => {
 
     await page.reload()
     await expect(tourStage(page)).toHaveCount(0)
+  })
+
+  test('skipping during ingest cannot leak the demo onto the workspace', async ({ page }) => {
+    await page.goto('/')
+
+    const stage = tourStage(page)
+    await stage.getByRole('button', { name: 'デモを見る' }).click()
+    // Escape while sample-a's open/analysis is still in flight: the stage is
+    // gone before the request lands, so the install must self-close rather
+    // than appearing on a pristine workspace a moment later.
+    await page.keyboard.press('Escape')
+    await expect(stage).toHaveCount(0)
+
+    // Well past the demo's analysis time — anything in flight has landed by now.
+    await page.waitForTimeout(6_000)
+    await expect(datasets(page)).toHaveCount(0)
+    await expect(page.getByText('CSVファイルをドロップ')).toBeVisible()
+  })
+
+  test("a researcher's own sample-a.csv survives a replayed tour", async ({ page }) => {
+    await page.goto('/')
+    await tourStage(page).getByRole('button', { name: 'そのまま始める' }).click()
+
+    // Their own file happens to carry the demo's name — the tour must not
+    // mistake it for tour data, at open or at cleanup.
+    await openCsv(page, repoCsv('normal_two_sensor_utf8.csv'), 'sample-a.csv')
+    await waitForAnalysis(page)
+
+    await page.getByRole('button', { name: '操作ガイド', exact: true }).click()
+    await page.getByRole('dialog').getByRole('button', { name: '初回の案内をもう一度見る' }).click()
+    const stage = tourStage(page)
+    await stage.getByRole('button', { name: 'デモを見る' }).click()
+
+    // The demo lands under its fallback name next to the researcher's file.
+    const caption = tourCaption(stage)
+    await expect(caption).toHaveAttribute('data-scene', 'graph')
+    await expect(datasets(page).getByRole('button', { name: 'sample-a-tour', exact: true })).toBeVisible()
+    await expect(datasets(page).getByRole('button', { name: 'sample-a', exact: true })).toBeVisible()
+
+    await page.keyboard.press('Escape')
+    await expect(stage).toHaveCount(0)
+
+    // The tour's dataset is gone; the researcher's is untouched.
+    await expect(datasets(page).getByRole('button', { name: 'sample-a', exact: true })).toBeVisible()
+    await expect(datasets(page).getByRole('button', { name: /sample-a-tour|sample-b/ })).toHaveCount(0)
+  })
+
+  test("skipping a replayed tour hands the workspace's view back", async ({ page }) => {
+    await page.goto('/')
+    await tourStage(page).getByRole('button', { name: 'そのまま始める' }).click()
+
+    await openCsv(page, repoCsv('normal_two_sensor_utf8.csv'))
+    await waitForAnalysis(page)
+    await setRange(page, 0.6, 1.4)
+    const stats = page.locator('section[aria-label="選択範囲の統計情報"]')
+    await expect(stats).toBeVisible()
+
+    await page.getByRole('button', { name: '操作ガイド', exact: true }).click()
+    await page.getByRole('dialog').getByRole('button', { name: '初回の案内をもう一度見る' }).click()
+    const stage = tourStage(page)
+    await stage.getByRole('button', { name: 'デモを見る' }).click()
+    await expect(tourCaption(stage)).toHaveAttribute('data-scene', 'graph')
+
+    await page.keyboard.press('Escape')
+    await expect(stage).toHaveCount(0)
+
+    // The selection the researcher left is still there — the tour gave the
+    // workspace back rather than resetting it.
+    await expect(
+      datasets(page).getByRole('button', { name: 'normal_two_sensor_utf8', exact: true }),
+    ).toBeVisible()
+    await expect(stats).toBeVisible()
+    await expect(datasets(page).getByRole('button', { name: /sample-/ })).toHaveCount(0)
   })
 
   test('is operable from the keyboard alone', async ({ page }) => {

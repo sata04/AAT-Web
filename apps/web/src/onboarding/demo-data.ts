@@ -15,6 +15,8 @@
  * formatting — no `Math.random`, no wall-clock input, ASCII only.
  */
 
+import { datasetNameFromFilename } from '../app/dataset.ts'
+
 export type DemoDataset = 'a' | 'b'
 
 /**
@@ -26,6 +28,18 @@ export const DEMO_DATASET_NAMES = ['sample-a.csv', 'sample-b.csv'] as const
 const FILE_NAME: Readonly<Record<DemoDataset, (typeof DEMO_DATASET_NAMES)[number]>> = {
   a: DEMO_DATASET_NAMES[0],
   b: DEMO_DATASET_NAMES[1],
+}
+
+/** The name the demo lands under when a researcher's own file has the usual one. */
+const FALLBACK_NAME: Readonly<Record<DemoDataset, string>> = {
+  a: 'sample-a-tour.csv',
+  b: 'sample-b-tour.csv',
+}
+
+/** Preferred filename, or the tour-suffixed fallback when `taken` names collide. */
+export function demoFilename(which: DemoDataset, taken: ReadonlySet<string>): string {
+  const preferred = FILE_NAME[which]
+  return taken.has(datasetNameFromFilename(preferred)) ? FALLBACK_NAME[which] : preferred
 }
 
 /**
@@ -224,9 +238,10 @@ function buildCsv(profile: DemoProfile): string {
 /**
  * The tour's input file. A fresh `File` every call — callers must be able to
  * hand it to `openFiles` independently — over bytes that never change for a
- * given `which`.
+ * given `which`. `filename` exists for the collision fallback: the bytes are
+ * identical either way, only the display name moves.
  */
-export function demoCsvFile(which: DemoDataset): File {
+export function demoCsvFile(which: DemoDataset, filename: string = FILE_NAME[which]): File {
   const bytes = new TextEncoder().encode(buildCsv(PROFILES[which]))
-  return new File([bytes], FILE_NAME[which], { type: 'text/csv' })
+  return new File([bytes], filename, { type: 'text/csv' })
 }

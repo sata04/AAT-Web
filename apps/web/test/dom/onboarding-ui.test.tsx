@@ -21,6 +21,9 @@ function fakeDriver(overrides: Partial<TourDriver> = {}): TourDriver {
   const snapshot: TourSnapshot = {
     datasets: [],
     mode: 'NORMAL',
+    activeName: null,
+    selection: null,
+    viewport: null,
     analysisReady: false,
     dataRange: null,
     geometry: null,
@@ -29,12 +32,14 @@ function fakeDriver(overrides: Partial<TourDriver> = {}): TourDriver {
   return {
     snapshot: () => snapshot,
     openFiles: vi.fn(async () => {}),
-    closeDatasets: vi.fn(),
+    openDemo: vi.fn(async (which) => `sample-${which}.csv`),
+    closeTourDatasets: vi.fn(),
+    discardPending: vi.fn(),
+    activateDemo: vi.fn(),
     applyModeEvent: vi.fn(),
-    activateDataset: vi.fn(),
     setSelection: vi.fn(),
     setViewport: vi.fn(),
-    resetView: vi.fn(),
+    restoreBaseline: vi.fn(),
     openFilePicker: vi.fn(),
     ...overrides,
   }
@@ -70,15 +75,13 @@ describe('tour stage — intro', () => {
     expect(onFinish).toHaveBeenCalledWith('keep', false)
   })
 
-  it('opens the generated CSV through the real openFiles verb', async () => {
+  it('opens the generated CSV through the tracked demo verb', async () => {
     const user = userEvent.setup()
     const driver = fakeDriver()
     renderComponent(<OnboardingStage driver={driver} onFinish={() => {}} />)
 
     await user.click(screen.getByRole('button', { name: 'サンプルデータで試す' }))
-    const files = vi.mocked(driver.openFiles).mock.calls[0]?.[0]
-    expect(files).toHaveLength(1)
-    expect(files?.[0]?.name).toBe('sample-a.csv')
+    expect(driver.openDemo).toHaveBeenCalledWith('a')
   })
 
   it('hands CSVを開く to the toolbar picker', async () => {
@@ -117,8 +120,7 @@ describe('tour stage — driving', () => {
     await user.click(screen.getByRole('button', { name: 'デモを見る' }))
     const caption = document.querySelector('[data-scene]')
     expect(caption?.getAttribute('data-scene')).toBe('ingest')
-    expect(driver.openFiles).toHaveBeenCalledOnce()
-    expect(vi.mocked(driver.openFiles).mock.calls[0]?.[0]?.[0]?.name).toBe('sample-a.csv')
+    expect(driver.openDemo).toHaveBeenCalledWith('a')
   })
 
   it('marks a mid-tour skip as driven, so the screen cleans up after it', async () => {
