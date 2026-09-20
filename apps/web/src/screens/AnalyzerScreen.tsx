@@ -346,26 +346,24 @@ export function AnalyzerScreen(): React.JSX.Element {
     // continuation: `loop.openFiles` resolves before this commit lands, so a
     // same-tick read would miss the install entirely.
     const tracker = tourOwnedRef.current
-    for (const [filename, queue] of tracker.pending) {
+    for (const [filename, pending] of tracker.pending) {
       const installed = datasets.find((dataset) => dataset.filename === filename)
       if (installed !== undefined && !tracker.reconciled.has(installed)) {
-        // Each new install consumes the oldest open for its name: restarting
-        // mid-open re-picks the same filename, and whichever result lands
-        // belongs to whichever request completes first.
+        // Whatever object is visible for this name belongs to the newest
+        // request: a restart mid-open re-picks the filename, and React may
+        // batch two installs into one commit — per-object bookkeeping would
+        // either misattribute or orphan the survivor.
         tracker.reconciled.add(installed)
-        const pending = queue.shift()
-        if (queue.length === 0) tracker.pending.delete(filename)
-        if (pending === undefined) continue
-        tracker.owned.set(pending.which, installed)
-        if (pending.epoch !== tracker.epoch || !tracker.keep.has(pending.which)) {
+        tracker.owned.set(pending.latest.which, installed)
+        if (pending.latest.epoch !== tracker.epoch || !tracker.keep.has(pending.latest.which)) {
           loop.closeDataset(installed)
         }
-      } else if (installed === undefined) {
-        // Opens that finished without installing — `installAnalysisResult`
-        // dropped them into `closedSources` — leave a settled corpse.
-        const live = queue.filter((pending) => !pending.settled)
-        if (live.length === 0) tracker.pending.delete(filename)
-        else if (live.length !== queue.length) tracker.pending.set(filename, live)
+      }
+      if (pending.inFlight === 0) {
+        // Settle runs after the install dispatched, so once every open has
+        // resolved whatever is committed now is all that is ever coming —
+        // an open dropped into `closedSources` produced nothing to wait for.
+        tracker.pending.delete(filename)
       }
     }
   })
@@ -380,9 +378,12 @@ export function AnalyzerScreen(): React.JSX.Element {
     // different object, which cleanup therefore never matches.
     owned: new Map<DemoDataset, Dataset>(),
     keep: new Set<DemoDataset>(),
-    // In-flight opens, queued per chosen filename: a restart mid-open
-    // re-picks the same name, and each install must consume its own request.
-    pending: new Map<string, { which: DemoDataset; epoch: number; settled: boolean }[]>(),
+    // In-flight opens per chosen filename: how many are still resolving, and
+    // the newest request — whose epoch and role the visible install obeys.
+    pending: new Map<
+      string,
+      { inFlight: number; latest: { which: DemoDataset; epoch: number } }
+    >(),
     // Installs already matched to a request — the same dataset object still
     // visible on the next commit must not consume another open.
     reconciled: new WeakSet<Dataset>(),
@@ -430,17 +431,20 @@ export function AnalyzerScreen(): React.JSX.Element {
         tracker.keep.add(which)
         // Adoption happens in the snapshot-sync effect — the commit boundary —
         // because `openFiles` resolves before the install commits.
-        const pending = { which, epoch: tracker.epoch, settled: false }
-        const queue = tracker.pending.get(filename)
-        if (queue === undefined) tracker.pending.set(filename, [pending])
-        else queue.push(pending)
+        const record = tracker.pending.get(filename) ?? {
+          inFlight: 0,
+          latest: { which, epoch: tracker.epoch },
+        }
+        record.inFlight += 1
+        record.latest = { which, epoch: tracker.epoch }
+        tracker.pending.set(filename, record)
         try {
           // Local-only: the tour's own copy promises nothing leaves the
           // browser, and a skipped tour must never leave cloud revisions or
           // poster jobs behind for a signed-in researcher.
           await loop.openFiles([demoCsvFile(which, filename)], { localOnly: true })
         } finally {
-          pending.settled = true
+          record.inFlight -= 1
         }
         return filename
       },
