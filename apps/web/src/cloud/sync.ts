@@ -65,6 +65,10 @@ export async function buildSnapshot(dataset: Dataset, config: AnalysisConfig): P
       time: [dataset.mapping.timeColumn],
       acceleration: [dataset.mapping.innerColumn, dataset.mapping.dragColumn],
     },
+    // The mapping the engine actually used, as the five fields columnMappingHash hashes — the
+    // upload endpoint recomputes it against the revision's stored mappingHash, so a snapshot can
+    // never be filed under an analysis identity its columns don't match.
+    columnMapping: { ...dataset.mapping },
     sync: {
       innerIndex: dataset.sync.innerIndex,
       dragIndex: dataset.sync.dragIndex,

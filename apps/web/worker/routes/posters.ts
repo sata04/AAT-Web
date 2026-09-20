@@ -124,6 +124,10 @@ function validateSpec(raw: unknown, revisionId: string, expectedKind: 'auto' | '
  * A failure before the object row exists releases the reservation; a failure after it unwinds the
  * whole upload — accounting, row and bytes — because the charge may already be settled and the
  * deterministic key must be free for the retry.
+ *
+ * `attempt` is the render token this request was granted. Returns false when the figure was
+ * superseded by a takeover mid-render — the object this attempt committed is unwound, since the
+ * figure now belongs to a render whose bytes these are not.
  */
 async function commitPosterRender(
   context: AppContext,
@@ -132,8 +136,9 @@ async function commitPosterRender(
   revision: { id: string; runId: string; ownerUserId: string },
   reservation: Reservation,
   key: string,
+  attempt: string,
   now: Date,
-): Promise<void> {
+): Promise<boolean> {
   const db = context.get('db')
   const actor = context.get('actor')
   const ownerUserId = revision.ownerUserId
@@ -141,22 +146,16 @@ async function commitPosterRender(
   let uploaded: { id: string; byteSize: number; sha256: string } | null = null
   try {
     const digest = await sha256Hex(outcome.png)
-    const putObject = () =>
-      context.env.AAT_OBJECTS.put(key, outcome.png as ArrayBufferView, {
-        httpMetadata: { contentType: 'image/png' },
-        sha256: digest,
-        customMetadata: { revisionId: revision.id, posterId: figureId, ownerUserId },
-      })
-    const put = await putObject()
-    const actualBytes = put?.size ?? outcome.png.length
-
+    // The row claims the deterministic key BEFORE the bytes are written — the same ordering as the
+    // snapshot path — so a second render that finishes cannot put over the winner's checksum.
     const objectId = newId()
     const objectValues = {
       id: objectId,
       ownerUserId,
       kind: 'poster' as const,
       r2Key: key,
-      byteSize: actualBytes,
+      // Provisional until R2 reports what it stored — corrected below before the commit.
+      byteSize: outcome.png.length,
       sha256: digest,
       contentType: 'image/png',
       originalFilename: null,
@@ -169,13 +168,46 @@ async function commitPosterRender(
       await db.insert(cloudObjects).values(objectValues)
     } catch (insertError) {
       // A wedged predecessor — an unwind that died mid-cleanup — still holds this deterministic
-      // key. Finish its eviction, re-put (that cleanup may have removed the bytes we just wrote),
-      // and take the key. A live row keeps its key and the original error flies.
+      // key. Finish its eviction and take the key; a live row keeps its key and the original error
+      // flies.
       if (!(await evictDeadObject(db, key, now))) throw insertError
-      await putObject()
       await db.insert(cloudObjects).values(objectValues)
     }
-    uploaded = { id: objectId, byteSize: actualBytes, sha256: digest }
+    uploaded = { id: objectId, byteSize: outcome.png.length, sha256: digest }
+
+    // A takeover while this attempt was rendering replaced the figure's render_attempt: this
+    // attempt is stale, and R2 has no conditional write, so the only thing keeping its old-spec
+    // bytes from the key the new attempt is about to claim is checking ownership BEFORE putting.
+    const [owner] = await db
+      .select({ renderAttempt: posterFigures.renderAttempt })
+      .from(posterFigures)
+      .where(eq(posterFigures.id, figureId))
+      .limit(1)
+    if (owner?.renderAttempt !== attempt) {
+      await unwindUploadedObject(
+        db,
+        context.env.AAT_OBJECTS,
+        {
+          ...uploaded,
+          r2Key: key,
+          ownerUserId,
+          reservationId: reservation.id,
+        },
+        now,
+      )
+      return false
+    }
+
+    const put = await context.env.AAT_OBJECTS.put(key, outcome.png as ArrayBufferView, {
+      httpMetadata: { contentType: 'image/png' },
+      sha256: digest,
+      customMetadata: { revisionId: revision.id, posterId: figureId, ownerUserId },
+    })
+    const actualBytes = put?.size ?? outcome.png.length
+    if (actualBytes !== uploaded.byteSize) {
+      await db.update(cloudObjects).set({ byteSize: actualBytes }).where(eq(cloudObjects.id, objectId))
+      uploaded = { ...uploaded, byteSize: actualBytes }
+    }
     await commitUploadedObject(
       db,
       context.env.AAT_OBJECTS,
@@ -184,7 +216,24 @@ async function commitPosterRender(
       revision.runId,
       now,
     )
-    await markRendered(db, figureId, objectId, outcome.rendererVersion, now)
+
+    const published = await markRendered(db, figureId, objectId, outcome.rendererVersion, attempt, now)
+    if (!published) {
+      // Superseded inside the narrow put→publish window: the figure's new attempt will write the
+      // key itself, so this attempt's object — row, bytes and charge — goes back.
+      await unwindUploadedObject(
+        db,
+        context.env.AAT_OBJECTS,
+        {
+          ...uploaded,
+          r2Key: key,
+          ownerUserId,
+          reservationId: reservation.id,
+        },
+        now,
+      )
+      return false
+    }
 
     await writeAuditLog(db, {
       actorUserId: actor.userId,
@@ -195,6 +244,7 @@ async function commitPosterRender(
       details: { byteSize: actualBytes, rendererVersion: outcome.rendererVersion },
       headers: context.req.raw.headers,
     })
+    return true
   } catch (error) {
     // Cleanup failure must not replace the error the request actually died of — a remnant it
     // leaves is reclaimable by the next contender for the key or the sweeper.
@@ -219,15 +269,23 @@ async function commitPosterRender(
  * POSTER_BUSY is backpressure, not a failed render: the figure goes back to `queued` so a later
  * retry — or the next call to the idempotent endpoint — can pick it up.
  */
-async function recordRenderFailure(db: Database, figureId: string, error: unknown, now: Date): Promise<void> {
+async function recordRenderFailure(
+  db: Database,
+  figureId: string,
+  error: unknown,
+  attempt: string,
+  now: Date,
+): Promise<void> {
   const code = error instanceof ApiError ? error.code : 'POSTER_RENDER_FAILED'
+  // Every transition is attempt-gated: a superseded render's failure must not touch the figure the
+  // takeover now owns — neither to 'failed' nor back to 'queued'.
   if (code === 'POSTER_BUSY') {
     await db
       .update(posterFigures)
       .set({ status: 'queued', updatedAt: now })
-      .where(eq(posterFigures.id, figureId))
+      .where(and(eq(posterFigures.id, figureId), eq(posterFigures.renderAttempt, attempt)))
   } else {
-    await markFailed(db, figureId, code, now)
+    await markFailed(db, figureId, code, attempt, now)
   }
 }
 
@@ -243,6 +301,7 @@ async function performRender(
   figureId: string,
   spec: PosterPlotSpec,
   revision: { id: string; runId: string; ownerUserId: string },
+  attempt: string,
 ): Promise<Response> {
   const db = context.get('db')
   const config = resolveConfig(context.env)
@@ -269,15 +328,26 @@ async function performRender(
       config.reservationTtlSeconds,
       now,
     )
-    await commitPosterRender(context, figureId, outcome, revision, reservation, key, now)
+    const published = await commitPosterRender(
+      context,
+      figureId,
+      outcome,
+      revision,
+      reservation,
+      key,
+      attempt,
+      now,
+    )
+
+    const [figure] = await db.select().from(posterFigures).where(eq(posterFigures.id, figureId)).limit(1)
+    if (!figure) throw new ApiError('INTERNAL')
+    // A superseded attempt returns the live state — the takeover's render, still 'rendering' —
+    // rather than pretending its own render won.
+    return context.json({ poster: figureResponse(figure) }, published ? 201 : 200)
   } catch (error) {
-    await recordRenderFailure(db, figureId, error, now)
+    await recordRenderFailure(db, figureId, error, attempt, now)
     throw error
   }
-
-  const [figure] = await db.select().from(posterFigures).where(eq(posterFigures.id, figureId)).limit(1)
-  if (!figure) throw new ApiError('INTERNAL')
-  return context.json({ poster: figureResponse(figure) }, 201)
 }
 
 /* ------------------------------------------------------------------------------------------- */
@@ -360,10 +430,10 @@ posterRoutes.post(
         staleSeconds: config.renderStaleSeconds,
         spec: { specHash: hash, presetVersion: spec.posterPresetVersion },
       }
-      const claimed = isStale
+      const attempt = isStale
         ? await takeOverStaleRender(db, existing.id, claimOptions, now)
         : await claimForRender(db, existing.id, ['queued'], claimOptions, now)
-      if (!claimed) {
+      if (attempt === null) {
         // Another request claimed it in between. There is exactly one render, and it is theirs.
         const [fresh] = await db
           .select()
@@ -372,21 +442,21 @@ posterRoutes.post(
           .limit(1)
         return context.json({ poster: figureResponse(fresh ?? existing), created: false })
       }
-      return performRender(context, existing.id, spec, revision)
+      return performRender(context, existing.id, spec, revision, attempt)
     }
 
     await assertRenderCapacity(db, config.maxConcurrentRenders, config.renderStaleSeconds, now)
-    const claimed = await claimForRender(db, figureId, ['queued'], {
+    const attempt = await claimForRender(db, figureId, ['queued'], {
       maxConcurrent: config.maxConcurrentRenders,
       staleSeconds: config.renderStaleSeconds,
       spec: { specHash: hash, presetVersion: spec.posterPresetVersion },
     })
-    if (!claimed) {
+    if (attempt === null) {
       const [fresh] = await db.select().from(posterFigures).where(eq(posterFigures.id, figureId)).limit(1)
       if (fresh) return context.json({ poster: figureResponse(fresh), created: false })
       throw new ApiError('POSTER_BUSY', { details: { reason: 'already_claimed' } })
     }
-    return performRender(context, figureId, spec, revision)
+    return performRender(context, figureId, spec, revision, attempt)
   },
 )
 
@@ -425,18 +495,18 @@ posterRoutes.post(
       updatedAt: now,
     })
 
-    const claimed = await claimForRender(db, figureId, ['queued'], {
+    const attempt = await claimForRender(db, figureId, ['queued'], {
       maxConcurrent: config.maxConcurrentRenders,
       staleSeconds: config.renderStaleSeconds,
     })
-    if (!claimed) {
+    if (attempt === null) {
       // Nothing consumes a queued custom figure — the idempotent auto row is found again by its
       // unique constraint, but this fresh id is unreachable by the next request, so leaving it
       // would strand it forever. Undo the insert before reporting the lost claim.
       await db.delete(posterFigures).where(eq(posterFigures.id, figureId))
       throw new ApiError('POSTER_BUSY', { details: { reason: 'already_claimed' } })
     }
-    return performRender(context, figureId, spec, revision)
+    return performRender(context, figureId, spec, revision, attempt)
   },
 )
 
@@ -478,12 +548,12 @@ posterRoutes.post(
     // transition — so a user hammering "retry" starts one render, not five. The retry's spec is
     // the caller's, not necessarily the one the figure was created with, so the claim writes its
     // hash onto the row: `specHash` must always describe the render that produced the PNG.
-    const claimed = await claimForRender(db, figure.id, ['failed', 'queued'], {
+    const attempt = await claimForRender(db, figure.id, ['failed', 'queued'], {
       maxConcurrent: config.maxConcurrentRenders,
       staleSeconds: config.renderStaleSeconds,
       spec: { specHash: await specHash(spec), presetVersion: spec.posterPresetVersion },
     })
-    if (!claimed) {
+    if (attempt === null) {
       throw new ApiError('POSTER_BUSY', { details: { reason: 'not_retryable' } })
     }
 
@@ -496,7 +566,7 @@ posterRoutes.post(
       headers: context.req.raw.headers,
     })
 
-    return performRender(context, figure.id, spec, revision)
+    return performRender(context, figure.id, spec, revision, attempt)
   },
 )
 

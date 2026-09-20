@@ -18,11 +18,34 @@ import {
 
 const EMPTY = encodeSeries(new Float64Array(0))
 
+/**
+ * The mapping the test snapshots declare — matched by `createRevision`'s default `mappingHash`,
+ * so an upload admits them the way the real client's snapshots are admitted.
+ */
+/** The five-field shape `columnMappingHash` consumes — the snapshot's `columnMapping`. */
+export interface TestColumnMapping {
+  timeColumn: string
+  innerColumn: string
+  dragColumn: string
+  useInner: boolean
+  useDrag: boolean
+}
+
+export const TEST_COLUMN_MAPPING: TestColumnMapping = {
+  timeColumn: 'Time',
+  innerColumn: 'Inner',
+  dragColumn: 'Drag',
+  useInner: true,
+  useDrag: true,
+}
+
 export interface SnapshotOptions {
   sourceSha256: string
   configHash: string
   /** Pads the snapshot with filler so a test can aim at a byte size. */
   paddingBytes?: number
+  /** Override — or null to omit — the declared column mapping. */
+  columnMapping?: TestColumnMapping | null
 }
 
 export function buildSnapshot(options: SnapshotOptions): AnalysisSnapshot {
@@ -38,6 +61,9 @@ export function buildSnapshot(options: SnapshotOptions): AnalysisSnapshot {
     config: { ...DEFAULT_ANALYSIS_CONFIG },
     configHash: options.configHash,
     detectedColumns: { time: ['Time'], acceleration: ['Inner', 'Drag'] },
+    ...(options.columnMapping === null
+      ? {}
+      : { columnMapping: options.columnMapping ?? TEST_COLUMN_MAPPING }),
     sync: {
       innerIndex: 12,
       dragIndex: 14,

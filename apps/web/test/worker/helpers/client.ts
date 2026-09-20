@@ -17,10 +17,11 @@
 
 import { env, SELF } from 'cloudflare:test'
 import type { PosterPlotSpec } from '@aat/plot-spec'
-import type { Role } from '@aat/shared'
+import { columnMappingHash, type Role } from '@aat/shared'
 import { createInvitation } from '../../../worker/auth/invitations.ts'
 import { getDatabase } from '../../../worker/db/client.ts'
 import { VirtualAuthenticator } from './authenticator.ts'
+import { TEST_COLUMN_MAPPING } from './snapshot.ts'
 
 export const ORIGIN = 'https://aat.test'
 export const RP_ID = 'aat.test'
@@ -243,7 +244,9 @@ export async function createRevision(
     body: JSON.stringify({
       sourceSha256: overrides.sourceSha256 ?? SOURCE_SHA,
       configHash: overrides.configHash ?? 'b'.repeat(64),
-      mappingHash: overrides.mappingHash ?? 'f'.repeat(64),
+      // The upload admission hashes the snapshot's declared columnMapping against this value, so
+      // the default must be the real hash of the mapping the test snapshots carry.
+      mappingHash: overrides.mappingHash ?? (await columnMappingHash(TEST_COLUMN_MAPPING)),
       config: {},
       engineVersion: '1.0.0',
       snapshotFormatVersion: 1,

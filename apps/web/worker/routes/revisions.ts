@@ -35,6 +35,7 @@
 import {
   AnalysisConfigSchema,
   ApiError,
+  columnMappingHash,
   decodeSnapshot,
   gzipDecompress,
   SNAPSHOT_FORMAT_VERSION,
@@ -421,6 +422,17 @@ revisionRoutes.put(
       if (snapshot.sourceSha256 !== revision.sourceSha256 || snapshot.configHash !== revision.configHash) {
         throw new ApiError('SNAPSHOT_INVALID', { details: { reason: 'does_not_match_revision' } })
       }
+      // The mapping is part of the revision's identity, so the snapshot must prove it was computed
+      // under that mapping — hashing the column choice the snapshot itself declares, not a hash the
+      // client could copy. Legacy revisions (mapping_hash NULL, from before the identity included
+      // it) cannot demand the field; old snapshots never had one to check.
+      if (
+        revision.mappingHash !== null &&
+        (snapshot.columnMapping === undefined ||
+          (await columnMappingHash(snapshot.columnMapping)) !== revision.mappingHash)
+      ) {
+        throw new ApiError('SNAPSHOT_INVALID', { details: { reason: 'mapping_mismatch' } })
+      }
 
       const putObject = () =>
         context.env.AAT_OBJECTS.put(key, body.bytes as ArrayBufferView, {
@@ -430,22 +442,18 @@ revisionRoutes.put(
           sha256: body.sha256,
           customMetadata: { revisionId: revision.id, runId: revision.runId, ownerUserId },
         })
-      const put = await putObject()
 
-      // R2 is the authority on how many bytes exist, not the counter kept while reading.
-      const actualBytes = put?.size ?? body.bytes.length
-      if (actualBytes > reservation.bytes) {
-        await context.env.AAT_OBJECTS.delete(key)
-        throw new ApiError('QUOTA_EXCEEDED', { details: { reason: 'object_larger_than_reserved' } })
-      }
-
+      // The row claims the deterministic key BEFORE the bytes are written: a second upload for
+      // the same revision now fails its insert before its put ever runs, so a losing contender
+      // cannot leave its bytes under the winner's checksum.
       const objectId = newId()
       const objectValues = {
         id: objectId,
         ownerUserId,
         kind: 'snapshot' as const,
         r2Key: key,
-        byteSize: actualBytes,
+        // Provisional until R2 reports what it stored — corrected below before the commit.
+        byteSize: body.bytes.length,
         sha256: body.sha256,
         contentType: 'application/json',
         originalFilename: snapshot.originalFilename,
@@ -458,13 +466,25 @@ revisionRoutes.put(
         await db.insert(cloudObjects).values(objectValues)
       } catch (insertError) {
         // A wedged predecessor — an unwind that died mid-cleanup — still holds this deterministic
-        // key. Finish its eviction, re-put (that cleanup may have removed the bytes we just
-        // wrote), and take the key. A live row keeps its key and the original error flies.
+        // key. Finish its eviction and take the key; a live row keeps its key and the original
+        // error flies.
         if (!(await evictDeadObject(db, key, now))) throw insertError
-        await putObject()
         await db.insert(cloudObjects).values(objectValues)
       }
-      uploaded = { id: objectId, byteSize: actualBytes, sha256: body.sha256 }
+      uploaded = { id: objectId, byteSize: body.bytes.length, sha256: body.sha256 }
+
+      const put = await putObject()
+
+      // R2 is the authority on how many bytes exist, not the counter kept while reading.
+      const actualBytes = put?.size ?? body.bytes.length
+      if (actualBytes > reservation.bytes) {
+        // The catch unwinds the row and the just-written bytes.
+        throw new ApiError('QUOTA_EXCEEDED', { details: { reason: 'object_larger_than_reserved' } })
+      }
+      if (actualBytes !== objectValues.byteSize) {
+        await db.update(cloudObjects).set({ byteSize: actualBytes }).where(eq(cloudObjects.id, objectId))
+        uploaded = { ...uploaded, byteSize: actualBytes }
+      }
 
       await commitUploadedObject(
         db,

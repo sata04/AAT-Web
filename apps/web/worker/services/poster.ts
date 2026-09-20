@@ -29,6 +29,7 @@ import { ApiError } from '@aat/shared'
 import { and, eq, gt, inArray, sql } from 'drizzle-orm'
 import { type Database, rowsAffected } from '../db/client.ts'
 import { posterFigures } from '../db/schema.ts'
+import { newId } from '../lib/ids.ts'
 import { getCircuitBreaker } from './flags.ts'
 
 /** Statuses shared with @aat/plot-spec's `PosterFigureStatus`, so one vocabulary spans the system. */
@@ -147,8 +148,12 @@ export async function claimForRender(
   fromStatuses: readonly PosterStatus[],
   options: RenderClaimOptions,
   now: Date = new Date(),
-): Promise<boolean> {
+): Promise<string | null> {
   const staleBefore = Math.floor((now.getTime() - options.staleSeconds * 1000) / 1000)
+  // The attempt token makes 'stale' a soft handoff rather than a duplicate ownership: a
+  // superseded attempt that eventually finishes cannot markRendered under the new token, so the
+  // row's specHash and PNG always come from the same attempt.
+  const attempt = newId()
   const result = await db
     .update(posterFigures)
     .set({
@@ -156,6 +161,7 @@ export async function claimForRender(
       startedAt: now,
       updatedAt: now,
       attemptCount: sql`${posterFigures.attemptCount} + 1`,
+      renderAttempt: attempt,
       errorCode: null,
       ...(options.spec === undefined
         ? {}
@@ -168,7 +174,7 @@ export async function claimForRender(
         sql`${liveRenderCount(staleBefore)} < ${options.maxConcurrent}`,
       ),
     )
-  return rowsAffected(result) === 1
+  return rowsAffected(result) === 1 ? attempt : null
 }
 
 /** Reclaim a render that has been in `rendering` past the stale threshold. */
@@ -177,8 +183,9 @@ export async function takeOverStaleRender(
   posterId: string,
   options: RenderClaimOptions,
   now: Date = new Date(),
-): Promise<boolean> {
+): Promise<string | null> {
   const staleBefore = Math.floor((now.getTime() - options.staleSeconds * 1000) / 1000)
+  const attempt = newId()
   const result = await db
     .update(posterFigures)
     .set({
@@ -186,6 +193,7 @@ export async function takeOverStaleRender(
       startedAt: now,
       updatedAt: now,
       attemptCount: sql`${posterFigures.attemptCount} + 1`,
+      renderAttempt: attempt,
       ...(options.spec === undefined
         ? {}
         : { specHash: options.spec.specHash, presetVersion: options.spec.presetVersion }),
@@ -200,30 +208,39 @@ export async function takeOverStaleRender(
         sql`${liveRenderCount(staleBefore)} < ${options.maxConcurrent}`,
       ),
     )
-  return rowsAffected(result) === 1
+  return rowsAffected(result) === 1 ? attempt : null
 }
 
+/**
+ * Publish a finished render — but only if `attempt` still owns the figure. A stale-render
+ * takeover hands the row to a new attempt while the old render can still be in flight; the token
+ * gate is what stops that old render from publishing its PNG under the new attempt's specHash.
+ * Returns whether the transition ran.
+ */
 export async function markRendered(
   db: Database,
   posterId: string,
   objectId: string,
   rendererVersion: string,
+  attempt: string,
   now: Date = new Date(),
-): Promise<void> {
-  await db
+): Promise<boolean> {
+  const result = await db
     .update(posterFigures)
     .set({ status: 'ready', objectId, rendererVersion, completedAt: now, updatedAt: now, errorCode: null })
-    .where(eq(posterFigures.id, posterId))
+    .where(and(eq(posterFigures.id, posterId), eq(posterFigures.renderAttempt, attempt)))
+  return rowsAffected(result) === 1
 }
 
 export async function markFailed(
   db: Database,
   posterId: string,
   errorCode: string,
+  attempt: string,
   now: Date = new Date(),
 ): Promise<void> {
   await db
     .update(posterFigures)
     .set({ status: 'failed', errorCode, completedAt: now, updatedAt: now })
-    .where(eq(posterFigures.id, posterId))
+    .where(and(eq(posterFigures.id, posterId), eq(posterFigures.renderAttempt, attempt)))
 }

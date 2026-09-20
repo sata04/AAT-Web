@@ -57,6 +57,13 @@
       "when": 1789862400000,
       "tag": "0007_claim_correlated_settlement",
       "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "6",
+      "when": 1789869600000,
+      "tag": "0008_render_attempt",
+      "breakpoints": true
     }
   ]
 }

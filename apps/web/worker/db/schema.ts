@@ -509,6 +509,12 @@ export const posterFigures = sqliteTable(
     objectId: text('object_id'),
     errorCode: text('error_code'),
     attemptCount: integer('attempt_count').notNull().default(0),
+    /**
+     * Which claim currently owns the render. Every claim or takeover writes a fresh token, and
+     * markRendered/markFailed run under `render_attempt = ?` — so a render superseded by a
+     * stale-claim takeover can never publish its PNG under the new attempt's specHash.
+     */
+    renderAttempt: text('render_attempt'),
     createdAt: integer('created_at', { mode: 'timestamp' }).notNull(),
     updatedAt: integer('updated_at', { mode: 'timestamp' }).notNull(),
     startedAt: integer('started_at', { mode: 'timestamp' }),

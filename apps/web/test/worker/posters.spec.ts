@@ -14,6 +14,13 @@ import { specHash } from '@aat/plot-spec'
 import { eq } from 'drizzle-orm'
 import { describe, expect, it } from 'vitest'
 import { posterFigures } from '../../worker/db/schema.ts'
+import { newId } from '../../worker/lib/ids.ts'
+import {
+  claimForRender,
+  markFailed,
+  markRendered,
+  takeOverStaleRender,
+} from '../../worker/services/poster.ts'
 import { apiFetch, createRevision, createRun, createUser, db, posterSpec } from './helpers/client.ts'
 
 /** How many renders the stub container has been asked for since the run started. */
@@ -255,5 +262,63 @@ describe('failure and retry', () => {
       .limit(1)
     expect(figure?.specHash).toBe(await specHash(substituted))
     expect(figure?.specHash).not.toBe(await specHash(posterSpec(revisionId)))
+  })
+})
+
+describe('render attempt tokens', () => {
+  it('a superseded render can neither publish its PNG nor mark the figure failed', async () => {
+    const user = await createUser()
+    const runId = await createRun(user)
+    const revisionId = await createRevision(user, runId)
+    const now = new Date()
+
+    // The figure row is seeded directly: the claim path is exercised through the API above —
+    // what is under test here is the token that decides which attempt may publish.
+    const figureId = newId()
+    await db()
+      .insert(posterFigures)
+      .values({
+        id: figureId,
+        analysisRevisionId: revisionId,
+        ownerUserId: user.userId,
+        kind: 'auto',
+        presetKey: 'aat-poster',
+        presetVersion: 'aat-poster-v1',
+        specHash: 'a'.repeat(64),
+        status: 'queued',
+        attemptCount: 0,
+        createdAt: now,
+        updatedAt: now,
+      })
+
+    const claimOptions = { maxConcurrent: 5, staleSeconds: 60 }
+    const attemptA = await claimForRender(db(), figureId, ['queued'], claimOptions, now)
+    expect(attemptA).toEqual(expect.any(String))
+
+    // The render outlives the stale horizon, so a second request takes the figure over — the
+    // scenario the token exists for.
+    await db()
+      .update(posterFigures)
+      .set({ startedAt: new Date(now.getTime() - 120_000) })
+      .where(eq(posterFigures.id, figureId))
+    const attemptB = await takeOverStaleRender(db(), figureId, claimOptions, now)
+    expect(attemptB).toEqual(expect.any(String))
+    expect(attemptB).not.toBe(attemptA)
+
+    // The superseded render finishes late. Neither its publish nor its failure may move the
+    // figure the takeover now owns.
+    expect(await markRendered(db(), figureId, 'object-a', 'renderer-1', attemptA ?? '')).toBe(false)
+    await markFailed(db(), figureId, 'POSTER_RENDER_FAILED', attemptA ?? '')
+    const [held] = await db().select().from(posterFigures).where(eq(posterFigures.id, figureId))
+    expect(held?.status).toBe('rendering')
+    expect(held?.objectId).toBeNull()
+    expect(held?.errorCode).toBeNull()
+    expect(held?.renderAttempt).toBe(attemptB)
+
+    // The live attempt publishes normally.
+    expect(await markRendered(db(), figureId, 'object-b', 'renderer-1', attemptB ?? '')).toBe(true)
+    const [done] = await db().select().from(posterFigures).where(eq(posterFigures.id, figureId))
+    expect(done?.status).toBe('ready')
+    expect(done?.objectId).toBe('object-b')
   })
 })

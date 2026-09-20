@@ -20,7 +20,12 @@ import {
   unwindUploadedObject,
 } from '../../worker/services/quota.ts'
 import { apiFetch, createRevision, createRun, createUser, db, type TestUser } from './helpers/client.ts'
-import { buildSnapshot, encodeForUpload } from './helpers/snapshot.ts'
+import {
+  buildSnapshot,
+  encodeForUpload,
+  TEST_COLUMN_MAPPING,
+  type TestColumnMapping,
+} from './helpers/snapshot.ts'
 
 const SOURCE_SHA = 'a'.repeat(64)
 const CONFIG_HASH = 'b'.repeat(64)
@@ -53,6 +58,7 @@ interface UploadOptions {
   sha256?: string
   configHash?: string
   paddingBytes?: number
+  columnMapping?: TestColumnMapping | null
 }
 
 async function uploadSnapshot(
@@ -64,6 +70,7 @@ async function uploadSnapshot(
     sourceSha256: SOURCE_SHA,
     configHash: options.configHash ?? CONFIG_HASH,
     ...(options.paddingBytes === undefined ? {} : { paddingBytes: options.paddingBytes }),
+    ...(options.columnMapping === undefined ? {} : { columnMapping: options.columnMapping }),
   })
   const encoded = await encodeForUpload(snapshot)
   const query = new URLSearchParams({
@@ -158,6 +165,35 @@ describe('snapshot upload', () => {
     const body = (await response.json()) as { error: { code: string; details?: { reason?: string } } }
     expect(body.error.code).toBe('SNAPSHOT_INVALID')
     expect(body.error.details?.reason).toBe('does_not_match_revision')
+  })
+
+  it('rejects a snapshot whose column mapping is not the revision identity', async () => {
+    const user = await createUser()
+    const runId = await createRun(user)
+    const revisionId = await createRevision(user, runId)
+
+    // The revision's mappingHash was minted from TEST_COLUMN_MAPPING; a snapshot that declares a
+    // different mapping cannot be filed under it — the same bytes under different columns are a
+    // different analysis.
+    const { response } = await uploadSnapshot(user, revisionId, {
+      columnMapping: { ...TEST_COLUMN_MAPPING, dragColumn: 'NotTheDragColumn' },
+    })
+    expect(response.status).toBe(422)
+    const body = (await response.json()) as { error: { code: string; details?: { reason?: string } } }
+    expect(body.error.code).toBe('SNAPSHOT_INVALID')
+    expect(body.error.details?.reason).toBe('mapping_mismatch')
+  })
+
+  it('rejects a snapshot that does not declare a column mapping at all', async () => {
+    const user = await createUser()
+    const runId = await createRun(user)
+    const revisionId = await createRevision(user, runId)
+
+    const { response } = await uploadSnapshot(user, revisionId, { columnMapping: null })
+    expect(response.status).toBe(422)
+    const body = (await response.json()) as { error: { code: string; details?: { reason?: string } } }
+    expect(body.error.code).toBe('SNAPSHOT_INVALID')
+    expect(body.error.details?.reason).toBe('mapping_mismatch')
   })
 })
 
