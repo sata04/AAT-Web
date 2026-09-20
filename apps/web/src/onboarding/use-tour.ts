@@ -143,6 +143,48 @@ function clockWaitFor(pred: () => boolean, timeoutMs: number, signal: AbortSigna
   })
 }
 
+/** Centre of an element, or the raw point a spec already carries. */
+function cursorPoint(target: Element | { x: number; y: number }): { x: number; y: number } {
+  if (!(target instanceof Element)) return target
+  const rect = target.getBoundingClientRect()
+  return { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 }
+}
+
+/**
+ * One scene run: build its world, re-aim the cursor at what `enter` mounted,
+ * then — only while autoplay is live — hold the dwell and advance. Every
+ * early return passes through the abort check, so a step/skip/unmount can
+ * never strand a half-applied follow-up.
+ */
+async function runScene(
+  scene: SceneDef,
+  ctx: TourCtx,
+  playingNow: () => boolean,
+  advance: () => void,
+): Promise<void> {
+  ctx.cursor.moveTo(cursorTargetFor(scene.cursor))
+  try {
+    await scene.enter?.(ctx)
+  } catch (error) {
+    if (isAbort(error) || ctx.signal.aborted) return
+    // A scene that fails must not hang the tour — report it and let the
+    // dwell logic decide what comes next as usual.
+    console.error('onboarding scene failed', error)
+  }
+  if (ctx.signal.aborted) return
+  // The element a scene's cursor names may only exist once `enter` has
+  // run — the statistics panel mounts with the first dataset, for one.
+  ctx.cursor.moveTo(cursorTargetFor(scene.cursor))
+  if (scene.pinned || !playingNow()) return
+  try {
+    await ctx.wait(scene.dwellMs)
+  } catch {
+    return
+  }
+  if (ctx.signal.aborted || !playingNow()) return
+  advance()
+}
+
 export function useTour(input: {
   driver: TourDriver
   reducedMotion: boolean
@@ -200,43 +242,19 @@ export function useTour(input: {
             setCursor((current) => (current.visible ? { ...current, visible: false } : current))
             return
           }
-          const point =
-            target instanceof Element
-              ? (() => {
-                  const rect = target.getBoundingClientRect()
-                  return { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 }
-                })()
-              : target
+          const point = cursorPoint(target)
           setCursor({ visible: true, x: point.x, y: point.y })
         },
         hide: () => setCursor((current) => (current.visible ? { ...current, visible: false } : current)),
       },
     }
 
-    const run = async () => {
-      ctx.cursor.moveTo(cursorTargetFor(scene.cursor))
-      try {
-        await scene.enter?.(ctx)
-      } catch (error) {
-        if (isAbort(error) || signal.aborted) return
-        // A scene that fails must not hang the tour — report it and let the
-        // dwell logic decide what comes next as usual.
-        console.error('onboarding scene failed', error)
-      }
-      if (signal.aborted) return
-      // The element a scene's cursor names may only exist once `enter` has
-      // run — the statistics panel mounts with the first dataset, for one.
-      ctx.cursor.moveTo(cursorTargetFor(scene.cursor))
-      if (scene.pinned || !playingRef.current) return
-      try {
-        await ctx.wait(scene.dwellMs)
-      } catch {
-        return
-      }
-      if (signal.aborted || !playingRef.current) return
-      activate(index + 1)
-    }
-    void run()
+    void runScene(
+      scene,
+      ctx,
+      () => playingRef.current,
+      () => activate(index + 1),
+    )
     return () => controller.abort()
   }, [index, reducedMotion, activate])
 

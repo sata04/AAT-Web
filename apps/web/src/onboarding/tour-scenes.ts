@@ -104,15 +104,19 @@ function plotPoint(snapshot: TourSnapshot, x: number): { x: number; y: number } 
   return { x: over.left + valueToPixel(geometry, x) - geometry.left, y: over.top + over.height * 0.45 }
 }
 
-async function enterIngest(ctx: TourCtx): Promise<void> {
-  prepare(ctx, [])
-  const filename = await ctx.driver.openDemo('a')
-  if (ctx.signal.aborted) return
-  await ctx.waitFor(
+/** Open a demo dataset and wait until its analysis lands; false on abort. */
+async function openDemoAndWait(ctx: TourCtx, which: DemoDataset): Promise<boolean> {
+  const filename = await ctx.driver.openDemo(which)
+  if (ctx.signal.aborted) return false
+  return ctx.waitFor(
     (snapshot) =>
       snapshot.analysisReady && snapshot.datasets.some((dataset) => dataset.filename === filename),
   )
-  if (ctx.signal.aborted) return
+}
+
+async function enterIngest(ctx: TourCtx): Promise<void> {
+  prepare(ctx, [])
+  if (!(await openDemoAndWait(ctx, 'a')) || ctx.signal.aborted) return
   ctx.driver.activateDemo('a')
 }
 
@@ -187,13 +191,7 @@ async function enterGQuality(ctx: TourCtx): Promise<void> {
 
 async function enterCompare(ctx: TourCtx): Promise<void> {
   prepare(ctx, ['a'])
-  const filename = await ctx.driver.openDemo('b')
-  if (ctx.signal.aborted) return
-  const opened = await ctx.waitFor(
-    (snapshot) =>
-      snapshot.analysisReady && snapshot.datasets.some((dataset) => dataset.filename === filename),
-  )
-  if (!opened || ctx.signal.aborted) return
+  if (!(await openDemoAndWait(ctx, 'b')) || ctx.signal.aborted) return
   ctx.driver.applyModeEvent('ENTER_COMPARING')
 }
 

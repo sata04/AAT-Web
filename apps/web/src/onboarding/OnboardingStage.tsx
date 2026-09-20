@@ -66,6 +66,21 @@ const PHASES = [
  * Written straight to the element's style rather than through state: a
  * 60 fps setState would re-render the stage for a purely visual layer.
  */
+const SPOT_PAD = 6
+
+function spotKey(rect: DOMRect | null): string {
+  if (rect === null) return 'none'
+  return `${rect.left - SPOT_PAD},${rect.top - SPOT_PAD},${rect.width + SPOT_PAD * 2},${rect.height + SPOT_PAD * 2}`
+}
+
+function writeSpot(spot: HTMLElement, rect: DOMRect | null): void {
+  spot.style.left = `${rect === null ? 0 : rect.left - SPOT_PAD}px`
+  spot.style.top = `${rect === null ? 0 : rect.top - SPOT_PAD}px`
+  spot.style.width = `${rect === null ? 0 : rect.width + SPOT_PAD * 2}px`
+  spot.style.height = `${rect === null ? 0 : rect.height + SPOT_PAD * 2}px`
+  spot.classList.toggle('onboarding-stage__spot--none', rect === null)
+}
+
 function useSpotlight(panelRef: React.RefObject<HTMLDivElement | null>, selector: string | null): void {
   useEffect(() => {
     const spot = panelRef.current?.querySelector<HTMLElement>('.onboarding-stage__spot')
@@ -74,27 +89,11 @@ function useSpotlight(panelRef: React.RefObject<HTMLDivElement | null>, selector
     let last = ''
     const track = () => {
       const target = selector === null ? null : document.querySelector(selector)
-      if (target === null) {
-        if (last !== 'none') {
-          spot.style.left = '0px'
-          spot.style.top = '0px'
-          spot.style.width = '0px'
-          spot.style.height = '0px'
-          spot.classList.add('onboarding-stage__spot--none')
-          last = 'none'
-        }
-      } else {
-        const rect = target.getBoundingClientRect()
-        const pad = 6
-        const next = `${rect.left - pad},${rect.top - pad},${rect.width + pad * 2},${rect.height + pad * 2}`
-        if (next !== last) {
-          spot.style.left = `${rect.left - pad}px`
-          spot.style.top = `${rect.top - pad}px`
-          spot.style.width = `${rect.width + pad * 2}px`
-          spot.style.height = `${rect.height + pad * 2}px`
-          spot.classList.remove('onboarding-stage__spot--none')
-          last = next
-        }
+      const rect = target === null ? null : target.getBoundingClientRect()
+      const key = spotKey(rect)
+      if (key !== last) {
+        writeSpot(spot, rect)
+        last = key
       }
       raf = requestAnimationFrame(track)
     }
