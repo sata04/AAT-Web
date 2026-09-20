@@ -7,14 +7,19 @@ export interface NoticeItem {
 export interface NoticeStackProps {
   notices: readonly NoticeItem[]
   onDismiss: (id: number) => void
+  onDismissAll: () => void
 }
 
 /** A bounded stack of dismissible analyzer notices. */
-export function NoticeStack({ notices, onDismiss }: NoticeStackProps): React.JSX.Element | null {
+export function NoticeStack({
+  notices,
+  onDismiss,
+  onDismissAll,
+}: NoticeStackProps): React.JSX.Element | null {
   if (notices.length === 0) return null
 
   return (
-    <div>
+    <div className="notice-stack">
       {notices.map((notice) => (
         // Errors assert themselves (`alert` interrupts); quieter tones wait
         // their turn in the polite live region.
@@ -29,6 +34,13 @@ export function NoticeStack({ notices, onDismiss }: NoticeStackProps): React.JSX
           </button>
         </div>
       ))}
+      {notices.length > 1 ? (
+        <div className="notice-stack__footer">
+          <button type="button" className="button button--flat" onClick={onDismissAll}>
+            すべて閉じる
+          </button>
+        </div>
+      ) : null}
     </div>
   )
 }

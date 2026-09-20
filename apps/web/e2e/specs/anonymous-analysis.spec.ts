@@ -122,7 +122,7 @@ test.describe('anonymous research flow', () => {
     await page.setViewportSize({ width: 390, height: 844 })
     await page.goto('/')
 
-    const tools = page.getByRole('button', { name: '操作' })
+    const tools = page.getByRole('button', { name: '操作', exact: true })
     await expect(tools).toBeVisible()
     expect((await tools.boundingBox())?.height).toBeGreaterThanOrEqual(44)
     expect((await page.locator('.command-bar').boundingBox())?.height).toBeLessThanOrEqual(72)

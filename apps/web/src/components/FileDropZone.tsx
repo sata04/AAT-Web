@@ -13,6 +13,8 @@ import { useCallback, useRef, useState } from 'react'
 export interface FileDropZoneProps {
   onFiles: (files: File[]) => void
   disabled: boolean
+  /** When provided, a quiet "操作ガイド" link sits under the zone. */
+  onHelp?: (() => void) | undefined
 }
 
 /** Everything the desktop's dialog accepted. */
@@ -42,50 +44,64 @@ export function FileDropZone(props: FileDropZoneProps): React.JSX.Element {
   )
 
   return (
-    <label
-      className={active ? 'dropzone dropzone--active' : 'dropzone'}
-      onDragEnter={(event) => {
-        event.preventDefault()
-        // Counted rather than toggled: dragging over a child fires enter/leave
-        // pairs that would otherwise make the highlight flicker.
-        dragDepth.current += 1
-        setActive(true)
-      }}
-      onDragOver={(event) => {
-        event.preventDefault()
-        event.dataTransfer.dropEffect = 'copy'
-      }}
-      onDragLeave={() => {
-        dragDepth.current = Math.max(0, dragDepth.current - 1)
-        if (dragDepth.current === 0) setActive(false)
-      }}
-      onDrop={onDrop}
-    >
-      <span className="dropzone__title">CSVファイルをドロップ</span>
-      <span>
-        または<span className="visually-hidden">ファイル選択ボタンで</span>ファイルを選択してください。
-        複数選択できます。
-      </span>
-      <span className="panel__hint">
-        解析はブラウザ内で完結します。ファイルがアップロードされることはありません。
-      </span>
-      <input
-        className="visually-hidden"
-        ref={inputRef}
-        type="file"
-        accept={ACCEPT}
-        multiple
-        disabled={props.disabled}
-        onChange={(event) => {
-          const files = csvFilesFrom(event.target.files)
-          if (files.length > 0) props.onFiles(files)
-          // Reset so selecting the same file twice fires a change both times.
-          event.target.value = ''
+    <div className="quickstart">
+      <label
+        className={active ? 'dropzone dropzone--active' : 'dropzone'}
+        onDragEnter={(event) => {
+          event.preventDefault()
+          // Counted rather than toggled: dragging over a child fires enter/leave
+          // pairs that would otherwise make the highlight flicker.
+          dragDepth.current += 1
+          setActive(true)
         }}
-      />
-      <span className="button" aria-hidden="true">
-        ファイルを選択
-      </span>
-    </label>
+        onDragOver={(event) => {
+          event.preventDefault()
+          event.dataTransfer.dropEffect = 'copy'
+        }}
+        onDragLeave={() => {
+          dragDepth.current = Math.max(0, dragDepth.current - 1)
+          if (dragDepth.current === 0) setActive(false)
+        }}
+        onDrop={onDrop}
+      >
+        <span className="dropzone__title">CSVファイルをドロップ</span>
+        <span>
+          または<span className="visually-hidden">ファイル選択ボタンで</span>ファイルを選択してください。
+          複数選択でき、まとめて比較できます。
+        </span>
+        <ol className="quickstart__steps">
+          <li>CSVを読み込む</li>
+          <li>列の対応を確認</li>
+          <li>グラフで解析</li>
+        </ol>
+        <span className="panel__hint">
+          解析はブラウザ内で完結します。CSVファイルがアップロードされることはありません。
+        </span>
+        <input
+          className="visually-hidden"
+          ref={inputRef}
+          type="file"
+          accept={ACCEPT}
+          multiple
+          disabled={props.disabled}
+          onChange={(event) => {
+            const files = csvFilesFrom(event.target.files)
+            if (files.length > 0) props.onFiles(files)
+            // Reset so selecting the same file twice fires a change both times.
+            event.target.value = ''
+          }}
+        />
+        <span className="button button--primary" aria-hidden="true">
+          ファイルを選択
+        </span>
+      </label>
+      {props.onHelp === undefined ? null : (
+        <p className="quickstart__help">
+          <button type="button" className="button button--flat" onClick={props.onHelp}>
+            操作ガイドを開く
+          </button>
+        </p>
+      )}
+    </div>
   )
 }

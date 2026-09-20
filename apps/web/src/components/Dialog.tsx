@@ -31,7 +31,10 @@ export function Dialog(props: DialogProps): React.JSX.Element {
   useEffect(() => {
     restoreFocusTo.current = document.activeElement
     const panel = panelRef.current
-    const first = panel?.querySelector<HTMLElement>(FOCUSABLE)
+    // An explicit `data-autofocus` wins over DOM order — useful when the
+    // first control in the markup is not the one a user should start on.
+    const first =
+      panel?.querySelector<HTMLElement>('[data-autofocus]') ?? panel?.querySelector<HTMLElement>(FOCUSABLE)
     first?.focus()
     return () => {
       const previous = restoreFocusTo.current

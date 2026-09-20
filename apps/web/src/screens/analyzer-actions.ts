@@ -21,7 +21,7 @@ import type { GraphPalette } from '../graph/theme.ts'
 import type { ChartViewport } from '../graph/UPlotChart.tsx'
 import type { ViewMode } from '../graph/view-mode.ts'
 import type { PosterContext } from '../poster/requests.ts'
-import type { AnalyzerViewProps } from './AnalyzerView.tsx'
+import type { AnalyzerViewProps, OnboardingActionKeys } from './AnalyzerView.tsx'
 import { retryPosterFor, retrySyncFor } from './analyzer-cloud.ts'
 import type { AnalyzerLoop } from './analyzer-loop.ts'
 
@@ -108,7 +108,9 @@ export interface AnalyzerActionsInput {
  * Every handler `AnalyzerView` asks for. The stable setters forward as-is;
  * the rest are thin arrows that close over the screen's current state.
  */
-export function analyzerActions(input: AnalyzerActionsInput): AnalyzerViewProps['actions'] {
+export function analyzerActions(
+  input: AnalyzerActionsInput,
+): Omit<AnalyzerViewProps['actions'], OnboardingActionKeys> {
   const { loop } = input
   const applyEvent = (event: Parameters<typeof applyViewEvent>[1]) =>
     applyViewEvent(input.mode, event, {

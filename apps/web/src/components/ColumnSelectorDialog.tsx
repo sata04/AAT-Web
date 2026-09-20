@@ -31,16 +31,52 @@ function describe(ambiguity: ColumnAmbiguity | null, reason: string | undefined)
   return AMBIGUITY_MESSAGES[ambiguity]
 }
 
+/**
+ * Split a select's options into "the detector proposes these" and "every other
+ * column". The grouping is how the detector's confidence is shown: candidates
+ * sit under 検出候補, and a user who disagrees still has every column under
+ * すべての列 — the detector is a heuristic, not a gate.
+ */
+function optionGroups(detected: readonly string[], all: readonly string[]) {
+  const detectedSet = new Set(detected)
+  return {
+    detected: detected.filter((column) => all.includes(column)),
+    rest: all.filter((column) => !detectedSet.has(column)),
+  }
+}
+
+function ColumnOptions({ groups }: { groups: ReturnType<typeof optionGroups> }) {
+  return (
+    <>
+      {groups.detected.length === 0 ? null : (
+        <optgroup label="検出候補">
+          {groups.detected.map((column) => (
+            <option key={column} value={column}>
+              {column}
+            </option>
+          ))}
+        </optgroup>
+      )}
+      {groups.rest.length === 0 ? null : (
+        <optgroup label="すべての列">
+          {groups.rest.map((column) => (
+            <option key={column} value={column}>
+              {column}
+            </option>
+          ))}
+        </optgroup>
+      )}
+    </>
+  )
+}
+
 export function ColumnSelectorDialog(props: ColumnSelectorDialogProps): React.JSX.Element {
   const [mapping, setMapping] = useState<ColumnMapping>(props.initial)
   const problem = useMemo(() => validateMapping(mapping), [mapping])
 
   const { detected, columnNames } = props.source
-  // Detected candidates come first, but every column stays selectable: the
-  // detector is a heuristic, and a file whose headers say nothing useful must
-  // still be openable.
-  const timeOptions = [...new Set([...detected.time, ...columnNames])]
-  const accelerationOptions = [...new Set([...detected.acceleration, ...columnNames])]
+  const timeGroups = optionGroups(detected.time, columnNames)
+  const accelerationGroups = optionGroups(detected.acceleration, columnNames)
 
   return (
     <Dialog
@@ -71,12 +107,9 @@ export function ColumnSelectorDialog(props: ColumnSelectorDialogProps): React.JS
             value={mapping.timeColumn}
             onChange={(event) => setMapping({ ...mapping, timeColumn: event.target.value })}
           >
-            {timeOptions.map((column) => (
-              <option key={column} value={column}>
-                {column}
-              </option>
-            ))}
+            <ColumnOptions groups={timeGroups} />
           </select>
+          <span className="panel__hint">グラフの横軸（秒）になる列です。</span>
         </label>
       </div>
 
@@ -100,12 +133,9 @@ export function ColumnSelectorDialog(props: ColumnSelectorDialogProps): React.JS
             disabled={!mapping.useInner}
             onChange={(event) => setMapping({ ...mapping, innerColumn: event.target.value })}
           >
-            {accelerationOptions.map((column) => (
-              <option key={column} value={column}>
-                {column}
-              </option>
-            ))}
+            <ColumnOptions groups={accelerationGroups} />
           </select>
+          <span className="panel__hint">落下する実験部（内カプセル）の加速度計の列です。</span>
         </label>
       </div>
 
@@ -129,12 +159,11 @@ export function ColumnSelectorDialog(props: ColumnSelectorDialogProps): React.JS
             disabled={!mapping.useDrag}
             onChange={(event) => setMapping({ ...mapping, dragColumn: event.target.value })}
           >
-            {accelerationOptions.map((column) => (
-              <option key={column} value={column}>
-                {column}
-              </option>
-            ))}
+            <ColumnOptions groups={accelerationGroups} />
           </select>
+          <span className="panel__hint">
+            空気抵抗を受ける外側の殻（ドラッグシールド）の加速度計の列です。
+          </span>
         </label>
       </div>
 

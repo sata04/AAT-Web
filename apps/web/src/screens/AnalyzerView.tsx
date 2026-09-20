@@ -12,11 +12,15 @@ import { CloudStatusBar } from '../components/CloudStatusBar.tsx'
 import { ColumnSelectorDialog } from '../components/ColumnSelectorDialog.tsx'
 import { CommandBar } from '../components/CommandBar.tsx'
 import { csvFilesFrom, FileDropZone } from '../components/FileDropZone.tsx'
+import { HelpDialog } from '../components/HelpDialog.tsx'
+import { HintBar, Kbd } from '../components/HintBar.tsx'
+import { InfoTip } from '../components/InfoTip.tsx'
 import { type NoticeItem, NoticeStack } from '../components/NoticeStack.tsx'
 import { RangeStatisticsPanel } from '../components/RangeStatisticsPanel.tsx'
 import { SettingsDialog } from '../components/SettingsDialog.tsx'
 import { StatisticsPanel } from '../components/StatisticsPanel.tsx'
 import { TABLE_SCROLL_PROPS } from '../components/table-scroll.ts'
+import { WelcomeDialog } from '../components/WelcomeDialog.tsx'
 import { PNG_PARITY_NOTICE } from '../exporting/png.ts'
 import type { ChartGeometry } from '../graph/geometry.ts'
 import type { PlotModel } from '../graph/plot-model.ts'
@@ -52,7 +56,23 @@ interface AnalyzerViewState {
   activeCustomPosters: readonly PosterFigure[]
   pendingColumns: PendingColumnChoice | null
   settingsOpen: boolean
+  /** First-run modal; once dismissed it is a persisted flag, not a state machine. */
+  welcomeOpen: boolean
+  helpOpen: boolean
+  /** The one contextual hint currently allowed to show, or null. */
+  hint: AnalyzerHint | null
 }
+
+export type AnalyzerHint = 'graph' | 'range' | 'compare'
+
+/** The actions `analyzer-actions.ts` does not build — the screen supplies them itself. */
+export type OnboardingActionKeys =
+  | 'dismissWelcome'
+  | 'openHelp'
+  | 'closeHelp'
+  | 'reopenWelcome'
+  | 'dismissHint'
+  | 'dismissAllNotices'
 
 interface AnalyzerPlotState {
   model: PlotModel
@@ -96,6 +116,14 @@ interface AnalyzerViewActions {
     configOverride?: AnalysisConfig,
   ) => Promise<void>
   setSettingsOpen: Dispatch<SetStateAction<boolean>>
+  dismissWelcome: () => void
+  /** Open help — from the toolbar, the welcome's CTA, or the quick start. */
+  openHelp: () => void
+  closeHelp: () => void
+  /** From help's "もう一度見る": close help and show the welcome again. */
+  reopenWelcome: () => void
+  dismissHint: (hint: AnalyzerHint) => void
+  dismissAllNotices: () => void
   /**
    * Apply a settings edit: persists it, and re-analyses open datasets when a
    * number-changing key moved. Implemented by the screen, which owns the
@@ -118,7 +146,7 @@ function ExportButtons({ state, plot, actions }: AnalyzerViewProps): React.JSX.E
     <div className="command-bar__group">
       <button
         type="button"
-        className="button"
+        className="button button--flat"
         disabled={state.active === null}
         onClick={() => void actions.exportData('xlsx')}
       >
@@ -126,7 +154,7 @@ function ExportButtons({ state, plot, actions }: AnalyzerViewProps): React.JSX.E
       </button>
       <button
         type="button"
-        className="button"
+        className="button button--flat"
         disabled={state.active === null}
         onClick={() => void actions.exportData('csv')}
       >
@@ -134,7 +162,7 @@ function ExportButtons({ state, plot, actions }: AnalyzerViewProps): React.JSX.E
       </button>
       <button
         type="button"
-        className="button"
+        className="button button--flat"
         disabled={plot.canvas === null}
         title={PNG_PARITY_NOTICE}
         aria-describedby="png-parity-hint"
@@ -147,6 +175,15 @@ function ExportButtons({ state, plot, actions }: AnalyzerViewProps): React.JSX.E
       <span id="png-parity-hint" className="visually-hidden">
         {PNG_PARITY_NOTICE}
       </span>
+      <button
+        type="button"
+        className="button button--flat"
+        aria-label="操作ガイド"
+        title="操作ガイド"
+        onClick={actions.openHelp}
+      >
+        ?
+      </button>
       <button type="button" className="button button--flat" onClick={() => actions.setSettingsOpen(true)}>
         設定
       </button>
@@ -163,7 +200,7 @@ function ViewModeButtons({
   const showingAll = isShowingAll(state.mode)
   const showingGQuality = isGQuality(state.mode)
   return (
-    <fieldset className="command-bar__group segmented">
+    <fieldset className="segmented">
       <legend className="visually-hidden">表示モード</legend>
       <button
         type="button"
@@ -224,7 +261,13 @@ function AnalyzerToolbar({ state, plot, actions }: AnalyzerViewProps): React.JSX
   return (
     <CommandBar trailing={<ExportButtons state={state} plot={plot} actions={actions} />}>
       <FileOpenControl onFiles={actions.openFiles} />
-      <ViewModeButtons state={state} actions={actions} />
+      <div className="command-bar__group">
+        <ViewModeButtons state={state} actions={actions} />
+        <InfoTip
+          label="表示モード"
+          text="通常：補正済みの重力レベルを表示します。全データ：補正前を含む全系列を重ねます。G-quality：重力レベルと品質指標を確認します。"
+        />
+      </div>
       <div className="command-bar__group">
         <button
           type="button"
@@ -235,20 +278,22 @@ function AnalyzerToolbar({ state, plot, actions }: AnalyzerViewProps): React.JSX
         >
           比較
         </button>
+        <InfoTip label="比較" text="2つ以上のデータセットを開くと、同じグラフ上に重ねて表示できます。" />
       </div>
       <div className="command-bar__group">
-        <label className="field">
-          <span className="visually-hidden">表示するセンサー</span>
-          <select
-            className="select"
-            value={state.config.graph_sensor_mode}
-            onChange={(event) => changeSensor(event.target.value)}
-          >
-            <option value="both">両方</option>
-            <option value="inner_only">Inner Capsule のみ</option>
-            <option value="drag_only">Drag Shield のみ</option>
-          </select>
+        <label className="command-bar__label" htmlFor="sensor-select">
+          センサー
         </label>
+        <select
+          id="sensor-select"
+          className="select"
+          value={state.config.graph_sensor_mode}
+          onChange={(event) => changeSensor(event.target.value)}
+        >
+          <option value="both">両方</option>
+          <option value="inner_only">Inner Capsule のみ</option>
+          <option value="drag_only">Drag Shield のみ</option>
+        </select>
       </div>
       <div className="command-bar__group">
         <button
@@ -273,9 +318,10 @@ function AnalyzerToolbar({ state, plot, actions }: AnalyzerViewProps): React.JSX
 function FileOpenControl({ onFiles }: { onFiles: (files: File[]) => Promise<void> }): React.JSX.Element {
   return (
     <div className="command-bar__group">
-      <label className="button">
+      <label className="button button--primary">
         ファイルを開く
         <input
+          id="aat-file-open"
           className="visually-hidden"
           type="file"
           accept=".csv,text/csv"
@@ -289,6 +335,42 @@ function FileOpenControl({ onFiles }: { onFiles: (files: File[]) => Promise<void
       </label>
     </div>
   )
+}
+
+function AnalyzerHintBar({
+  hint,
+  onDismiss,
+}: {
+  hint: AnalyzerHint
+  onDismiss: (hint: AnalyzerHint) => void
+}): React.JSX.Element {
+  const dismiss = () => onDismiss(hint)
+  switch (hint) {
+    case 'graph':
+      // Written to match UPlotChart/SelectionOverlay exactly — drag selects
+      // only because the normal view reserves the primary drag for it.
+      return (
+        <HintBar onDismiss={dismiss}>
+          <b>グラフ操作</b>
+          ドラッグで範囲を選択、ホイールでポインタ位置を中心にズーム、<Kbd>Shift</Kbd>
+          ＋ドラッグでパン。「全体表示」で範囲をリセットします。
+        </HintBar>
+      )
+    case 'range':
+      return (
+        <HintBar onDismiss={dismiss}>
+          <b>範囲の統計</b>
+          グラフ上をドラッグすると、その区間の統計が「選択範囲の統計情報」に表示されます。
+        </HintBar>
+      )
+    case 'compare':
+      return (
+        <HintBar onDismiss={dismiss}>
+          <b>比較</b>
+          2つ目のデータセットを開きました。ツールバーの「比較」で同じグラフに重ねて表示できます。
+        </HintBar>
+      )
+  }
 }
 
 /**
@@ -348,7 +430,12 @@ function GraphArea({ state, plot, actions }: AnalyzerViewProps): React.JSX.Eleme
           CSVファイルをドロップして追加
         </div>
       ) : null}
-      <NoticeStack notices={state.notices} onDismiss={actions.dismissNotice} />
+      <NoticeStack
+        notices={state.notices}
+        onDismiss={actions.dismissNotice}
+        onDismissAll={actions.dismissAllNotices}
+      />
+      {state.hint === null ? null : <AnalyzerHintBar hint={state.hint} onDismiss={actions.dismissHint} />}
       {running === null ? null : (
         <div className="analysis-progress">
           <progress className="progress" max={100} value={running.percent}>
@@ -360,7 +447,11 @@ function GraphArea({ state, plot, actions }: AnalyzerViewProps): React.JSX.Eleme
         </div>
       )}
       {state.datasets.length === 0 ? (
-        <FileDropZone onFiles={(files) => void actions.openFiles(files)} disabled={false} />
+        <FileDropZone
+          onFiles={(files) => void actions.openFiles(files)}
+          disabled={false}
+          onHelp={actions.openHelp}
+        />
       ) : (
         <UPlotChart
           model={plot.model}
@@ -544,6 +635,19 @@ function AnalyzerDialogs({
             void clearCache().then(() => actions.notify('info', 'ローカルキャッシュを削除しました。'))
           }
         />
+      ) : null}
+      {state.welcomeOpen ? (
+        <WelcomeDialog
+          onDismiss={actions.dismissWelcome}
+          onShowHelp={actions.openHelp}
+          // There is exactly one CSV picker on the page — the toolbar's — so
+          // the welcome borrows it rather than hiding a second input inside a
+          // modal, where a hidden input would only confuse the focus trap.
+          onOpenCsv={() => document.getElementById('aat-file-open')?.click()}
+        />
+      ) : null}
+      {state.helpOpen ? (
+        <HelpDialog onClose={actions.closeHelp} onShowWelcome={actions.reopenWelcome} />
       ) : null}
     </>
   )

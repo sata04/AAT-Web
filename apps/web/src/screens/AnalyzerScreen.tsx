@@ -22,8 +22,14 @@
  */
 
 import type { AnalysisConfig } from '@aat/shared'
-import { useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import { type Dataset, sensorModeFrom } from '../app/dataset.ts'
+import {
+  loadOnboarding,
+  type OnboardingFlag,
+  type OnboardingState,
+  saveOnboarding,
+} from '../app/onboarding.ts'
 import { type RangeStatisticsResult, rangeResultFor } from '../app/range-statistics.ts'
 import { loadConfig } from '../app/settings.ts'
 import type { PosterFigure } from '../cloud/gateway.ts'
@@ -41,10 +47,10 @@ import type { SelectionRange } from '../graph/selection.ts'
 import { type GraphPalette, themeSettingFrom } from '../graph/theme.ts'
 import type { ChartViewport } from '../graph/UPlotChart.tsx'
 import { useThemePalette } from '../graph/use-theme-palette.ts'
-import { canSelectRange, type ViewMode } from '../graph/view-mode.ts'
+import { canSelectRange, isComparing, type ViewMode } from '../graph/view-mode.ts'
 import type { PosterContext } from '../poster/requests.ts'
 import { type SessionStatus, useSession } from '../session/SessionProvider.tsx'
-import { AnalyzerView } from './AnalyzerView.tsx'
+import { type AnalyzerHint, AnalyzerView } from './AnalyzerView.tsx'
 import { analyzerActions, useAnalysisClients } from './analyzer-actions.ts'
 import {
   activePostersFor,
@@ -168,6 +174,37 @@ export function AnalyzerScreen(): React.JSX.Element {
   const [statuses, setStatuses] = useState<CloudStatuses>(INITIAL_STATUSES)
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [customPosters, setCustomPosters] = useState<PosterFigure[]>([])
+  const [onboarding, setOnboarding] = useState<OnboardingState>(loadOnboarding)
+  const [welcomeOpen, setWelcomeOpen] = useState(() => !loadOnboarding().welcomeSeen)
+  const [helpOpen, setHelpOpen] = useState(false)
+
+  const markOnboarding = useCallback((flag: OnboardingFlag) => {
+    setOnboarding((current) => {
+      if (current[flag]) return current
+      const next = { ...current, [flag]: true }
+      saveOnboarding(next)
+      return next
+    })
+  }, [])
+
+  // A file opened while the welcome is still up answers the welcome's
+  // question — close it and count it as seen rather than leaving a modal over
+  // fresh data.
+  useEffect(() => {
+    if (welcomeOpen && datasets.length > 0) {
+      setWelcomeOpen(false)
+      markOnboarding('welcomeSeen')
+    }
+  }, [welcomeOpen, datasets.length, markOnboarding])
+
+  // Doing the thing is the same as being taught it: a user who selects a
+  // range or enters compare before the hint appears never needs to see it.
+  useEffect(() => {
+    if (selection !== null) markOnboarding('rangeHintSeen')
+  }, [selection, markOnboarding])
+  useEffect(() => {
+    if (isComparing(mode)) markOnboarding('compareHintSeen')
+  }, [mode, markOnboarding])
 
   // One probe for the whole application, in the provider. A negative answer is
   // the normal, fully functional local-only mode.
@@ -175,7 +212,7 @@ export function AnalyzerScreen(): React.JSX.Element {
   const signedIn = sessionStatus === 'signed-in'
 
   const { analysisClient, getAnalysisClient, getExportClient } = useAnalysisClients()
-  const { notices, notify, dismissNotice } = useNotices(6)
+  const { notices, notify, dismissNotice, dismissAllNotices } = useNotices(6)
   const { theme, palette } = useThemePalette(themeSettingFrom(config.theme))
   const { cloudSubject, syncedPoster, syncToCloud, startAutoPoster } = useCloudSync(setStatuses)
   const loop = useAnalyzerLoop({
@@ -214,6 +251,20 @@ export function AnalyzerScreen(): React.JSX.Element {
     sessionStatus,
   })
 
+  const analysisReady = statuses.analysis.kind === 'ready'
+
+  // One hint at a time, in the order a new user meets the features: how the
+  // graph gestures work, then what comparing is for, then what dragging
+  // selects for. None of them shows while a modal is up or before an analysis
+  // exists to point at.
+  const hint: AnalyzerHint | null = (() => {
+    if (welcomeOpen || helpOpen || !analysisReady) return null
+    if (!onboarding.graphHintSeen) return 'graph'
+    if (datasets.length >= 2 && !onboarding.compareHintSeen) return 'compare'
+    if (derived.selectionEnabled && selection === null && !onboarding.rangeHintSeen) return 'range'
+    return null
+  })()
+
   const actions = analyzerActions({
     loop,
     datasets,
@@ -243,6 +294,32 @@ export function AnalyzerScreen(): React.JSX.Element {
     setStatuses,
   })
 
+  const dismissHint = (seen: AnalyzerHint) => {
+    const flag = ({ graph: 'graphHintSeen', range: 'rangeHintSeen', compare: 'compareHintSeen' } as const)[
+      seen
+    ]
+    markOnboarding(flag)
+  }
+
+  const onboardingActions = {
+    dismissWelcome: () => {
+      setWelcomeOpen(false)
+      markOnboarding('welcomeSeen')
+    },
+    openHelp: () => {
+      // Reaching help through the welcome is a dismissal of the welcome.
+      if (welcomeOpen) markOnboarding('welcomeSeen')
+      setWelcomeOpen(false)
+      setHelpOpen(true)
+    },
+    closeHelp: () => setHelpOpen(false),
+    reopenWelcome: () => {
+      setHelpOpen(false)
+      setWelcomeOpen(true)
+    },
+    dismissHint,
+  }
+
   return (
     <AnalyzerView
       state={{
@@ -264,6 +341,9 @@ export function AnalyzerScreen(): React.JSX.Element {
         activeCustomPosters: derived.activeCustomPosters,
         pendingColumns: loop.pendingColumns,
         settingsOpen,
+        welcomeOpen,
+        helpOpen,
+        hint,
       }}
       plot={{
         model: derived.plotModel,
@@ -274,7 +354,7 @@ export function AnalyzerScreen(): React.JSX.Element {
         canvas,
         gestureLayer,
       }}
-      actions={actions}
+      actions={{ ...actions, ...onboardingActions, dismissAllNotices }}
     />
   )
 }

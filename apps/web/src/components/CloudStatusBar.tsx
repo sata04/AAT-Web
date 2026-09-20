@@ -34,9 +34,9 @@ export interface CloudStatusBarProps {
   onRetryPoster: () => void
 }
 
-function Lane(props: { name: string; label: StatusLabel }): React.JSX.Element {
+function Lane(props: { name: string; label: StatusLabel; hint?: string }): React.JSX.Element {
   return (
-    <span className="status-lane">
+    <span className="status-lane" title={props.hint}>
       <span className={`status-lane__dot status-lane__dot--${props.label.tone}`} aria-hidden="true" />
       <span>{props.name}</span>
       <span className="status-lane__value">{props.label.text}</span>
@@ -67,8 +67,16 @@ export function CloudStatusBar(props: CloudStatusBarProps): React.JSX.Element {
       <div className="status-lane" role="status" aria-live="polite">
         <Lane name="解析" label={analysisLabel(statuses.analysis)} />
       </div>
-      <Lane name={`クラウド同期${remoteSubject}`} label={syncLabel(statuses.sync)} />
-      <Lane name={`ポスター図${remoteSubject}`} label={posterLabel(statuses.poster)} />
+      <Lane
+        name={`クラウド同期${remoteSubject}`}
+        label={syncLabel(statuses.sync)}
+        hint="サインインした場合だけ、解析結果をクラウドへ保存します。ローカル解析とは独立しています。"
+      />
+      <Lane
+        name={`ポスター図${remoteSubject}`}
+        label={posterLabel(statuses.poster)}
+        hint="クラウドに保存した解析から、デスクトップ版と同じ体裁の図を生成します。"
+      />
 
       {retryable.includes('sync') ? (
         <button type="button" className="button button--flat" onClick={props.onRetrySync}>
