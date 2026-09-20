@@ -133,6 +133,34 @@ export interface AnalyzerViewProps {
   actions: AnalyzerViewActions
 }
 
+/**
+ * What each hint says. A table rather than a switch: the three differ only in
+ * their copy, and the bar around them is identical.
+ */
+const HINT_COPY: Record<AnalyzerHint, React.JSX.Element> = {
+  // Written to match UPlotChart/SelectionOverlay exactly — drag selects only
+  // because the normal view reserves the primary drag for it.
+  graph: (
+    <>
+      <b>グラフ操作</b>
+      ドラッグで範囲を選択、ホイールでポインタ位置を中心にズーム、<Kbd>Shift</Kbd>
+      ＋ドラッグでパン。「全体表示」で範囲をリセットします。
+    </>
+  ),
+  range: (
+    <>
+      <b>範囲の統計</b>
+      グラフ上をドラッグすると、その区間の統計が「選択範囲の統計情報」に表示されます。
+    </>
+  ),
+  compare: (
+    <>
+      <b>比較</b>
+      2つ目のデータセットを開きました。ツールバーの「比較」で同じグラフに重ねて表示できます。
+    </>
+  ),
+}
+
 function AnalyzerHintBar({
   hint,
   onDismiss,
@@ -140,33 +168,7 @@ function AnalyzerHintBar({
   hint: AnalyzerHint
   onDismiss: (hint: AnalyzerHint) => void
 }): React.JSX.Element {
-  const dismiss = () => onDismiss(hint)
-  switch (hint) {
-    case 'graph':
-      // Written to match UPlotChart/SelectionOverlay exactly — drag selects
-      // only because the normal view reserves the primary drag for it.
-      return (
-        <HintBar onDismiss={dismiss}>
-          <b>グラフ操作</b>
-          ドラッグで範囲を選択、ホイールでポインタ位置を中心にズーム、<Kbd>Shift</Kbd>
-          ＋ドラッグでパン。「全体表示」で範囲をリセットします。
-        </HintBar>
-      )
-    case 'range':
-      return (
-        <HintBar onDismiss={dismiss}>
-          <b>範囲の統計</b>
-          グラフ上をドラッグすると、その区間の統計が「選択範囲の統計情報」に表示されます。
-        </HintBar>
-      )
-    case 'compare':
-      return (
-        <HintBar onDismiss={dismiss}>
-          <b>比較</b>
-          2つ目のデータセットを開きました。ツールバーの「比較」で同じグラフに重ねて表示できます。
-        </HintBar>
-      )
-  }
+  return <HintBar onDismiss={() => onDismiss(hint)}>{HINT_COPY[hint]}</HintBar>
 }
 
 /**
@@ -207,21 +209,20 @@ function useFileDrop(onFiles: (files: File[]) => Promise<void>) {
   }
 }
 
-function GraphArea({ state, plot, actions }: AnalyzerViewProps): React.JSX.Element {
+/**
+ * Everything layered over the plot: the drop affordance, the notice stack, the
+ * one contextual hint, and the progress bar. Kept apart from the plot itself so
+ * the graph area reads as "the chrome, then either the drop zone or the chart".
+ */
+function GraphOverlays({
+  state,
+  actions,
+  dropping,
+}: Pick<AnalyzerViewProps, 'state' | 'actions'> & { dropping: boolean }): React.JSX.Element {
   const running = state.statuses.analysis.kind === 'running' ? state.statuses.analysis : null
-  const fileDrop = useFileDrop(actions.openFiles)
   return (
-    <main
-      className="graph-area"
-      id="aat-graph"
-      tabIndex={-1}
-      onDragEnter={fileDrop.onDragEnter}
-      onDragOver={fileDrop.onDragOver}
-      onDragLeave={fileDrop.onDragLeave}
-      onDrop={fileDrop.onDrop}
-    >
-      <h1 className="visually-hidden">加速度データ解析</h1>
-      {fileDrop.dropping ? (
+    <>
+      {dropping ? (
         <div className="graph-area__drop-hint" aria-hidden="true">
           CSVファイルをドロップして追加
         </div>
@@ -242,6 +243,24 @@ function GraphArea({ state, plot, actions }: AnalyzerViewProps): React.JSX.Eleme
           </button>
         </div>
       )}
+    </>
+  )
+}
+
+function GraphArea({ state, plot, actions }: AnalyzerViewProps): React.JSX.Element {
+  const fileDrop = useFileDrop(actions.openFiles)
+  return (
+    <main
+      className="graph-area"
+      id="aat-graph"
+      tabIndex={-1}
+      onDragEnter={fileDrop.onDragEnter}
+      onDragOver={fileDrop.onDragOver}
+      onDragLeave={fileDrop.onDragLeave}
+      onDrop={fileDrop.onDrop}
+    >
+      <h1 className="visually-hidden">加速度データ解析</h1>
+      <GraphOverlays state={state} actions={actions} dropping={fileDrop.dropping} />
       {state.datasets.length === 0 ? (
         <FileDropZone
           onFiles={(files) => void actions.openFiles(files)}
@@ -312,6 +331,11 @@ function DatasetPanel({ state, actions }: Pick<AnalyzerViewProps, 'state' | 'act
   )
 }
 
+/** A mapping row's value: the chosen column, or the word for "not used". */
+function columnLabel(used: boolean, column: string): string {
+  return used ? column : '未使用'
+}
+
 function FileInfoPanel({ state, actions }: Pick<AnalyzerViewProps, 'state' | 'actions'>): React.JSX.Element {
   const editColumns = () => {
     if (state.active === null) return
@@ -346,11 +370,11 @@ function FileInfoPanel({ state, actions }: Pick<AnalyzerViewProps, 'state' | 'ac
               </tr>
               <tr>
                 <th scope="row">Inner Capsule</th>
-                <td>{state.active.mapping.useInner ? state.active.mapping.innerColumn : '未使用'}</td>
+                <td>{columnLabel(state.active.mapping.useInner, state.active.mapping.innerColumn)}</td>
               </tr>
               <tr>
                 <th scope="row">Drag Shield</th>
-                <td>{state.active.mapping.useDrag ? state.active.mapping.dragColumn : '未使用'}</td>
+                <td>{columnLabel(state.active.mapping.useDrag, state.active.mapping.dragColumn)}</td>
               </tr>
             </tbody>
           </table>
@@ -363,15 +387,24 @@ function FileInfoPanel({ state, actions }: Pick<AnalyzerViewProps, 'state' | 'ac
   )
 }
 
+/**
+ * Which datasets the statistics panel describes: every open one while
+ * comparing, otherwise the active one alone — and nothing when none is active.
+ */
+function statisticsDatasetsFor(
+  mode: ViewMode,
+  datasets: readonly Dataset[],
+  active: Dataset | null,
+): readonly Dataset[] {
+  if (isComparing(mode)) return datasets
+  return active === null ? [] : [active]
+}
+
 function AnalyzerSidebar({
   state,
   actions,
 }: Pick<AnalyzerViewProps, 'state' | 'actions'>): React.JSX.Element {
-  const statisticsDatasets = isComparing(state.mode)
-    ? state.datasets
-    : state.active === null
-      ? []
-      : [state.active]
+  const statisticsDatasets = statisticsDatasetsFor(state.mode, state.datasets, state.active)
   const posterStatus = state.posterContext === null ? { kind: 'unavailable' as const } : state.statuses.poster
   return (
     <aside className="side-panel" aria-label="データセットと統計">

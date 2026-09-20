@@ -43,6 +43,23 @@ export function Dialog(props: DialogProps): React.JSX.Element {
     }
   }, [])
 
+  // The backdrop covers the analyzer, drop targets included. A file dropped
+  // anywhere while a dialog is up would otherwise reach the browser's default
+  // handler, which navigates to the file and takes every open dataset with it —
+  // a first-run user dragging a CSV onto the welcome would lose the session.
+  // Cancelling the drop only works if `dragover` was cancelled first.
+  useEffect(() => {
+    const swallowFileDrag = (event: DragEvent) => {
+      if (event.dataTransfer?.types.includes('Files') === true) event.preventDefault()
+    }
+    document.addEventListener('dragover', swallowFileDrag)
+    document.addEventListener('drop', swallowFileDrag)
+    return () => {
+      document.removeEventListener('dragover', swallowFileDrag)
+      document.removeEventListener('drop', swallowFileDrag)
+    }
+  }, [])
+
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.key === 'Escape') {

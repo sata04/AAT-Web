@@ -3,7 +3,7 @@
  * inline `?` explainers, and the dismissible graph hint.
  */
 
-import { screen } from '@testing-library/react'
+import { fireEvent, screen } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { describe, expect, it, vi } from 'vitest'
 import { HelpDialog } from '../../src/components/HelpDialog.tsx'
@@ -40,6 +40,29 @@ describe('welcome dialog', () => {
     renderComponent(<WelcomeDialog onDismiss={onDismiss} onShowHelp={() => {}} onOpenCsv={() => {}} />)
     await user.keyboard('{Escape}')
     expect(onDismiss).toHaveBeenCalledOnce()
+  })
+})
+
+describe('dialog file-drag guard', () => {
+  it('swallows a file drag so the browser cannot navigate away from the app', () => {
+    renderComponent(<WelcomeDialog onDismiss={() => {}} onShowHelp={() => {}} onOpenCsv={() => {}} />)
+    const backdrop = document.querySelector('.dialog-backdrop')
+    expect(backdrop).toBeTruthy()
+
+    // `fireEvent` returns false when a handler called `preventDefault`, and the
+    // browser only lets `drop` be cancelled when `dragover` was cancelled too —
+    // so both matter. Uncancelled, the default action opens the dropped file as
+    // a document and every open dataset goes with it.
+    const dataTransfer = { types: ['Files'], files: [], items: [] }
+    expect(fireEvent.dragOver(backdrop as Element, { dataTransfer })).toBe(false)
+    expect(fireEvent.drop(backdrop as Element, { dataTransfer })).toBe(false)
+  })
+
+  it('leaves a non-file drag alone', () => {
+    renderComponent(<WelcomeDialog onDismiss={() => {}} onShowHelp={() => {}} onOpenCsv={() => {}} />)
+    const backdrop = document.querySelector('.dialog-backdrop') as Element
+    const dataTransfer = { types: ['text/plain'], files: [], items: [] }
+    expect(fireEvent.dragOver(backdrop, { dataTransfer })).toBe(true)
   })
 })
 

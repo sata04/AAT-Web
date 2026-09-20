@@ -86,6 +86,20 @@ test.describe('onboarding', () => {
     await expect(page.getByRole('dialog')).toHaveCount(0)
   })
 
+  test('the inline explainers describe themselves while closed', async ({ page }) => {
+    await page.goto('/')
+    await page.getByRole('button', { name: 'そのまま始める' }).click()
+
+    // Every `?` points at its bubble with `aria-describedby`, and every bubble
+    // starts closed. Hiding a closed bubble with `display: none` would drop it
+    // out of the accessibility tree, leaving the trigger describing nothing —
+    // jsdom cannot see that because it applies no CSS, but Playwright's role
+    // queries read the real tree, so an empty count is exactly that regression.
+    const triggers = page.getByRole('button', { name: /の説明$/ })
+    await expect(triggers.first()).toHaveAttribute('aria-expanded', 'false')
+    expect(await page.getByRole('tooltip').count()).toBe(await triggers.count())
+  })
+
   test('is operable from the keyboard alone', async ({ page }) => {
     await page.goto('/')
 

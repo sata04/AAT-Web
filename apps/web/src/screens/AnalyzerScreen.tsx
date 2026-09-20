@@ -194,12 +194,12 @@ export function AnalyzerScreen(): React.JSX.Element {
   // dismissed just because a dataset happens to be open already.
   const previousDatasetCount = useRef(datasets.length)
   useEffect(() => {
-    const wasEmpty = previousDatasetCount.current === 0
+    const firstDatasetArrived = previousDatasetCount.current === 0 && datasets.length > 0
     previousDatasetCount.current = datasets.length
-    if (welcomeOpen && wasEmpty && datasets.length > 0) {
-      setWelcomeOpen(false)
-      markOnboarding('welcomeSeen')
-    }
+    if (!firstDatasetArrived) return
+    if (!welcomeOpen) return
+    setWelcomeOpen(false)
+    markOnboarding('welcomeSeen')
   }, [welcomeOpen, datasets.length, markOnboarding])
 
   // Doing the thing is the same as being taught it: a user who selects a

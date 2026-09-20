@@ -1762,8 +1762,20 @@ textarea {
   left: auto;
 }
 
+/* Closed, but never gone: `display: none` would take the bubble out of the
+   accessibility tree, and the trigger's `aria-describedby` would then point at
+   nothing — the opposite of what InfoTip promises. Clip it the way
+   `.visually-hidden` does, so the description is still readable while the
+   bubble is off screen and cannot intercept a click on the trigger. */
 .info-tip__bubble--hidden {
-  display: none;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  border: 0;
+  box-shadow: none;
+  overflow: hidden;
+  clip-path: inset(50%);
+  pointer-events: none;
 }
 
 /* Motion is only allowed to explain an appearance: dialog open, tooltip,
