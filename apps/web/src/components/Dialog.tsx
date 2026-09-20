@@ -102,15 +102,13 @@ function keepTabInsideDialog(panel: HTMLElement, event: KeyboardEvent): void {
   }
   const first = focusable[0] as HTMLElement
   const last = focusable[focusable.length - 1] as HTMLElement
+  // Focus drifted outside a modal that is still up — pull it back rather
+  // than letting Tab continue through the inert page.
+  const outside = !(active instanceof Node) || !panel.contains(active)
   if (event.shiftKey && active === first) {
     event.preventDefault()
     last.focus()
-  } else if (!event.shiftKey && active === last) {
-    event.preventDefault()
-    first.focus()
-  } else if (active === null || (active instanceof Node && !panel.contains(active))) {
-    // Focus drifted outside a modal that is still up — pull it back rather
-    // than letting Tab continue through the inert page.
+  } else if ((!event.shiftKey && active === last) || outside) {
     event.preventDefault()
     first.focus()
   }

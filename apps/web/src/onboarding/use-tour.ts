@@ -226,6 +226,62 @@ function sceneCtx(
   }
 }
 
+/** What a machine verb needs beyond its own inputs. */
+interface TourControlDeps {
+  readonly index: number
+  readonly reducedMotion: boolean
+  readonly activate: (next: number) => void
+  readonly driverRef: { readonly current: TourDriver }
+  readonly onFinishRef: { readonly current: (kind: TourFinish) => void }
+  readonly setPlaying: React.Dispatch<React.SetStateAction<boolean>>
+  readonly setPaused: React.Dispatch<React.SetStateAction<boolean>>
+  readonly setCursor: React.Dispatch<React.SetStateAction<TourCursorState>>
+}
+
+/**
+ * The machine's verbs. Any manual step kills autoplay — the user took over —
+ * and `restart` rewinds the workspace as well as the scene index so a
+ * replayed tour starts from the slate it found.
+ */
+function useTourControls(
+  deps: TourControlDeps,
+): Pick<TourMachine, 'start' | 'next' | 'back' | 'togglePause' | 'restart' | 'finish'> {
+  const { index, reducedMotion, activate, driverRef, onFinishRef } = deps
+  const { setPlaying, setPaused, setCursor } = deps
+
+  const step = useCallback(
+    (next: number) => {
+      setPlaying(false)
+      setPaused(false)
+      activate(next)
+    },
+    [activate, setPlaying, setPaused],
+  )
+  const start = useCallback(() => {
+    // Reduced motion never autoplays — the caption says so, so デモを見る
+    // lands on the first scene and hands stepping to 次へ. `intro` is
+    // pinned, so autoplay begins at the first driving scene.
+    setPlaying(!reducedMotion)
+    setPaused(false)
+    activate(1)
+  }, [activate, reducedMotion, setPlaying, setPaused])
+  const next = useCallback(() => step(index + 1), [step, index])
+  const back = useCallback(() => step(index - 1), [step, index])
+  const togglePause = useCallback(() => setPaused((current) => !current), [setPaused])
+  const restart = useCallback(() => {
+    const driver = driverRef.current
+    driver.closeTourDatasets()
+    driver.restoreBaseline()
+    setPlaying(false)
+    setPaused(false)
+    setCursor({ visible: false, x: 0, y: 0 })
+    activate(0)
+  }, [activate, driverRef, setPlaying, setPaused, setCursor])
+  const finish = useCallback((kind: TourFinish) => onFinishRef.current(kind), [onFinishRef])
+
+  return { start, next, back, togglePause, restart, finish }
+}
+
 export function useTour(input: {
   driver: TourDriver
   reducedMotion: boolean
@@ -254,6 +310,17 @@ export function useTour(input: {
     setIndex(Math.max(0, Math.min(next, SCENES.length - 1)))
   }, [])
 
+  const controls = useTourControls({
+    index,
+    reducedMotion,
+    activate,
+    driverRef,
+    onFinishRef,
+    setPlaying,
+    setPaused,
+    setCursor,
+  })
+
   // The scene runner: entering a scene builds its world, then — only while
   // autoplay is live — holds it for the dwell and moves on. Aborting is the
   // single way out: manual steps, restart, skip and unmount all come through
@@ -262,62 +329,18 @@ export function useTour(input: {
   useEffect(() => {
     const scene = SCENES[index] as SceneDef
     const controller = new AbortController()
-    const { signal } = controller
     // The clock holds only while autoplay is up and unpaused. A manual step
     // keeps its animation — pausing a stepping user makes no sense — and a
     // hidden tab freezes everything regardless because rAF stops.
-    const gate = () => !(playingRef.current && pausedRef.current)
-    const instant = reducedMotion
-    const clock: GatedClock = { signal, gate, instant }
+    const clock: GatedClock = {
+      signal: controller.signal,
+      gate: () => !(playingRef.current && pausedRef.current),
+      instant: reducedMotion,
+    }
     const ctx = sceneCtx(driverRef.current, clock, setCursor)
-
-    void runScene(
-      scene,
-      ctx,
-      () => playingRef.current,
-      () => activate(index + 1),
-    )
+    void runScene(scene, ctx, () => playingRef.current, () => activate(index + 1))
     return () => controller.abort()
   }, [index, reducedMotion, activate])
-
-  const start = useCallback(() => {
-    // Reduced motion never autoplays — the caption says so, so デモを見る
-    // lands on the first scene and hands stepping to 次へ.
-    setPlaying(!reducedMotion)
-    setPaused(false)
-    // `intro` is pinned, so autoplay begins at the first driving scene.
-    activate(1)
-  }, [activate, reducedMotion])
-
-  const next = useCallback(() => {
-    setPlaying(false)
-    setPaused(false)
-    activate(index + 1)
-  }, [activate, index])
-
-  const back = useCallback(() => {
-    setPlaying(false)
-    setPaused(false)
-    activate(index - 1)
-  }, [activate, index])
-
-  const togglePause = useCallback(() => {
-    setPaused((current) => !current)
-  }, [])
-
-  const restart = useCallback(() => {
-    const current = driverRef.current
-    current.closeTourDatasets()
-    current.restoreBaseline()
-    setPlaying(false)
-    setPaused(false)
-    setCursor({ visible: false, x: 0, y: 0 })
-    activate(0)
-  }, [activate])
-
-  const finish = useCallback((kind: TourFinish) => {
-    onFinishRef.current(kind)
-  }, [])
 
   return {
     scene: SCENES[index] as SceneDef,
@@ -326,11 +349,6 @@ export function useTour(input: {
     playing,
     paused,
     cursor,
-    start,
-    next,
-    back,
-    togglePause,
-    restart,
-    finish,
+    ...controls,
   }
 }

@@ -102,12 +102,26 @@ interface InstalledAnalysis {
 }
 
 /**
- * Install a finished analysis.
- *
- * Two arrivals are dropped instead: one whose file the user closed while the
- * worker was computing, and one whose epoch went stale — a user cancel, or a
- * newer settings application whose own re-analysis supersedes it. Both still
- * release the retained table so it cannot linger.
+ * A result the workspace no longer wants — the user closed the file while
+ * the worker computed it, or the epoch went stale (cancel, or a newer
+ * settings application whose own re-analysis supersedes it). Either way the
+ * retained table is released so it cannot linger.
+ */
+function dropUnwantedInstall(
+  deps: AnalyzerLoopDeps,
+  client: AnalysisClient,
+  source: OpenedSource,
+  epoch: number,
+): boolean {
+  if (!deps.closedSources.current.delete(source.filename) && epoch === deps.cancelEpoch.current) {
+    return false
+  }
+  void client.release(source.sourceSha256).catch(() => {})
+  return true
+}
+
+/**
+ * Install a finished analysis — unless `dropUnwantedInstall` claims it.
  */
 async function installAnalysisResult(
   deps: AnalyzerLoopDeps,
@@ -115,15 +129,8 @@ async function installAnalysisResult(
   installed: InstalledAnalysis,
 ): Promise<void> {
   const { source, result, effectiveConfig, epoch } = installed
-  if (deps.closedSources.current.delete(source.filename)) {
-    void client.release(source.sourceSha256).catch(() => {})
-    return
-  }
+  if (dropUnwantedInstall(deps, client, source, epoch)) return
   const dataset = datasetFromPayload(result.payload, effectiveConfig, result.fromCache)
-  if (epoch !== deps.cancelEpoch.current) {
-    void client.release(source.sourceSha256).catch(() => {})
-    return
-  }
   deps.setDatasets((current) => {
     // Re-analysing or re-opening a file must not move it to the end of the
     // list — the comparison graph draws in list order.
