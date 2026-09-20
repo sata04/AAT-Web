@@ -1,7 +1,7 @@
 /**
- * Onboarding coverage that only a real browser can prove: the welcome shows
- * once against real storage, the contextual hints appear in the order the
- * features arrive, and the help re-entry point brings the welcome back.
+ * Onboarding coverage that only a real browser can prove: the tour's intro card
+ * shows once against real storage, the contextual hints appear in the order the
+ * features arrive, and the help re-entry point brings the tour back.
  * Everything is seeded "seen" by default — this spec is the exception.
  */
 
@@ -11,17 +11,23 @@ import { expect, test } from '../harness/fixtures.ts'
 test.describe('onboarding', () => {
   test.use({ onboardingComplete: false })
 
-  test('first run shows the welcome once, then hints as features arrive', async ({ page }) => {
+  test('first run shows the tour once, then hints as features arrive', async ({ page }) => {
     await page.goto('/')
 
-    // The welcome answers what this is and that nothing leaves the browser.
-    const welcome = page.getByRole('dialog')
-    await expect(welcome).toBeVisible()
-    await expect(welcome).toContainText('微小重力実験の加速度データ')
-    await expect(welcome).toContainText('クラウドへ送信されることはありません')
-    await expect(welcome.getByRole('button', { name: 'CSVを開く' })).toBeFocused()
+    // The tour opens on its intro card, which carries the welcome's copy verbatim —
+    // what this is, the three steps, and that nothing leaves the browser.
+    const stage = page.getByRole('dialog', { name: 'AAT Web のはじめてガイド' })
+    await expect(stage).toBeVisible()
+    await expect(stage).toContainText('微小重力実験の加速度データ')
+    await expect(stage.getByRole('listitem')).toHaveText([
+      'CSVファイルを読み込む',
+      '列の対応を確認する',
+      'グラフと統計で解析する',
+    ])
+    await expect(stage).toContainText('クラウドへ送信されることはありません')
+    await expect(stage.getByRole('button', { name: 'デモを見る' })).toBeFocused()
 
-    await welcome.getByRole('button', { name: 'そのまま始める' }).click()
+    await stage.getByRole('button', { name: 'そのまま始める' }).click()
     await expect(page.getByRole('dialog')).toHaveCount(0)
 
     // The drop zone stays the primary CTA; the quick-start flow sits inside it.
@@ -56,34 +62,44 @@ test.describe('onboarding', () => {
     await expect(page.getByText('CSVファイルをドロップ')).toBeVisible()
     await expect(page.getByRole('status').filter({ hasText: 'グラフ操作' })).toHaveCount(0)
 
-    // Help re-opens on demand, and can bring the welcome back explicitly.
+    // Help re-opens on demand, and can bring the tour back explicitly — the old
+    // standalone welcome is gone; the re-entry point lands on the tour's intro.
     await page.getByRole('button', { name: '操作ガイド', exact: true }).click()
     const help = page.getByRole('dialog')
     await expect(help.getByRole('heading', { name: '操作ガイド' })).toBeVisible()
     await expect(help.getByRole('heading', { name: 'グラフ操作' })).toBeVisible()
     await expect(help.getByRole('heading', { name: 'ローカルとクラウド' })).toBeVisible()
     await help.getByRole('button', { name: '初回の案内をもう一度見る' }).click()
-    await expect(page.getByRole('dialog')).toContainText('微小重力実験の加速度データ')
+    const reopened = page.getByRole('dialog', { name: 'AAT Web のはじめてガイド' })
+    await expect(reopened).toContainText('微小重力実験の加速度データ')
+    await expect(reopened.locator('[data-scene]')).toHaveAttribute('data-scene', 'intro')
     await page.keyboard.press('Escape')
     await expect(page.getByRole('dialog')).toHaveCount(0)
   })
 
-  test('re-showing the welcome works while a dataset is open', async ({ page }) => {
+  test('re-showing the tour works while a dataset is open', async ({ page }) => {
     await page.goto('/')
     await page.getByRole('button', { name: 'そのまま始める' }).click()
 
     await openCsv(page, repoCsv('normal_two_sensor_utf8.csv'))
     await waitForAnalysis(page)
 
-    // The re-show is an explicit ask: the welcome must appear even though a
+    // The re-show is an explicit ask: the tour must appear even though a
     // dataset is already open — auto-close only applies when a file arrives
-    // while the welcome is up, not the other way around.
+    // while the stage is up, not the other way around.
     await page.getByRole('button', { name: '操作ガイド', exact: true }).click()
     await page.getByRole('dialog').getByRole('button', { name: '初回の案内をもう一度見る' }).click()
-    const welcome = page.getByRole('dialog')
-    await expect(welcome).toContainText('微小重力実験の加速度データ')
-    await welcome.getByRole('button', { name: 'そのまま始める' }).click()
+    const stage = page.getByRole('dialog', { name: 'AAT Web のはじめてガイド' })
+    await expect(stage).toContainText('微小重力実験の加速度データ')
+    await stage.getByRole('button', { name: 'そのまま始める' }).click()
     await expect(page.getByRole('dialog')).toHaveCount(0)
+
+    // The open dataset is untouched by the visit.
+    await expect(
+      page
+        .getByRole('region', { name: 'データセット' })
+        .getByRole('button', { name: 'normal_two_sensor_utf8', exact: true }),
+    ).toBeVisible()
   })
 
   test('the inline explainers describe themselves while closed', async ({ page }) => {
@@ -103,9 +119,9 @@ test.describe('onboarding', () => {
   test('is operable from the keyboard alone', async ({ page }) => {
     await page.goto('/')
 
-    // The welcome traps focus: the primary action is focused, Tab cycles
+    // The stage traps focus: the primary action is focused, Tab cycles
     // inside, and Escape closes — the graph's skip link is first after that.
-    await expect(page.getByRole('button', { name: 'CSVを開く' })).toBeFocused()
+    await expect(page.getByRole('button', { name: 'デモを見る' })).toBeFocused()
     await page.keyboard.press('Escape')
     await expect(page.getByRole('dialog')).toHaveCount(0)
 
@@ -127,11 +143,11 @@ test.describe('onboarding', () => {
 test.describe('onboarding — reduced motion', () => {
   test.use({ onboardingComplete: false, contextOptions: { reducedMotion: 'reduce' } })
 
-  test('the welcome and quick start render and dismiss normally', async ({ page }) => {
+  test('the tour intro renders and dismisses normally', async ({ page }) => {
     await page.goto('/')
-    const welcome = page.getByRole('dialog')
-    await expect(welcome).toBeVisible()
-    await welcome.getByRole('button', { name: 'そのまま始める' }).click()
+    const stage = page.getByRole('dialog', { name: 'AAT Web のはじめてガイド' })
+    await expect(stage).toBeVisible()
+    await stage.getByRole('button', { name: 'そのまま始める' }).click()
     await expect(page.getByRole('dialog')).toHaveCount(0)
     await expect(page.getByText('CSVファイルをドロップ')).toBeVisible()
   })
