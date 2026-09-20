@@ -162,11 +162,13 @@ export async function reserveQuota(
 /**
  * Convert a reservation into recorded usage, charging the ACTUAL byte count.
  *
- * The charge is written before the reservation settles so a deletion never observes `finalised`
- * ahead of the charge it implies. A lost claim uncharges exactly the bytes and object count it
- * added; the reservation's hold on `bytesReserved` is released only after the claim is won, so a
- * sweeper's or deleter's subtraction can never be subtracted twice. Returns false if the
- * reservation had already been settled.
+ * All three writes ride in one batch correlated to the claim's token: the pending→finalised
+ * transition, the usage charge it implies, and the release of the reservation's hold on
+ * `bytesReserved`. Atomicity is what makes the ordering honest — an observer sees either
+ * `pending` with no charge or `finalised` with it, never `finalised` ahead of the charge it
+ * implies, and never a charge whose claim rolled back. A lost claim means no ledger writes at
+ * all, so there is nothing to uncharge. Returns false if the reservation had already been
+ * settled.
  */
 export async function finaliseReservation(
   db: Database,
@@ -175,48 +177,26 @@ export async function finaliseReservation(
   userId: string,
   now: Date = new Date(),
 ): Promise<boolean> {
-  await db
-    .update(quotaUsage)
-    .set({
-      bytesUsed: sql`${quotaUsage.bytesUsed} + ${actualBytes}`,
-      objectCount: sql`${quotaUsage.objectCount} + 1`,
-      updatedAt: now,
-    })
-    .where(eq(quotaUsage.userId, userId))
-
   const token = newId()
   const [claimed] = await db.batch([
     db
       .update(quotaReservations)
       .set({ status: 'finalised', claimToken: token })
       .where(and(eq(quotaReservations.id, reservation.id), eq(quotaReservations.status, 'pending'))),
-    // The hold release fires only if the claim above won — a deleter or sweeper that took the
-    // reservation first already released `bytesReserved`, and subtracting it again would drift
-    // the account.
+    // Both ledger writes are correlated to the claim: a sweeper's or deleter's winning claim
+    // already released `bytesReserved`, and charging usage for bytes this caller will now roll
+    // back would charge for storage that does not exist.
     db
       .update(quotaUsage)
       .set({
+        bytesUsed: sql`${quotaUsage.bytesUsed} + ${actualBytes}`,
+        objectCount: sql`${quotaUsage.objectCount} + 1`,
         bytesReserved: sql`MAX(${quotaUsage.bytesReserved} - ${reservation.bytes}, 0)`,
         updatedAt: now,
       })
       .where(and(eq(quotaUsage.userId, userId), claimedBy(reservation.id, token))),
   ])
-  if (rowsAffected(claimed) === 1) {
-    return true
-  }
-
-  // The claim lost to a sweeper or a deleter — both now treat the bytes as never charged — so
-  // the usage charge written above is owed back. `bytesReserved` is not touched here: the winning
-  // claimer released it already, and adding it back would double-count the hold.
-  await db
-    .update(quotaUsage)
-    .set({
-      bytesUsed: sql`MAX(${quotaUsage.bytesUsed} - ${actualBytes}, 0)`,
-      objectCount: sql`MAX(${quotaUsage.objectCount} - 1, 0)`,
-      updatedAt: now,
-    })
-    .where(eq(quotaUsage.userId, userId))
-  return false
+  return rowsAffected(claimed) === 1
 }
 
 /** Give a reservation back. Safe to call on an already-settled reservation. */
