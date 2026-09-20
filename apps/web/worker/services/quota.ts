@@ -379,6 +379,37 @@ export async function commitUploadedObject(
   throw new ApiError('INTERNAL', { details: { reason: 'reservation_settled_early' } })
 }
 
+/**
+ * Undo an object whose upload committed but whose bookkeeping did not.
+ *
+ * Handlers have statements after `commitUploadedObject` — the figure row, the snapshot pointer,
+ * the audit entry — that can still fail. Releasing the reservation there is already a no-op: the
+ * charge settled. Without this unwind the object row, the R2 bytes and the quota charge all
+ * survive, and because every upload key is deterministic the `cloud_objects_r2_key_unique`
+ * constraint then refuses the retry itself — the upload is permanently wedged, not just leaked.
+ *
+ * `releaseObjectAccounting` covers whatever state the commit reached — a still-pending
+ * reservation, a finalised charge — exactly once, so the unwind is safe to re-run after a crash
+ * mid-cleanup. The row and bucket deletes are unconditional: the row is the unique-key obstacle
+ * and the bytes are the storage it described.
+ */
+export async function unwindUploadedObject(
+  db: Database,
+  bucket: R2Bucket,
+  object: {
+    id: string
+    r2Key: string
+    ownerUserId: string
+    byteSize: number
+    reservationId: string
+  },
+  now: Date = new Date(),
+): Promise<void> {
+  await releaseObjectAccounting(db, object, now)
+  await db.delete(cloudObjects).where(eq(cloudObjects.id, object.id))
+  await bucket.delete(object.r2Key)
+}
+
 export interface SweepResult {
   reservationsReleased: number
   orphanedObjectsDeleted: number

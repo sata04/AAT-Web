@@ -65,6 +65,7 @@ import {
   type Reservation,
   releaseReservation,
   reserveQuota,
+  unwindUploadedObject,
 } from '../services/quota.ts'
 import { consumeRateLimit, RATE_LIMITS, rateLimitKey } from '../services/rate-limit.ts'
 import { posterKey, streamObject } from '../services/storage.ts'
@@ -119,9 +120,9 @@ function validateSpec(raw: unknown, revisionId: string, expectedKind: 'auto' | '
 /**
  * Store the rendered PNG, record the object and settle the reservation against its actual size.
  *
- * The reservation is released on any failure so a render that cannot be committed does not keep
- * holding quota. Everything else on this path — the figure row, the audit entry — is written by
- * the caller once the object is durable.
+ * A failure before the object row exists releases the reservation; a failure after it unwinds the
+ * whole upload — accounting, row and bytes — because the charge may already be settled and the
+ * deterministic key must be free for the retry.
  */
 async function commitPosterRender(
   context: AppContext,
@@ -136,6 +137,7 @@ async function commitPosterRender(
   const actor = context.get('actor')
   const ownerUserId = revision.ownerUserId
 
+  let uploaded: { id: string; byteSize: number } | null = null
   try {
     const digest = await sha256Hex(outcome.png)
     const put = await context.env.AAT_OBJECTS.put(key, outcome.png as ArrayBufferView, {
@@ -160,6 +162,7 @@ async function commitPosterRender(
       reservationId: reservation.id,
       createdAt: now,
     })
+    uploaded = { id: objectId, byteSize: actualBytes }
     await commitUploadedObject(
       db,
       context.env.AAT_OBJECTS,
@@ -180,7 +183,17 @@ async function commitPosterRender(
       headers: context.req.raw.headers,
     })
   } catch (error) {
-    await releaseReservation(db, reservation, ownerUserId, now)
+    if (uploaded === null) {
+      await releaseReservation(db, reservation, ownerUserId, now)
+    } else {
+      // The charge may already be settled; only the object's own accounting knows.
+      await unwindUploadedObject(
+        db,
+        context.env.AAT_OBJECTS,
+        { ...uploaded, r2Key: key, ownerUserId, reservationId: reservation.id },
+        now,
+      )
+    }
     throw error
   }
 }
@@ -402,6 +415,10 @@ posterRoutes.post(
       staleSeconds: config.renderStaleSeconds,
     })
     if (!claimed) {
+      // Nothing consumes a queued custom figure — the idempotent auto row is found again by its
+      // unique constraint, but this fresh id is unreachable by the next request, so leaving it
+      // would strand it forever. Undo the insert before reporting the lost claim.
+      await db.delete(posterFigures).where(eq(posterFigures.id, figureId))
       throw new ApiError('POSTER_BUSY', { details: { reason: 'already_claimed' } })
     }
     return performRender(context, figureId, spec, revision)

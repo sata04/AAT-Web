@@ -13,7 +13,11 @@ import { and, eq, isNull } from 'drizzle-orm'
 import { describe, expect, it } from 'vitest'
 import { cloudObjects, quotaReservations, quotaUsage } from '../../worker/db/schema.ts'
 import { newId } from '../../worker/lib/ids.ts'
-import { finaliseReservation, sweepStaleReservations } from '../../worker/services/quota.ts'
+import {
+  finaliseReservation,
+  sweepStaleReservations,
+  unwindUploadedObject,
+} from '../../worker/services/quota.ts'
 import { apiFetch, createRevision, createRun, createUser, db, type TestUser } from './helpers/client.ts'
 import { buildSnapshot, encodeForUpload } from './helpers/snapshot.ts'
 
@@ -575,5 +579,42 @@ describe('quota enforcement', () => {
     expect(quota.bytesUsed).toBe(0)
     expect(quota.bytesReserved).toBe(0)
     expect(quota.objectCount).toBe(0)
+  })
+
+  it('unwinds a committed upload whose bookkeeping failed, freeing its key for the retry', async () => {
+    const user = await createUser()
+    const runId = await createRun(user)
+    const revisionId = await createRevision(user, runId)
+    const { response, size } = await uploadSnapshot(user, revisionId)
+    expect(response.status).toBe(201)
+
+    // A failure in the bookkeeping after commitUploadedObject — the snapshot pointer update, the
+    // audit entry — leaves the row, the bytes and the settled charge all live while the client
+    // saw an error and will retry. Rebuild that end state and take the catch path.
+    const [object] = await db()
+      .select()
+      .from(cloudObjects)
+      .where(eq(cloudObjects.analysisRevisionId, revisionId))
+    if (!object?.reservationId) throw new Error('expected a committed object row')
+
+    await unwindUploadedObject(db(), env.AAT_OBJECTS, {
+      id: object.id,
+      r2Key: object.r2Key,
+      ownerUserId: object.ownerUserId,
+      byteSize: object.byteSize,
+      reservationId: object.reservationId,
+    })
+
+    const quota = await quotaOf(user)
+    expect(quota.bytesUsed).toBe(0)
+    expect(quota.bytesReserved).toBe(0)
+    expect(quota.objectCount).toBe(0)
+    expect(await env.AAT_OBJECTS.get(object.r2Key)).toBeNull()
+
+    // The retry the client would send — same key, same bytes — is the assertion that matters:
+    // it can only succeed if the unwind cleared the unique-key obstacle as well as the charge.
+    const retry = await uploadSnapshot(user, revisionId)
+    expect(retry.response.status).toBe(201)
+    expect(retry.size).toBe(size)
   })
 })

@@ -64,6 +64,7 @@ import {
   releaseReservation,
   reserveQuota,
   sweepStaleReservations,
+  unwindUploadedObject,
 } from '../services/quota.ts'
 import { readBoundedBody, snapshotKey, sourceKey, streamObject } from '../services/storage.ts'
 
@@ -393,6 +394,7 @@ revisionRoutes.put(
       now,
     )
 
+    let uploaded: { id: string; byteSize: number } | null = null
     try {
       // Read at most what was reserved: a client that declares 100 bytes and sends 10 MB is cut
       // off at 100 and rejected, rather than storing 10 MB against a 100-byte reservation.
@@ -449,6 +451,7 @@ revisionRoutes.put(
         reservationId: reservation.id,
         createdAt: now,
       })
+      uploaded = { id: objectId, byteSize: actualBytes }
 
       await commitUploadedObject(
         db,
@@ -476,8 +479,19 @@ revisionRoutes.put(
       return context.json({ object: { id: objectId, byteSize: actualBytes }, created: true }, 201)
     } catch (error) {
       // Every failure path gives the reservation back — to the account it was taken from. Leaking
-      // one would slowly consume a user's quota with bytes that were never stored.
-      await releaseReservation(db, reservation, ownerUserId, now)
+      // one would slowly consume a user's quota with bytes that were never stored. Once the object
+      // row exists the charge may already be settled, so the whole upload is unwound instead —
+      // otherwise the row's unique r2_key would refuse the retry.
+      if (uploaded === null) {
+        await releaseReservation(db, reservation, ownerUserId, now)
+      } else {
+        await unwindUploadedObject(
+          db,
+          context.env.AAT_OBJECTS,
+          { ...uploaded, r2Key: key, ownerUserId, reservationId: reservation.id },
+          now,
+        )
+      }
       throw error
     }
   },
@@ -577,6 +591,7 @@ revisionRoutes.put(
       now,
     )
 
+    let uploaded: { id: string; byteSize: number } | null = null
     try {
       const body = await readBoundedBody(context.req.raw.body, reservation.bytes, 'SOURCE_TOO_LARGE')
       if (body.sha256 !== query.sha256) {
@@ -604,6 +619,7 @@ revisionRoutes.put(
         reservationId: reservation.id,
         createdAt: now,
       })
+      uploaded = { id: objectId, byteSize: actualBytes }
       await commitUploadedObject(
         db,
         context.env.AAT_OBJECTS,
@@ -625,7 +641,19 @@ revisionRoutes.put(
 
       return context.json({ object: { id: objectId, byteSize: actualBytes } }, 201)
     } catch (error) {
-      await releaseReservation(db, reservation, ownerUserId, now)
+      // Once the object row exists the charge may already be settled — releaseReservation is a
+      // no-op there — so the whole upload is unwound: accounting, row and bytes all go, and the
+      // deterministic key is free for the retry.
+      if (uploaded === null) {
+        await releaseReservation(db, reservation, ownerUserId, now)
+      } else {
+        await unwindUploadedObject(
+          db,
+          context.env.AAT_OBJECTS,
+          { ...uploaded, r2Key: key, ownerUserId, reservationId: reservation.id },
+          now,
+        )
+      }
       throw error
     }
   },
