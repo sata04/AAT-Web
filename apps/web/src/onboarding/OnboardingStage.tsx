@@ -274,6 +274,38 @@ function StageHud({
   )
 }
 
+/**
+ * Keep focus inside the stage: a commit can unmount the element holding
+ * focus — the intro card's buttons leave with their scene — and the browser
+ * drops focus to the body, from where the next Tab reaches the analyzer
+ * behind this modal. Refocus then, but only when focus was inside before:
+ * an idle pointer user's autoplay must not yank focus on every scene cut.
+ */
+function useStageFocus(panelRef: React.RefObject<HTMLDivElement | null>): void {
+  const focusWasInsideRef = useRef(true)
+  // No dep list: the check runs on every commit, not just scene changes.
+  useEffect(() => {
+    const panel = panelRef.current
+    if (panel === null) return
+    const active = document.activeElement
+    const inside = active !== null && panel.contains(active)
+    if (focusWasInsideRef.current && !inside) initialFocusTarget(panel)?.focus()
+    // Read after the refocus: staying `inside` is what lets the next scene
+    // change recapture again.
+    focusWasInsideRef.current = panel.contains(document.activeElement)
+  })
+}
+
+/** A CSV dropped on the scrim is a real answer — open it and keep it. */
+function stageDrop(event: React.DragEvent, driver: TourDriver, finish: (kind: TourFinish) => void): void {
+  if (!event.dataTransfer.types.includes('Files')) return
+  event.preventDefault()
+  const files = csvFilesFrom(event.dataTransfer.files)
+  if (files.length === 0) return
+  void driver.openFiles(files)
+  finish('keep')
+}
+
 export default function OnboardingStage(props: OnboardingStageProps): React.JSX.Element {
   const titleId = useId()
   const panelRef = useRef<HTMLDivElement | null>(null)
@@ -299,35 +331,9 @@ export default function OnboardingStage(props: OnboardingStageProps): React.JSX.
 
   useTopmostDialogKeys(panelRef, () => finish('skip'))
   useSpotlight(panelRef, scene.spotlight)
+  useStageFocus(panelRef)
 
-  // A commit can unmount the element holding focus — the intro card's
-  // buttons leave with their scene — and the browser drops focus to the
-  // body, from where the next Tab reaches the analyzer behind this modal.
-  // Refocus the stage, but only when focus was inside it to begin with: an
-  // idle pointer user's autoplay must not yank focus on every scene cut.
-  // (No dep list: the check runs on every commit, not just scene changes.)
-  const focusWasInsideRef = useRef(true)
-  useEffect(() => {
-    const panel = panelRef.current
-    if (panel === null) return
-    const active = document.activeElement
-    const inside = active !== null && panel.contains(active)
-    if (focusWasInsideRef.current && !inside) initialFocusTarget(panel)?.focus()
-    // Read after the refocus: staying `inside` is what lets the next scene
-    // change recapture again.
-    focusWasInsideRef.current = panel.contains(document.activeElement)
-  })
-
-  // A file dropped on the scrim is a researcher answering the tour's first
-  // question with their own data — open it for real and let them keep it.
-  const onDrop = (event: React.DragEvent) => {
-    if (!event.dataTransfer.types.includes('Files')) return
-    event.preventDefault()
-    const files = csvFilesFrom(event.dataTransfer.files)
-    if (files.length === 0) return
-    void props.driver.openFiles(files)
-    finish('keep')
-  }
+  const onDrop = (event: React.DragEvent) => stageDrop(event, props.driver, finish)
 
   return (
     <div

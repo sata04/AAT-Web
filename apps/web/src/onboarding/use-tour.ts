@@ -150,31 +150,26 @@ function cursorPoint(target: Element | { x: number; y: number }): { x: number; y
   return { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 }
 }
 
-/**
- * One scene run: build its world, re-aim the cursor at what `enter` mounted,
- * then — only while autoplay is live — hold the dwell and advance. Every
- * early return passes through the abort check, so a step/skip/unmount can
- * never strand a half-applied follow-up.
- */
-async function runScene(
+/** Run `scene.enter`; false when the run aborted — a step, skip or unmount. */
+async function enterScene(scene: SceneDef, ctx: TourCtx): Promise<boolean> {
+  try {
+    await scene.enter?.(ctx)
+  } catch (error) {
+    if (isAbort(error) || ctx.signal.aborted) return false
+    // A scene that fails must not hang the tour — report it and let the
+    // dwell logic decide what comes next as usual.
+    console.error('onboarding scene failed', error)
+  }
+  return !ctx.signal.aborted
+}
+
+/** Hold the scene's dwell on the running clock, then advance — aborted runs simply end. */
+async function dwellAndAdvance(
   scene: SceneDef,
   ctx: TourCtx,
   playingNow: () => boolean,
   advance: () => void,
 ): Promise<void> {
-  ctx.cursor.moveTo(cursorTargetFor(scene.cursor))
-  try {
-    await scene.enter?.(ctx)
-  } catch (error) {
-    if (isAbort(error) || ctx.signal.aborted) return
-    // A scene that fails must not hang the tour — report it and let the
-    // dwell logic decide what comes next as usual.
-    console.error('onboarding scene failed', error)
-  }
-  if (ctx.signal.aborted) return
-  // The element a scene's cursor names may only exist once `enter` has
-  // run — the statistics panel mounts with the first dataset, for one.
-  ctx.cursor.moveTo(cursorTargetFor(scene.cursor))
   if (scene.pinned || !playingNow()) return
   try {
     await ctx.wait(scene.dwellMs)
@@ -183,6 +178,52 @@ async function runScene(
   }
   if (ctx.signal.aborted || !playingNow()) return
   advance()
+}
+
+/**
+ * One scene run: build its world, re-aim the cursor at what `enter` mounted,
+ * then — only while autoplay is live — hold the dwell and advance.
+ */
+async function runScene(
+  scene: SceneDef,
+  ctx: TourCtx,
+  playingNow: () => boolean,
+  advance: () => void,
+): Promise<void> {
+  ctx.cursor.moveTo(cursorTargetFor(scene.cursor))
+  if (!(await enterScene(scene, ctx))) return
+  // The element a scene's cursor names may only exist once `enter` has
+  // run — the statistics panel mounts with the first dataset, for one.
+  ctx.cursor.moveTo(cursorTargetFor(scene.cursor))
+  await dwellAndAdvance(scene, ctx, playingNow, advance)
+}
+
+/** The `TourCtx` a scene's `enter` sees — driver + the gated clock + cursor. */
+function sceneCtx(
+  driver: TourDriver,
+  clock: GatedClock,
+  setCursor: React.Dispatch<React.SetStateAction<TourCursorState>>,
+): TourCtx {
+  return {
+    driver,
+    signal: clock.signal,
+    instant: clock.instant,
+    wait: (ms) => clockWait(ms, clock),
+    waitFor: (pred, timeoutMs = 20_000) =>
+      clockWaitFor(() => pred(driver.snapshot()), timeoutMs, clock.signal),
+    tween: (ms, apply) => clockTween(ms, apply, clock),
+    cursor: {
+      moveTo: (target) => {
+        if (target === null) {
+          setCursor((current) => (current.visible ? { ...current, visible: false } : current))
+          return
+        }
+        const point = cursorPoint(target)
+        setCursor({ visible: true, x: point.x, y: point.y })
+      },
+      hide: () => setCursor((current) => (current.visible ? { ...current, visible: false } : current)),
+    },
+  }
 }
 
 export function useTour(input: {
@@ -228,26 +269,7 @@ export function useTour(input: {
     const gate = () => !(playingRef.current && pausedRef.current)
     const instant = reducedMotion
     const clock: GatedClock = { signal, gate, instant }
-    const ctx: TourCtx = {
-      driver: driverRef.current,
-      signal,
-      instant,
-      wait: (ms) => clockWait(ms, clock),
-      waitFor: (pred, timeoutMs = 20_000) =>
-        clockWaitFor(() => pred(driverRef.current.snapshot()), timeoutMs, signal),
-      tween: (ms, apply) => clockTween(ms, apply, clock),
-      cursor: {
-        moveTo: (target) => {
-          if (target === null) {
-            setCursor((current) => (current.visible ? { ...current, visible: false } : current))
-            return
-          }
-          const point = cursorPoint(target)
-          setCursor({ visible: true, x: point.x, y: point.y })
-        },
-        hide: () => setCursor((current) => (current.visible ? { ...current, visible: false } : current)),
-      },
-    }
+    const ctx = sceneCtx(driverRef.current, clock, setCursor)
 
     void runScene(
       scene,
