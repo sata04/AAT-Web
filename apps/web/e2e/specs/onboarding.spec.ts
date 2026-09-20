@@ -68,6 +68,24 @@ test.describe('onboarding', () => {
     await expect(page.getByRole('dialog')).toHaveCount(0)
   })
 
+  test('re-showing the welcome works while a dataset is open', async ({ page }) => {
+    await page.goto('/')
+    await page.getByRole('button', { name: 'そのまま始める' }).click()
+
+    await openCsv(page, repoCsv('normal_two_sensor_utf8.csv'))
+    await waitForAnalysis(page)
+
+    // The re-show is an explicit ask: the welcome must appear even though a
+    // dataset is already open — auto-close only applies when a file arrives
+    // while the welcome is up, not the other way around.
+    await page.getByRole('button', { name: '操作ガイド', exact: true }).click()
+    await page.getByRole('dialog').getByRole('button', { name: '初回の案内をもう一度見る' }).click()
+    const welcome = page.getByRole('dialog')
+    await expect(welcome).toContainText('微小重力実験の加速度データ')
+    await welcome.getByRole('button', { name: 'そのまま始める' }).click()
+    await expect(page.getByRole('dialog')).toHaveCount(0)
+  })
+
   test('is operable from the keyboard alone', async ({ page }) => {
     await page.goto('/')
 

@@ -43,7 +43,17 @@ Analysis is fast — even a 200k-row CSV finishes in ~1s, so the new progress ba
 - The PNG export posts a parity warning notice; notices stack at the top of the graph area, each dismissible via 閉じる.
 
 ## Console check
-`browser_console` tool may falsely report "Chrome is not in the foreground". Visual fallback: `Cmd+Opt+J` opens DevTools console — screenshot it.
+`browser_console` and `read_dom` tools may falsely report "Chrome is not in the foreground". Visual fallback: `Cmd+Opt+J` opens DevTools console — screenshot it. Note that docking DevTools shrinks the page viewport, moving every element — recompute click coordinates after toggling it.
+
+## When a click "does nothing"
+Before calling it an app bug, verify the hit target:
+1. In DevTools console, get the element's real viewport rect: `el.getBoundingClientRect()`.
+2. Check what actually sits there: `document.elementFromPoint(cx, cy)` — it should return the control, not an overlay.
+3. A programmatic `el.click()` is NOT a reliable stand-in for a real click: it fires the handler but may not reproduce pointer/focus behavior, and can be misleading when a dialog or layout state differs. Prefer re-attempting a real click at the verified position.
+4. Small toolbar/sidebar buttons (e.g. 列を選び直す, ?) are ~26px targets — a few px of drift lands in panel padding. Zoom first, then click dead-center.
+
+## Onboarding state
+`localStorage['aat.onboarding.v1']` gates the welcome/hints — clear it via DevTools console for a fresh first-run (`localStorage.removeItem(...)`; DevTools warns once about pasting, typed input is unaffected). Re-showing the welcome from help is broken while datasets are loaded (auto-close effect) — test re-entry on an empty workspace.
 
 ## Bad-data fixtures
 tests/fixtures/csv contains intentional edge cases: missing_sync_point / non_monotonic_time / non_numeric_mixed all import but stack WARNING notices (fallbacks announced, not errors). Useful for the notice stack; hard errors are hard to trigger from fixtures.

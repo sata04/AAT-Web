@@ -22,7 +22,7 @@
  */
 
 import type { AnalysisConfig } from '@aat/shared'
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { type Dataset, sensorModeFrom } from '../app/dataset.ts'
 import {
   loadOnboarding,
@@ -187,11 +187,16 @@ export function AnalyzerScreen(): React.JSX.Element {
     })
   }, [])
 
-  // A file opened while the welcome is still up answers the welcome's
+  // A file arriving while the welcome is still up answers the welcome's
   // question — close it and count it as seen rather than leaving a modal over
-  // fresh data.
+  // fresh data. Only the empty→non-empty transition counts: re-showing the
+  // welcome from the operation guide is an explicit ask and must not be
+  // dismissed just because a dataset happens to be open already.
+  const previousDatasetCount = useRef(datasets.length)
   useEffect(() => {
-    if (welcomeOpen && datasets.length > 0) {
+    const wasEmpty = previousDatasetCount.current === 0
+    previousDatasetCount.current = datasets.length
+    if (welcomeOpen && wasEmpty && datasets.length > 0) {
       setWelcomeOpen(false)
       markOnboarding('welcomeSeen')
     }
