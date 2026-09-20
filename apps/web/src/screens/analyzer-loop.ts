@@ -307,9 +307,9 @@ async function openSingleFile(
   deps: AnalyzerLoopDeps,
   client: AnalysisClient,
   file: File,
-  epoch: number,
-  localOnly: boolean,
+  batch: { epoch: number; localOnly: boolean },
 ): Promise<'done' | 'columns' | 'stop'> {
+  const { epoch, localOnly } = batch
   try {
     const bytes = await file.arrayBuffer()
     if (deps.cancelEpoch.current !== epoch) return 'stop'
@@ -358,7 +358,7 @@ export async function openFilesFor(deps: AnalyzerLoopDeps, files: File[], localO
       ...current,
       analysis: { kind: 'running', stage: 'decoding', percent: 0 },
     }))
-    const outcome = await openSingleFile(deps, client, file, epoch, localOnly)
+    const outcome = await openSingleFile(deps, client, file, { epoch, localOnly })
     if (outcome === 'stop') return
     if (outcome === 'columns') {
       // The dialog is modal; the rest of the batch resumes when it

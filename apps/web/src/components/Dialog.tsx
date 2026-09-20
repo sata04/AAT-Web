@@ -89,6 +89,11 @@ export function useTopmostDialogKeys(
   }, [panelRef, onClose])
 }
 
+/** Focus is outside a modal that is still up. */
+function escapedDialog(panel: HTMLElement, active: Element | null): boolean {
+  return !(active instanceof Node) || !panel.contains(active)
+}
+
 // Keep Tab inside the dialog: the content behind it is inert to the mouse
 // but not to the keyboard unless something holds the cycle closed.
 function keepTabInsideDialog(panel: HTMLElement, event: KeyboardEvent): void {
@@ -102,13 +107,14 @@ function keepTabInsideDialog(panel: HTMLElement, event: KeyboardEvent): void {
   }
   const first = focusable[0] as HTMLElement
   const last = focusable[focusable.length - 1] as HTMLElement
-  // Focus drifted outside a modal that is still up — pull it back rather
-  // than letting Tab continue through the inert page.
-  const outside = !(active instanceof Node) || !panel.contains(active)
   if (event.shiftKey && active === first) {
     event.preventDefault()
     last.focus()
-  } else if ((!event.shiftKey && active === last) || outside) {
+    return
+  }
+  // Wrap at the last control, and pull focus back when it drifted outside —
+  // a modal that is still up owns the keyboard either way.
+  if ((!event.shiftKey && active === last) || escapedDialog(panel, active)) {
     event.preventDefault()
     first.focus()
   }
