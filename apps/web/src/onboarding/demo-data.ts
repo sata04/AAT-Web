@@ -20,8 +20,9 @@ import { datasetNameFromFilename } from '../app/dataset.ts'
 export type DemoDataset = 'a' | 'b'
 
 /**
- * The names the tour installs under. The driver uses them to find the demo
- * datasets again when it cleans up after the run.
+ * The names the tour prefers to install under. Cleanup does not use them —
+ * the driver tracks what it installed by object identity — but a collision
+ * with a researcher's own file is resolved against them in `demoFilename`.
  */
 export const DEMO_DATASET_NAMES = ['sample-a.csv', 'sample-b.csv'] as const
 

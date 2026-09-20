@@ -6,9 +6,10 @@ import { SettingsDialog } from '../components/SettingsDialog.tsx'
 import type { AnalyzerViewProps } from './AnalyzerView.tsx'
 
 /**
- * Every modal the analyzer can raise — column confirmation, settings, and
- * the operation guide — rendered from the same state slots. They live apart from the view's layout code so adding a dialog does
- * not grow the screen's composition.
+ * Every modal the analyzer can raise — column confirmation, settings, and the
+ * operation guide — rendered from the same state slots. They live apart from
+ * the view's layout code so adding a dialog does not grow the screen's
+ * composition.
  *
  * Only one mounts at a time. The states are independent — a file's column
  * detection can finish while the operation guide is open — but the modals are

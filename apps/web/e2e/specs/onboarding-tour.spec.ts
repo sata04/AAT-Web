@@ -292,6 +292,33 @@ test.describe('onboarding tour', () => {
     await expect(datasets(page).getByRole('button', { name: /sample-a-tour|sample-b/ })).toHaveCount(0)
   })
 
+  test('stepping back into 比較 keeps the sample under its own name', async ({ page }) => {
+    await page.goto('/')
+
+    const stage = tourStage(page)
+    await stage.getByRole('button', { name: 'デモを見る' }).click()
+    const caption = tourCaption(stage)
+
+    // Walk to 比較 by hand: manual stepping runs the same `enter` autoplay
+    // does, and arrives in seconds rather than on the tour's own clock.
+    for (let step = 0; step < 6; step++) await stage.getByRole('button', { name: '次へ' }).click()
+    await expect(caption).toHaveAttribute('data-scene', 'compare')
+    await expect(datasets(page).getByRole('button', { name: 'sample-b', exact: true })).toBeVisible()
+
+    // Re-entering the scene closes the second sample and opens it again in the
+    // same tick. The close has not committed yet at that point, so the demo's
+    // own outgoing dataset must not read as a researcher's file holding the
+    // name — that used to push the sample to 'sample-b-tour' and back on every
+    // pass through the scene.
+    await stage.getByRole('button', { name: '次へ' }).click()
+    await expect(caption).toHaveAttribute('data-scene', 'export')
+    await stage.getByRole('button', { name: '戻る' }).click()
+    await expect(caption).toHaveAttribute('data-scene', 'compare')
+
+    await expect(datasets(page).getByRole('button', { name: 'sample-b', exact: true })).toBeVisible()
+    await expect(datasets(page).getByRole('button', { name: /sample-b-tour/ })).toHaveCount(0)
+  })
+
   test("skipping a replayed tour hands the workspace's view back", async ({ page }) => {
     await page.goto('/')
     await tourStage(page).getByRole('button', { name: 'そのまま始める' }).click()

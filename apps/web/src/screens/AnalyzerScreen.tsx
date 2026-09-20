@@ -356,6 +356,7 @@ export function AnalyzerScreen(): React.JSX.Element {
         tracker.reconciled.add(installed)
         tracker.owned.set(pending.latest.which, installed)
         if (pending.latest.epoch !== tracker.epoch || !tracker.keep.has(pending.latest.which)) {
+          tracker.closing.add(installed)
           loop.closeDataset(installed)
         }
       }
@@ -384,6 +385,12 @@ export function AnalyzerScreen(): React.JSX.Element {
     // Installs already matched to a request — the same dataset object still
     // visible on the next commit must not consume another open.
     reconciled: new WeakSet<Dataset>(),
+    // Demo datasets the tour has closed but whose removal has not committed
+    // yet. `snapshot` is a commit-boundary read, so a scene that closes and
+    // re-opens in one tick — stepping back into `compare` does exactly that —
+    // would otherwise read its own outgoing dataset as a name collision and
+    // install the sample under the fallback name meant for a researcher's file.
+    closing: new WeakSet<Dataset>(),
     epoch: 0,
   })
 
@@ -421,7 +428,7 @@ export function AnalyzerScreen(): React.JSX.Element {
         )
         const taken = new Set(
           snapshot.current.datasets
-            .filter((dataset) => !mine.has(dataset.name))
+            .filter((dataset) => !mine.has(dataset.name) && !tracker.closing.has(dataset))
             .map((dataset) => dataset.name),
         )
         const filename = demoFilename(which, taken)
@@ -450,7 +457,10 @@ export function AnalyzerScreen(): React.JSX.Element {
         for (const which of except) tracker.keep.add(which)
         for (const [which, dataset] of tracker.owned) {
           if (tracker.keep.has(which)) continue
-          if (snapshot.current.datasets.includes(dataset)) loop.closeDataset(dataset)
+          if (snapshot.current.datasets.includes(dataset)) {
+            tracker.closing.add(dataset)
+            loop.closeDataset(dataset)
+          }
           tracker.owned.delete(which)
         }
       },

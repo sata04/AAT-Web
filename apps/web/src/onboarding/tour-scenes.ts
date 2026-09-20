@@ -306,10 +306,6 @@ export const SCENES: readonly SceneDef[] = [
   },
 ]
 
-export const SCENE_INDEX: Readonly<Record<SceneId, number>> = Object.fromEntries(
-  SCENES.map((scene, index) => [scene.id, index]),
-) as Record<SceneId, number>
-
 /** Resolve a cursor spec against the live document. */
 export function cursorTargetFor(spec: CursorSpec): Element | null {
   if (spec.kind === 'selector') return document.querySelector(spec.selector)

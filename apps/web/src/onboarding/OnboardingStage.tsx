@@ -16,7 +16,7 @@
  * modals it replaces.
  */
 
-import { useEffect, useId, useRef, useState } from 'react'
+import { useCallback, useEffect, useId, useRef, useState } from 'react'
 import { initialFocusTarget, useTopmostDialogKeys } from '../components/Dialog.tsx'
 import { csvFilesFrom } from '../components/FileDropZone.tsx'
 import './onboarding.css'
@@ -315,7 +315,12 @@ export default function OnboardingStage(props: OnboardingStageProps): React.JSX.
   // between closing the intro card (touched nothing) and skipping mid-tour
   // (demo datasets to remove, a view to restore).
   const droveRef = useRef(false)
-  const finish = (kind: TourFinish) => props.onFinish(kind, droveRef.current)
+  // Stable across renders: the cursor's rAF state re-renders the stage on
+  // every frame of a tween, and an inline closure here would have
+  // `useTopmostDialogKeys` tear down and re-register its document listener
+  // sixty times a second.
+  const { onFinish } = props
+  const finish = useCallback((kind: TourFinish) => onFinish(kind, droveRef.current), [onFinish])
   const tour = useTour({ driver: props.driver, reducedMotion, onFinish: finish })
   const scene = tour.scene
   if (tour.index > 0) droveRef.current = true
