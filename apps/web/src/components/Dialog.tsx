@@ -28,6 +28,74 @@ function initialFocusTarget(panel: HTMLElement | null): HTMLElement | null {
   return panel.querySelector<HTMLElement>('[data-autofocus]') ?? panel.querySelector<HTMLElement>(FOCUSABLE)
 }
 
+/**
+ * The panel of every mounted dialog. Two dialogs can be open at once — a
+ * modal raised while another was already up — and each hears the same
+ * document keydown, because a second listener on one node is not stopped by
+ * `stopPropagation`. So which dialog answers is decided here rather than by
+ * the listeners' firing order: the topmost dialog is the one whose panel
+ * comes last in document order, which is also the one painted above the rest.
+ */
+const openDialogPanels = new Set<HTMLElement>()
+
+function topmostDialogPanel(): HTMLElement | null {
+  let topmost: HTMLElement | null = null
+  for (const panel of openDialogPanels) {
+    const follows =
+      topmost === null || (topmost.compareDocumentPosition(panel) & Node.DOCUMENT_POSITION_FOLLOWING) !== 0
+    if (follows) topmost = panel
+  }
+  return topmost
+}
+
+/**
+ * Escape closes a dialog and Tab cycles inside it — but only for the one
+ * painted on top. Every open dialog hears the same document keydown, since a
+ * second listener on one node is not stopped by `stopPropagation`, so which
+ * dialog answers is decided by document order rather than firing order.
+ * Panel registration folds in here so a dialog participates in the stacking
+ * order for exactly its lifetime; the panel element itself is stable.
+ */
+function useTopmostDialogKeys(panelRef: React.RefObject<HTMLDivElement | null>, onClose: () => void): void {
+  useEffect(() => {
+    const panel = panelRef.current
+    if (panel === null) return
+    openDialogPanels.add(panel)
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== 'Escape' && event.key !== 'Tab') return
+      // One Escape must not close a second dialog behind the topmost.
+      if (topmostDialogPanel() !== panel) return
+      if (event.key === 'Escape') {
+        event.stopPropagation()
+        onClose()
+        return
+      }
+      keepTabInsideDialog(panel, event)
+    }
+    document.addEventListener('keydown', onKeyDown, true)
+    return () => {
+      openDialogPanels.delete(panel)
+      document.removeEventListener('keydown', onKeyDown, true)
+    }
+  }, [panelRef, onClose])
+}
+
+// Keep Tab inside the dialog: the content behind it is inert to the mouse
+// but not to the keyboard unless something holds the cycle closed.
+function keepTabInsideDialog(panel: HTMLElement, event: KeyboardEvent): void {
+  const focusable = [...panel.querySelectorAll<HTMLElement>(FOCUSABLE)]
+  if (focusable.length === 0) return
+  const first = focusable[0] as HTMLElement
+  const last = focusable[focusable.length - 1] as HTMLElement
+  if (event.shiftKey && document.activeElement === first) {
+    event.preventDefault()
+    last.focus()
+  } else if (!event.shiftKey && document.activeElement === last) {
+    event.preventDefault()
+    first.focus()
+  }
+}
+
 export function Dialog(props: DialogProps): React.JSX.Element {
   const titleId = useId()
   const descriptionId = useId()
@@ -60,33 +128,7 @@ export function Dialog(props: DialogProps): React.JSX.Element {
     }
   }, [])
 
-  useEffect(() => {
-    const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') {
-        event.stopPropagation()
-        props.onClose()
-        return
-      }
-      if (event.key !== 'Tab') return
-      // Keep Tab inside the dialog: the content behind it is inert to the mouse
-      // but not to the keyboard unless something holds the cycle closed.
-      const panel = panelRef.current
-      if (panel === null) return
-      const focusable = [...panel.querySelectorAll<HTMLElement>(FOCUSABLE)]
-      if (focusable.length === 0) return
-      const first = focusable[0] as HTMLElement
-      const last = focusable[focusable.length - 1] as HTMLElement
-      if (event.shiftKey && document.activeElement === first) {
-        event.preventDefault()
-        last.focus()
-      } else if (!event.shiftKey && document.activeElement === last) {
-        event.preventDefault()
-        first.focus()
-      }
-    }
-    document.addEventListener('keydown', onKeyDown, true)
-    return () => document.removeEventListener('keydown', onKeyDown, true)
-  }, [props])
+  useTopmostDialogKeys(panelRef, props.onClose)
 
   return (
     // The backdrop's pointer handler is a convenience duplicate of the Escape

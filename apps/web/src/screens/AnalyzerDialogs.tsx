@@ -11,6 +11,14 @@ import type { AnalyzerViewProps } from './AnalyzerView.tsx'
  * first-run welcome, and the operation guide — rendered from the same state
  * slots. They live apart from the view's layout code so adding a dialog does
  * not grow the screen's composition.
+ *
+ * Only one mounts at a time. The states are independent — a file's column
+ * detection can finish while the operation guide is open — but the modals are
+ * not: two mounted dialogs would paint on top of each other, and one Escape
+ * would reach both. A queued modal keeps its flag and re-appears when the
+ * slot frees. Settings wins the slot because unmounting it would discard a
+ * half-edited draft; the column question comes next — it blocks an import in
+ * flight — and the information-only welcome and help wait behind the rest.
  */
 export function AnalyzerDialogs({
   state,
@@ -22,15 +30,6 @@ export function AnalyzerDialogs({
   }
   return (
     <>
-      {state.pendingColumns === null ? null : (
-        <ColumnSelectorDialog
-          source={state.pendingColumns.source}
-          initial={state.pendingColumns.initial}
-          reason={state.pendingColumns.reason}
-          onCancel={actions.cancelPendingColumns}
-          onConfirm={actions.confirmPendingColumns}
-        />
-      )}
       {state.settingsOpen ? (
         <SettingsDialog
           config={state.config}
@@ -40,8 +39,15 @@ export function AnalyzerDialogs({
             void clearCache().then(() => actions.notify('info', 'ローカルキャッシュを削除しました。'))
           }
         />
-      ) : null}
-      {state.welcomeOpen ? (
+      ) : state.pendingColumns !== null ? (
+        <ColumnSelectorDialog
+          source={state.pendingColumns.source}
+          initial={state.pendingColumns.initial}
+          reason={state.pendingColumns.reason}
+          onCancel={actions.cancelPendingColumns}
+          onConfirm={actions.confirmPendingColumns}
+        />
+      ) : state.welcomeOpen ? (
         <WelcomeDialog
           onDismiss={actions.dismissWelcome}
           onShowHelp={actions.openHelp}
@@ -56,8 +62,7 @@ export function AnalyzerDialogs({
             document.getElementById('aat-file-open')?.click()
           }}
         />
-      ) : null}
-      {state.helpOpen ? (
+      ) : state.helpOpen ? (
         <HelpDialog onClose={actions.closeHelp} onShowWelcome={actions.reopenWelcome} />
       ) : null}
     </>
