@@ -31,7 +31,7 @@
     "ulid": "3.0.2",
     "uplot": "1.6.32",
     "write-excel-file": "4.1.1",
-    "zod": "4.5.4"
+    "zod": "4.6.5"
   },
   "devDependencies": {
     "@axe-core/playwright": "4.13.0",
