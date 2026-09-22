@@ -24,7 +24,7 @@
     "@hono/zod-validator": "0.9.1",
     "better-auth": "1.7.5",
     "drizzle-orm": "0.45.2",
-    "hono": "4.13.7",
+    "hono": "4.13.8",
     "papaparse": "5.7.0",
     "react": "19.3.0",
     "react-dom": "19.3.0",
