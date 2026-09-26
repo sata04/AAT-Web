@@ -36,6 +36,12 @@ Concretely: `verify` builds and tests the container image and uploads it as an a
 deliberately unused, because it would put a Dockerfile — and everything it can `RUN` — inside the
 credentialled job.
 
+The image is tagged by the `poster-renderer/` git tree rather than by the triggering commit, so a
+deploy in which the renderer did not change finds the tag already in the Cloudflare registry and
+deploys the same `repo@digest` reference that is already live. Cloudflare starts no rollout for an
+unchanged container configuration — a code-only deploy leaves the running container alone instead
+of recreating it.
+
 The accepted residual risk is `wrangler` itself, which runs in `deploy` and does have that reach.
 It is already trusted with the Cloudflare token and the Worker secrets, so the marginal exposure is
 small, and `renovate.json5` holds it and the pinned actions to a 30-day release age for exactly
@@ -71,7 +77,7 @@ than write to some other account:
 | Location | Placeholder | Filled in from |
 | --- | --- | --- |
 | `d1_databases[0].database_id` | `00000000-0000-0000-0000-000000000000` | Doppler `AAT_D1_DATABASE_ID` (the id printed by `wrangler d1 create aat-db`) |
-| `containers[0].image` | `registry.cloudflare.com/000…0/aat-poster-renderer:latest` | the digest the deploy step captures after pushing the image |
+| `containers[0].image` | `registry.cloudflare.com/000…0/aat-poster-renderer:latest` | the digest the deploy step resolves — captured after pushing the image, or the digest of the existing registry tag when the renderer tree is unchanged |
 
 **The committed file is never the file that is deployed, and it stays invalid on purpose.** Wrangler
 performs no variable substitution inside its own configuration, so
