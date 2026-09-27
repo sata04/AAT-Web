@@ -181,14 +181,22 @@ jobs:
       # Dockerfile — this is the point of the whole split, and the reason
       # wrangler's convenience "build my Dockerfile during deploy" path is
       # deliberately not used.
+      #
+      # The tag is the poster-renderer/ git tree — the directory's content, not
+      # the commit that happened to trigger the run. The deploy job reuses the
+      # registry image when this exact tag is already there, which is what keeps
+      # an unrelated deploy from rolling the renderer's container.
+      - name: Tag the image by renderer content
+        run: echo "RENDERER_TAG=aat-poster-renderer:$(git rev-parse HEAD:poster-renderer)" >> "$GITHUB_ENV"
+
       - name: Build poster renderer image
-        run: docker build -t aat-poster-renderer:${{ github.sha }} poster-renderer
+        run: docker build -t "$RENDERER_TAG" poster-renderer
 
       - name: Test image
-        run: docker run --rm --network none aat-poster-renderer:${{ github.sha }} python -m pytest /app/tests -q
+        run: docker run --rm --network none "$RENDERER_TAG" python -m pytest /app/tests -q
 
       - name: Export image
-        run: docker save aat-poster-renderer:${{ github.sha }} | gzip > "$RUNNER_TEMP/poster-renderer.tar.gz"
+        run: docker save "$RENDERER_TAG" | gzip > "$RUNNER_TEMP/poster-renderer.tar.gz"
 
       - name: Upload client bundle
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -313,9 +321,42 @@ jobs:
           CLOUDFLARE_API_TOKEN: ${{ steps.doppler.outputs.CF_DEPLOY_TOKEN_VALUE }}
           CLOUDFLARE_ACCOUNT_ID: ${{ steps.doppler.outputs.CLOUDFLARE_ACCOUNT_ID }}
         run: |
+          tag=$(git rev-parse HEAD:poster-renderer)
+
+          # Reuse before pushing. The tag names the renderer's content, so when
+          # the registry already holds it, this exact tree was built, tested and
+          # pushed by an earlier run — deploying its digest produces the same
+          # `containers.image` reference that is already live, and Cloudflare
+          # starts no rollout for an unchanged container configuration. That is
+          # what stops a code-only deploy (a dependency-only merge, say) from
+          # tearing down and recreating the renderer's instances.
+          #
+          # The check is a HEAD on the tag's manifest — the same request
+          # wrangler itself issues for `containers images delete`, answered with
+          # Docker-Content-Digest, with credentials minted by `containers
+          # registries credentials`. Every failure here falls through to the
+          # normal push path: reuse only ever saves work, it never blocks it.
+          registry_password=$(
+            pnpm --filter @aat/web exec wrangler containers registries credentials \
+              --pull --json 2>/dev/null | jq -r '.password // empty' || true
+          )
+          digest=""
+          if [ -n "$registry_password" ]; then
+            digest=$(curl -fsSI \
+              -H "Authorization: Basic $(printf 'v1:%s' "$registry_password" | base64 -w0)" \
+              -H "Accept: application/vnd.oci.image.manifest.v1+json, application/vnd.docker.distribution.manifest.v2+json" \
+              "https://registry.cloudflare.com/v2/${CLOUDFLARE_ACCOUNT_ID}/aat-poster-renderer/manifests/${tag}" \
+              | tr -d '\r' | sed -n 's/^[Dd]ocker-[Cc]ontent-[Dd]igest:[[:space:]]*//p' || true)
+          fi
+          if [ -n "$digest" ]; then
+            echo "Renderer tree is already in the registry; reusing digest ${digest} — no container rollout."
+            echo "ref=registry.cloudflare.com/${CLOUDFLARE_ACCOUNT_ID}/aat-poster-renderer@${digest}" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
           gunzip -c "$RUNNER_TEMP/poster-renderer.tar.gz" | docker load
           pnpm --filter @aat/web exec wrangler containers push \
-            "aat-poster-renderer:${{ github.sha }}" | tee "$RUNNER_TEMP/push.log"
+            "aat-poster-renderer:${tag}" | tee "$RUNNER_TEMP/push.log"
           # Compose the immutable reference from the two lines wrangler actually
           # prints. It does NOT print a `path@sha256:...` form anywhere — the
           # digest arrives in docker's push line and the registry path in
