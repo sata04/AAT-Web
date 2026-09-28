@@ -40,6 +40,7 @@ import {
   DEFAULT_POSTER_PRESET_VERSION,
   findPosterFigureSize,
   isPosterPresetVersion,
+  MAX_RASTER_PIXELS,
   POSTER_PRESET_VERSIONS,
   type PosterFigureSizeId,
   type PosterFigureSizeOption,
@@ -51,7 +52,7 @@ import {
   posterTitleLine,
   type SeriesSelection,
 } from '@aat/plot-spec'
-import { useMemo, useState } from 'react'
+import { useMemo, useRef, useState } from 'react'
 import { formatFixed } from '../app/format.ts'
 import type { PosterFigure } from '../cloud/gateway.ts'
 import { posterImageUrl } from '../cloud/gateway.ts'
@@ -98,6 +99,9 @@ interface Bounds {
   yMin: string
   yMax: string
 }
+
+type YBound = 'yMin' | 'yMax'
+type YBoundErrors = Partial<Record<YBound, string>>
 
 function numberOrNull(text: string): number | null {
   const trimmed = text.trim()
@@ -228,6 +232,8 @@ export function PosterDialog(props: PosterDialogProps): React.JSX.Element {
   // Prefilled from the selection, then owned by the form: a researcher typing exact bounds for a
   // method section must not have them snap back when the pointer grazes the graph behind the modal.
   const [bounds, setBounds] = useState<Bounds>(() => initialBounds(selection, props.yRange, defaults))
+  const yInputs = useRef<Record<YBound, HTMLInputElement | null>>({ yMin: null, yMax: null })
+  const [yErrors, setYErrors] = useState<YBoundErrors>({})
 
   // The dialog can be closed mid-render; the poll continues regardless.
   const mounted = useMountedRef()
@@ -239,15 +245,57 @@ export function PosterDialog(props: PosterDialogProps): React.JSX.Element {
 
   const setBound = (key: keyof Bounds, value: string) => {
     setBounds((current) => ({ ...current, [key]: value }))
+    if (key === 'yMin' || key === 'yMax') {
+      setYErrors((current) => {
+        const next = { ...current }
+        delete next[key]
+        return next
+      })
+    }
   }
 
   const size = findPosterFigureSize(figureSizeId, presetVersion) ?? sizeOptions[0]
   const titlePreview = posterTitleLine(runCode, title, presetVersion)
 
+  // The raster cap is enforced server-side per spec.ts; options that can only
+  // fail for the chosen figure size are disabled here instead of being
+  // discovered through a rejection.
+  const dpiWithinLimit = (optionDpi: number, forSize: PosterFigureSizeOption) =>
+    forSize.widthInches * forSize.heightInches * optionDpi * optionDpi <= MAX_RASTER_PIXELS
+
+  const applyFigureSize = (nextId: PosterFigureSizeId, nextVersion = presetVersion) => {
+    setFigureSizeId(nextId)
+    const nextSize = findPosterFigureSize(nextId, nextVersion) ?? posterFigureSizeOptions(nextVersion)[0]
+    if (nextSize !== undefined && !dpiWithinLimit(dpi, nextSize)) {
+      const nextDpiOptions = posterDpiOptions(nextVersion)
+      const fallback = [...nextDpiOptions].reverse().find((option) => dpiWithinLimit(option.dpi, nextSize))
+      if (fallback !== undefined) setDpi(fallback.dpi)
+    }
+  }
+
+  const applyPresetVersion = (nextVersion: PosterPresetVersion) => {
+    setPresetVersion(nextVersion)
+    applyFigureSize(figureSizeId, nextVersion)
+  }
+
   const submit = async () => {
     setAdvice(null)
     setCloudMessage(null)
     setCreated(null)
+
+    const errors: YBoundErrors = {}
+    for (const key of ['yMin', 'yMax'] as const) {
+      // Browsers expose partially typed/overflowing numbers as an empty value
+      // with badInput set. Only an intentional blank may select the preset.
+      if (
+        yInputs.current[key]?.validity.badInput ||
+        (bounds[key].trim() !== '' && numberOrNull(bounds[key]) === null)
+      ) {
+        errors[key] = '有限の数値を入力するか、空欄にして既定値を使用してください。'
+      }
+    }
+    setYErrors(errors)
+    if (Object.keys(errors).length > 0) return
 
     const request = posterRequestFor(
       { series, title, showLegend, presetVersion, size, dpi, bounds },
@@ -310,7 +358,13 @@ export function PosterDialog(props: PosterDialogProps): React.JSX.Element {
           setBounds((current) => ({ ...current, xMin: String(picked.xMin), xMax: String(picked.xMax) }))
         }
       />
-      <YRangeSection bounds={bounds} defaults={defaults} onBound={setBound} />
+      <YRangeSection
+        bounds={bounds}
+        defaults={defaults}
+        onBound={setBound}
+        errors={yErrors}
+        inputs={yInputs.current}
+      />
       <ContentSection
         series={series}
         seriesOptions={seriesOptions}
@@ -327,9 +381,10 @@ export function PosterDialog(props: PosterDialogProps): React.JSX.Element {
         figureSizeId={figureSizeId}
         dpi={dpi}
         sizeOptions={sizeOptions}
+        size={size}
         dpiOptions={dpiOptions}
-        onPresetVersion={setPresetVersion}
-        onFigureSizeId={setFigureSizeId}
+        onPresetVersion={applyPresetVersion}
+        onFigureSizeId={(id) => applyFigureSize(id)}
         onDpi={setDpi}
       />
       <PosterOutcome
@@ -395,8 +450,10 @@ function YRangeSection(props: {
   bounds: Bounds
   defaults: PosterFormDefaults
   onBound: (key: keyof Bounds, value: string) => void
+  errors: YBoundErrors
+  inputs: Record<YBound, HTMLInputElement | null>
 }): React.JSX.Element {
-  const { bounds, defaults, onBound } = props
+  const { bounds, defaults, onBound, errors, inputs } = props
   return (
     <section className="dialog__section">
       <h3 className="panel__title">Y軸の範囲 (G)</h3>
@@ -413,8 +470,18 @@ function YRangeSection(props: {
             type="number"
             step="0.001"
             value={bounds.yMin}
+            ref={(input) => {
+              inputs.yMin = input
+            }}
+            aria-invalid={errors.yMin !== undefined}
+            aria-describedby={errors.yMin === undefined ? undefined : 'poster-y-min-error'}
             onChange={(event) => onBound('yMin', event.target.value)}
           />
+          {errors.yMin === undefined ? null : (
+            <span className="field__error" id="poster-y-min-error" role="alert">
+              {errors.yMin}
+            </span>
+          )}
         </label>
         <label className="field">
           <span className="field__label">上限 (G)</span>
@@ -423,8 +490,18 @@ function YRangeSection(props: {
             type="number"
             step="0.001"
             value={bounds.yMax}
+            ref={(input) => {
+              inputs.yMax = input
+            }}
+            aria-invalid={errors.yMax !== undefined}
+            aria-describedby={errors.yMax === undefined ? undefined : 'poster-y-max-error'}
             onChange={(event) => onBound('yMax', event.target.value)}
           />
+          {errors.yMax === undefined ? null : (
+            <span className="field__error" id="poster-y-max-error" role="alert">
+              {errors.yMax}
+            </span>
+          )}
         </label>
       </div>
     </section>
@@ -500,6 +577,7 @@ function FormatSection(props: {
   figureSizeId: PosterFigureSizeId
   dpi: number
   sizeOptions: readonly PosterFigureSizeOption[]
+  size: PosterFigureSizeOption | undefined
   dpiOptions: ReturnType<typeof posterDpiOptions>
   onPresetVersion: (version: PosterPresetVersion) => void
   onFigureSizeId: (id: PosterFigureSizeId) => void
@@ -547,11 +625,19 @@ function FormatSection(props: {
             value={String(props.dpi)}
             onChange={(event) => props.onDpi(Number(event.target.value))}
           >
-            {props.dpiOptions.map((option) => (
-              <option key={option.dpi} value={option.dpi}>
-                {option.dpi} dpi — {option.label.ja}
-              </option>
-            ))}
+            {props.dpiOptions.map((option) => {
+              const exceeds =
+                props.size === undefined
+                  ? false
+                  : props.size.widthInches * props.size.heightInches * option.dpi * option.dpi >
+                    MAX_RASTER_PIXELS
+              return (
+                <option key={option.dpi} value={option.dpi} disabled={exceeds}>
+                  {option.dpi} dpi — {option.label.ja}
+                  {exceeds ? ` (ラスター上限 ${MAX_RASTER_PIXELS.toLocaleString()} px 超過)` : ''}
+                </option>
+              )
+            })}
           </select>
         </label>
       </div>

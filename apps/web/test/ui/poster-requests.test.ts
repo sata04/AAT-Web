@@ -128,7 +128,7 @@ interface Recorded {
 const recorded: Recorded[] = []
 const realFetch = globalThis.fetch
 
-function install(responder: (request: Recorded) => Response): void {
+function install(responder: (request: Recorded) => Response | Promise<Response>): void {
   globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = new URL(String(input), 'https://aat.test')
     const request: Recorded = { method: (init?.method ?? 'GET').toUpperCase(), path: url.pathname }
@@ -155,6 +155,32 @@ afterEach(() => {
 })
 
 describe('the automatic poster', () => {
+  it.each(['queued', 'rendering'] as const)(
+    'publishes a retryable terminal failure when %s exceeds the deadline',
+    async (status) => {
+      vi.useFakeTimers()
+      install((request) =>
+        request.method === 'POST'
+          ? json({ poster: figure(status) }, 200)
+          : json({ posters: [figure(status)] }),
+      )
+      const statuses: PosterStatus[] = []
+      const pending = generateAutoPoster(context(), (next) => statuses.push(next))
+      await vi.advanceTimersByTimeAsync(120_000)
+      const outcome = await pending
+      expect(outcome).toMatchObject({ ok: false, kind: 'cloud', retryable: true })
+      expect(statuses.at(-1)).toEqual({
+        kind: 'failed',
+        posterId: POSTER_ID,
+        retryable: true,
+        message: outcome.ok || outcome.kind !== 'cloud' ? '' : outcome.message,
+      })
+      const calls = recorded.length
+      await vi.advanceTimersByTimeAsync(10_000)
+      expect(recorded).toHaveLength(calls)
+    },
+  )
+
   it('makes exactly one request when the Worker answers with a finished figure', async () => {
     install(() => json({ poster: figure('ready') }, 201))
     const statuses: PosterStatus[] = []
@@ -241,7 +267,7 @@ describe('the automatic poster', () => {
     // rendering: the newer request aborts this one and reports its own state immediately. A late
     // update from here would describe a figure nobody is waiting for any more.
     controller.abort()
-    await vi.advanceTimersByTimeAsync(30_000)
+    await vi.advanceTimersByTimeAsync(120_000)
     await pending
 
     expect(statuses).toHaveLength(beforeAbort)
@@ -262,11 +288,132 @@ describe('the automatic poster', () => {
 
 describe('retrying', () => {
   it('uses the retry endpoint when the failed figure has an id', async () => {
-    install(() => json({ poster: figure('ready') }, 201))
+    install((request) =>
+      request.method === 'GET'
+        ? json({ posters: [figure('failed')] })
+        : json({ poster: figure('ready') }, 201),
+    )
     const outcome = await retryAutoPoster(context(), POSTER_ID, () => {})
 
     expect(outcome.ok).toBe(true)
-    expect(trace()).toEqual([`POST /api/v1/posters/${POSTER_ID}/retry`])
+    expect(trace()).toEqual([
+      `GET /api/v1/revisions/${REVISION_ID}/posters`,
+      `POST /api/v1/posters/${POSTER_ID}/retry`,
+    ])
+  })
+
+  it('routes a still-rendering figure through the idempotent endpoint, not the retry it would reject', async () => {
+    vi.useFakeTimers()
+    let listings = 0
+    install((request) => {
+      if (request.method !== 'GET') return json({ poster: figure('rendering') }, 200)
+      listings += 1
+      return json({ posters: [figure(listings >= 3 ? 'ready' : 'rendering')] })
+    })
+
+    const pending = retryAutoPoster(context(), POSTER_ID, () => {})
+    await vi.advanceTimersByTimeAsync(10_000)
+    const outcome = await pending
+
+    expect(outcome.ok).toBe(true)
+    // A `rendering` row rejects POST /retry with POSTER_BUSY. The idempotent
+    // endpoint answers a live render with its own row (created: false — no new
+    // render), and it is the only call that takes over a stale render when the
+    // renderer died in flight, so observing without it could never recover.
+    expect(trace().slice(0, 2)).toEqual([
+      `GET /api/v1/revisions/${REVISION_ID}/posters`,
+      `POST /api/v1/revisions/${REVISION_ID}/poster/auto`,
+    ])
+    expect(trace().every((entry) => !entry.includes('/retry'))).toBe(true)
+  })
+
+  it('keeps observing the row when the takeover POST outlives the gateway deadline', async () => {
+    vi.useFakeTimers()
+    let listings = 0
+    install((request) => {
+      if (request.method === 'POST') return Promise.reject(new TypeError('network'))
+      listings += 1
+      return json({ posters: [figure(listings >= 3 ? 'ready' : 'rendering')] })
+    })
+
+    const pending = retryAutoPoster(context(), POSTER_ID, () => {})
+    await vi.advanceTimersByTimeAsync(60_000)
+    const outcome = await pending
+
+    expect(outcome.ok).toBe(true)
+    // A takeover render runs inline on the Worker for far longer than the
+    // gateway's deadline. The listing is polled while the bounded re-claim
+    // waits, so the render finishing inside the window settles the lane with
+    // no second POST at all.
+    expect(trace().filter((entry) => entry.startsWith('POST'))).toHaveLength(1)
+    expect(trace().every((entry) => !entry.includes('/retry'))).toBe(true)
+  })
+
+  it('reclaims a stale row when connectivity returns after a POST that never arrived', async () => {
+    vi.useFakeTimers()
+    let posts = 0
+    install((request) => {
+      if (request.method === 'GET') return json({ posters: [figure('rendering')] })
+      posts += 1
+      if (posts === 1) return Promise.reject(new TypeError('network'))
+      return json({ poster: figure('ready') })
+    })
+
+    const pending = retryAutoPoster(context(), POSTER_ID, () => {})
+    await vi.advanceTimersByTimeAsync(60_000)
+    const outcome = await pending
+
+    expect(outcome.ok).toBe(true)
+    // The first POST never reached the Worker; the delayed re-claim takes the
+    // row over and settles it without another polling cycle.
+    expect(posts).toBe(2)
+  })
+
+  it('keeps the poster id on a failed takeover so the next retry uses the retry endpoint', async () => {
+    install((request) =>
+      request.method === 'GET'
+        ? json({ posters: [figure('rendering')] })
+        : json({ error: { code: 'INTERNAL', message: 'renderer failed' } }, 500),
+    )
+    const statuses: PosterStatus[] = []
+
+    const outcome = await retryAutoPoster(context(), POSTER_ID, (status) => statuses.push(status))
+
+    expect(outcome.ok).toBe(false)
+    const last = statuses.at(-1)
+    // Without the id the next retry would hit the idempotent endpoint, which
+    // answers a `failed` row without re-rendering it.
+    expect(last?.kind === 'failed' && last.posterId).toBe(POSTER_ID)
+  })
+
+  it('publishes nothing and sends no retry when aborted while reading the figure status', async () => {
+    const controller = new AbortController()
+    let release: (() => void) | undefined
+    install((request) => {
+      if (request.method !== 'GET') return json({ poster: figure('ready') }, 200)
+      return new Promise<Response>((resolve) => {
+        release = () => resolve(json({ posters: [figure('failed')] }))
+      })
+    })
+    const statuses: PosterStatus[] = []
+
+    const pending = retryAutoPoster(
+      context(),
+      POSTER_ID,
+      (status) => statuses.push(status),
+      controller.signal,
+    )
+    await vi.waitFor(() => expect(recorded).toHaveLength(1))
+
+    // A newer request owns the lane by now — its own work must not be
+    // overwritten by this one's late `queued` or by a retry POST it asked for.
+    controller.abort()
+    release?.()
+    const outcome = await pending
+
+    expect(outcome).toMatchObject({ ok: false, kind: 'cloud' })
+    expect(statuses).toEqual([])
+    expect(recorded.filter((request) => request.method === 'POST')).toHaveLength(0)
   })
 
   it('falls back to the idempotent endpoint when no figure was ever created', async () => {

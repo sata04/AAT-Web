@@ -51,6 +51,14 @@ const POLL_INTERVAL_MS = 2_500
  */
 const POLL_DEADLINE_MS = 120_000
 
+/*
+ * How long after a timed-out takeover POST to try reclaiming the row once
+ * more. Well past the gateway's own deadline, so the first request is dead
+ * either way, and early enough that a fresh inline render still finishes
+ * before the polling deadline.
+ */
+const TAKEOVER_RETRY_DELAY_MS = 30_000
+
 /** The identity a poster is filed under: which revision, and which experiment it belongs to. */
 export interface PosterContext {
   revisionId: string
@@ -130,7 +138,7 @@ export async function generateAutoPoster(
   } catch (error) {
     return { ok: false, kind: 'spec', advice: describePosterSpecError(error) }
   }
-  onStatus({ kind: 'queued' })
+  if (!isAborted(signal)) onStatus({ kind: 'queued' })
   return settleRequest(context, requestAutoPoster(context.revisionId, spec), onStatus, signal)
 }
 
@@ -156,8 +164,68 @@ export async function retryAutoPoster(
   } catch (error) {
     return { ok: false, kind: 'spec', advice: describePosterSpecError(error) }
   }
-  onStatus({ kind: 'queued', posterId })
-  return settleRequest(context, retryPoster(posterId, spec), onStatus, signal)
+
+  // A lane can carry an id without a failed server row: the client's polling
+  // deadline is not a server state, so a still-rendering figure would reject a
+  // POST to the retry endpoint with POSTER_BUSY. Read the real status first —
+  // only a genuinely failed/queued figure goes through retry.
+  const listed = await listPosters(context.revisionId)
+  // The listing is the first await since this retry was requested: a newer
+  // request aborting this one already reported `queued` (or better), so
+  // publishing `queued` or POSTing a retry now would overwrite its result.
+  if (isAborted(signal))
+    return { ok: false, kind: 'cloud', message: 'request was superseded', retryable: true }
+  if (listed.ok) {
+    const found = listed.value.posters.find((poster) => poster.posterId === posterId)
+    if (found !== undefined && found.status === 'ready') {
+      const pending: Promise<CloudOutcome<{ poster: PosterFigure }>> = Promise.resolve({
+        ok: true,
+        value: { poster: found },
+      })
+      return settleRequest(context, pending, onStatus, signal)
+    }
+    if (found !== undefined && found.status === 'rendering') {
+      // A live render answers the idempotent endpoint with its own row and
+      // renders nothing — the same outcome as resuming observation. But a
+      // renderer that died in flight leaves the row `rendering` forever, and
+      // this POST is the only call that takes over a stale render; merely
+      // observing it would loop on the deadline with no way to recover.
+      if (!isAborted(signal)) onStatus({ kind: 'queued', posterId })
+      const pending = requestAutoPoster(context.revisionId, spec).then(async (outcome) => {
+        // The gateway deadline is far shorter than an inline takeover render,
+        // and `unavailable` cannot tell a timed-out claim apart from a POST
+        // that never reached the Worker. POST /auto is idempotent against a
+        // live render — it returns the in-flight row and renders nothing — so
+        // one delayed re-claim is safe in either case: it rescues a stale row
+        // the first attempt never reached, and is a no-op against a render
+        // the first attempt started.
+        if (outcome.ok || outcome.kind !== 'unavailable') return outcome
+        // Keep watching the row while the re-claim waits: a takeover that did
+        // reach the Worker publishes `ready` (or `failed`) well inside this
+        // window, and a listing that settles makes the second POST pointless.
+        let figure = found
+        const reclaimAt = Date.now() + TAKEOVER_RETRY_DELAY_MS
+        while (!isAborted(signal) && Date.now() < reclaimAt) {
+          await delay(POLL_INTERVAL_MS, signal)
+          if (isAborted(signal)) break
+          const listedAgain = await listPosters(context.revisionId)
+          if (!listedAgain.ok) continue
+          const seen = listedAgain.value.posters.find((poster) => poster.posterId === posterId)
+          if (seen === undefined) continue
+          figure = seen
+          if (seen.status === 'ready' || seen.status === 'failed')
+            return { ok: true as const, value: { poster: seen } }
+        }
+        if (isAborted(signal)) return { ok: true as const, value: { poster: figure } }
+        const retried = await requestAutoPoster(context.revisionId, spec)
+        return retried.ok ? retried : { ok: true as const, value: { poster: figure } }
+      })
+      return settleRequest(context, pending, onStatus, signal, posterId)
+    }
+  }
+
+  if (!isAborted(signal)) onStatus({ kind: 'queued', posterId })
+  return settleRequest(context, retryPoster(posterId, spec), onStatus, signal, posterId)
 }
 
 /**
@@ -178,7 +246,7 @@ export async function generateCustomPoster(
   } catch (error) {
     return { ok: false, kind: 'spec', advice: describePosterSpecError(error) }
   }
-  onStatus({ kind: 'queued' })
+  if (!isAborted(signal)) onStatus({ kind: 'queued' })
   return settleRequest(context, createCustomPoster(context.revisionId, spec), onStatus, signal)
 }
 
@@ -191,6 +259,7 @@ async function settleRequest(
   pending: Promise<CloudOutcome<{ poster: PosterFigure }>>,
   onStatus: (status: PosterStatus) => void,
   signal: AbortSignal | undefined,
+  knownPosterId?: string,
 ): Promise<PosterRequestOutcome> {
   // An abandoned request must not keep writing to the lane. A newer request aborts the older one
   // and immediately reports `queued`; without this guard the older one's next update would land
@@ -209,23 +278,33 @@ async function settleRequest(
       // everything else, and `POSTER_BUSY` is backpressure rather than a fault.
       retryable: outcome.kind === 'unavailable' || outcome.retryable,
     }
-    report({ kind: 'failed', message: failure.message, retryable: failure.retryable })
+    // The lane keeps whichever id it was tracking: losing it would send the
+    // next retry to the idempotent endpoint, which answers a `failed` row
+    // without re-rendering it.
+    report({
+      kind: 'failed',
+      message: failure.message,
+      retryable: failure.retryable,
+      ...(knownPosterId !== undefined ? { posterId: knownPosterId } : {}),
+    })
     return failure
   }
 
   const figure = await pollUntilSettled(context.revisionId, outcome.value.poster, report, signal)
-  report(statusFor(figure))
+  if (figure.status === 'ready' || figure.status === 'failed') report(statusFor(figure))
 
   if (figure.status === 'ready') return { ok: true, poster: figure }
   if (figure.status === 'failed') {
     return { ok: false, kind: 'cloud', message: failureMessage(figure), retryable: true }
   }
-  return {
-    ok: false,
-    kind: 'cloud',
+  const failure = {
+    ok: false as const,
+    kind: 'cloud' as const,
     message: 'ポスターの生成が時間内に終わりませんでした。しばらくしてから再試行してください。',
     retryable: true,
   }
+  report({ kind: 'failed', message: failure.message, retryable: true, posterId: figure.posterId })
+  return failure
 }
 
 /**

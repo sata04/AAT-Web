@@ -84,6 +84,7 @@ export {
   FIGURE_DIMENSION_MIN_INCHES,
   MAX_PAYLOAD_BYTES,
   MAX_POINTS,
+  MAX_RASTER_PIXELS,
   PosterKindSchema,
   PosterPlotSpecSchema,
   PosterPresetVersionSchema,

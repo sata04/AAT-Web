@@ -60,6 +60,14 @@ export const FIGURE_DIMENSION_MAX_INCHES = 20
 export const DPI_MIN = 72
 export const DPI_MAX = 600
 
+/**
+ * Admission budget for the 256 MiB renderer, independent of the frozen style.
+ * 10M pixels use ~38 MiB per RGBA buffer; allowing three buffers/copies uses
+ * ~115 MiB, leaving ~141 MiB for Python, Matplotlib, decoded data and PNG work.
+ * Keep this identical to poster_renderer.limits.MAX_RASTER_PIXELS.
+ */
+export const MAX_RASTER_PIXELS = 10_000_000
+
 export const TITLE_MAX_LENGTH = 120
 
 // ---------------------------------------------------------------------------------------------
@@ -206,6 +214,13 @@ function validateSeriesEntry(
     try {
       decodedTime = decodeSeries(time)
     } catch {
+      // Encoded character count alone cannot distinguish 7, 8 and 9 bytes.
+      // decodeSeries checks both Float64 alignment and the declared byte count.
+      ctx.addIssue({
+        code: 'custom',
+        message: `data.${key}.time must decode to exactly length * 8 bytes`,
+        path: ['data', key, 'time'],
+      })
       decodedTime = new Float64Array(0)
     }
     for (let index = 0; index < decodedTime.length; index++) {
@@ -226,6 +241,11 @@ function validateSeriesEntry(
     try {
       decodedValues = decodeSeries(values)
     } catch {
+      ctx.addIssue({
+        code: 'custom',
+        message: `data.${key}.values must decode to exactly length * 8 bytes`,
+        path: ['data', key, 'values'],
+      })
       decodedValues = new Float64Array(0)
     }
     for (let index = 0; index < decodedValues.length; index++) {
@@ -246,6 +266,13 @@ function validateSeriesEntry(
 }
 
 export const PosterPlotSpecSchema = PosterPlotSpecShape.superRefine((value, ctx) => {
+  if (value.figureWidth * value.figureHeight * value.dpi * value.dpi > MAX_RASTER_PIXELS) {
+    ctx.addIssue({
+      code: 'custom',
+      message: `figureWidth * figureHeight * dpi² must not exceed ${MAX_RASTER_PIXELS} pixels`,
+      path: ['dpi'],
+    })
+  }
   if (value.xMin >= value.xMax) {
     ctx.addIssue({ code: 'custom', message: 'xMin must be less than xMax', path: ['xMin'] })
   }

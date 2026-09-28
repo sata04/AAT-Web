@@ -1,5 +1,11 @@
 import { describe, expect, it } from 'vitest'
-import { MAX_PAYLOAD_BYTES, MAX_POINTS, safeParsePosterPlotSpec, specHash } from '../src/spec.ts'
+import {
+  MAX_PAYLOAD_BYTES,
+  MAX_POINTS,
+  MAX_RASTER_PIXELS,
+  safeParsePosterPlotSpec,
+  specHash,
+} from '../src/spec.ts'
 import { encodeSeries } from '../src/wire.ts'
 import { buildSeriesData, validSpecInput } from './helpers.ts'
 
@@ -60,6 +66,36 @@ describe('PosterPlotSpecSchema: valid specs', () => {
 })
 
 describe('PosterPlotSpecSchema: rejection rules', () => {
+  it.each(['time', 'values'] as const)('rejects wrong decoded byte lengths in %s', (field) => {
+    for (const data of ['AAAAAAAAAAAA', 'AAAAAAAAAA==']) {
+      const inner = { ...buildSeriesData([0], [1]), [field]: { data, length: 1 } }
+      const result = safeParsePosterPlotSpec(validSpecInput({ series: 'inner', data: { inner } }))
+      expect(result.success).toBe(false)
+      if (!result.success) {
+        expect(result.error.issues).toContainEqual(
+          expect.objectContaining({ path: ['data', 'inner', field] }),
+        )
+      }
+    }
+  })
+
+  it.each([
+    { figureWidth: 20, figureHeight: 20, dpi: 600 },
+    { figureWidth: 10, figureHeight: 4.001, dpi: 500 },
+  ])('rejects a combined raster over budget: %j', (geometry) => {
+    const result = safeParsePosterPlotSpec(validSpecInput(geometry))
+    expect(result.success).toBe(false)
+    if (!result.success)
+      expect(result.error.issues).toContainEqual(expect.objectContaining({ path: ['dpi'] }))
+  })
+
+  it('accepts a large raster exactly at the combined budget', () => {
+    expect(10 * 4 * 500 * 500).toBe(MAX_RASTER_PIXELS)
+    expect(
+      safeParsePosterPlotSpec(validSpecInput({ figureWidth: 10, figureHeight: 4, dpi: 500 })).success,
+    ).toBe(true)
+  })
+
   it('rejects mismatched array lengths within a series', () => {
     const input = validSpecInput({
       series: 'inner',
