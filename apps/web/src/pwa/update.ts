@@ -38,6 +38,8 @@ export interface PwaCallbacks {
   onUpdateAvailable: (applyUpdate: () => void) => void
   /** Everything needed to work without a network is cached. */
   onOfflineReady: () => void
+  /** Another client activated an update; this tab must choose when to reload. */
+  onExternalUpdate: () => void
 }
 
 /**
@@ -55,6 +57,9 @@ export function setupServiceWorker(callbacks: PwaCallbacks): () => void {
   let cancelled = false
   let interval: ReturnType<typeof setInterval> | null = null
   let updateRequested = false
+  let controller = navigator.serviceWorker.controller
+  let reloading = false
+  const removeListeners: (() => void)[] = []
 
   /**
    * Reload once the new worker has taken over.
@@ -64,12 +69,24 @@ export function setupServiceWorker(callbacks: PwaCallbacks): () => void {
    * user is working in.
    */
   const onControllerChange = () => {
-    if (!updateRequested) return
-    window.location.reload()
+    if (cancelled) return
+    const next = navigator.serviceWorker.controller
+    if (updateRequested) {
+      if (!reloading) {
+        reloading = true
+        window.location.reload()
+      }
+    } else if (controller !== null && next !== null && next !== controller) {
+      // Activation is origin-wide. Old lazy chunks may no longer be cached,
+      // but an unsolicited reload would destroy this tab's local workspace.
+      callbacks.onExternalUpdate()
+    }
+    controller = next
   }
   navigator.serviceWorker.addEventListener('controllerchange', onControllerChange)
 
   const applyUpdate = (registration: ServiceWorkerRegistration) => () => {
+    if (cancelled) return
     const waiting = registration.waiting
     if (waiting === null) {
       window.location.reload()
@@ -90,10 +107,9 @@ export function setupServiceWorker(callbacks: PwaCallbacks): () => void {
         callbacks.onUpdateAvailable(applyUpdate(registration))
       }
 
-      registration.addEventListener('updatefound', () => {
-        const installing = registration.installing
-        if (installing === null) return
-        installing.addEventListener('statechange', () => {
+      const watchInstalling = (installing: ServiceWorker) => {
+        const onStateChange = () => {
+          if (cancelled) return
           if (installing.state !== 'installed') return
           if (navigator.serviceWorker.controller === null) {
             // No previous controller: this is the first install, so the app is
@@ -102,12 +118,30 @@ export function setupServiceWorker(callbacks: PwaCallbacks): () => void {
             return
           }
           callbacks.onUpdateAvailable(applyUpdate(registration))
-        })
-      })
+        }
+        installing.addEventListener('statechange', onStateChange)
+        removeListeners.push(() => installing.removeEventListener('statechange', onStateChange))
+        // The install may already be further along than 'installing' by the
+        // time the listener attaches — check the current state once.
+        onStateChange()
+      }
+
+      // An install already in flight from a previous page load fires no
+      // `updatefound` on this registration — watch it directly.
+      if (registration.installing !== null) watchInstalling(registration.installing)
+
+      const onUpdateFound = () => {
+        if (cancelled) return
+        const installing = registration.installing
+        if (installing === null) return
+        watchInstalling(installing)
+      }
+      registration.addEventListener('updatefound', onUpdateFound)
+      removeListeners.push(() => registration.removeEventListener('updatefound', onUpdateFound))
 
       interval = setInterval(() => {
         // Only worth asking when there is a network to ask over.
-        if (navigator.onLine) void registration.update()
+        if (navigator.onLine) void registration.update().catch(() => undefined)
       }, UPDATE_CHECK_INTERVAL_MS)
     })
     .catch(() => {
@@ -117,6 +151,7 @@ export function setupServiceWorker(callbacks: PwaCallbacks): () => void {
   return () => {
     cancelled = true
     if (interval !== null) clearInterval(interval)
+    for (const remove of removeListeners) remove()
     navigator.serviceWorker.removeEventListener('controllerchange', onControllerChange)
   }
 }

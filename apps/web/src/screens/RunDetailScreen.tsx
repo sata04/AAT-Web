@@ -51,6 +51,7 @@ import type { SessionStatus } from '../session/SessionProvider.tsx'
 import { useSession } from '../session/SessionProvider.tsx'
 import {
   applySavedMemo,
+  type ChildResource,
   getSourceFor,
   type LoadState,
   openSnapshotFor,
@@ -64,6 +65,25 @@ import {
 } from './run-detail-data.ts'
 
 type Notify = (tone: NoticeItem['tone'], text: string) => void
+
+/** A child resource that failed keeps its last value; the error line offers a retry. */
+function ChildResourceError<T>({
+  state,
+  onRetry,
+}: {
+  state: ChildResource<T>
+  onRetry: () => void
+}): React.JSX.Element | null {
+  if (state.kind !== 'error') return null
+  return (
+    <p className="notice notice--error" role="status">
+      <span className="notice__body">{state.message}</span>
+      <button type="button" className="button button--flat" onClick={onRetry}>
+        再試行
+      </button>
+    </p>
+  )
+}
 
 /** The signed-out / loading / unavailable gate. */
 function SignInNotice({ status }: { status: SessionStatus }): React.JSX.Element {
@@ -178,10 +198,14 @@ function RunInfoSection({ run }: { run: RunSummary }): React.JSX.Element {
 function RevisionsSection({
   revisions,
   selectedRevisionId,
+  state,
+  onRetry,
   onSelect,
 }: {
   revisions: readonly RevisionSummary[]
   selectedRevisionId: string | null
+  state: ChildResource<readonly RevisionSummary[]>
+  onRetry: () => void
   onSelect: (id: string) => void
 }): React.JSX.Element {
   return (
@@ -190,7 +214,8 @@ function RevisionsSection({
         <h2 className="panel__title">解析リビジョン</h2>
         <span className="panel__hint">{revisions.length} 件</span>
       </div>
-      {revisions.length === 0 ? (
+      <ChildResourceError state={state} onRetry={onRetry} />
+      {revisions.length === 0 && state.kind === 'error' ? null : revisions.length === 0 ? (
         <p className="panel__hint">
           この実験にはまだ解析リビジョンがありません。解析画面でこのファイルを解析すると記録されます。
         </p>
@@ -335,9 +360,13 @@ function ProvenanceTable({ revision }: { revision: RevisionSummary }): React.JSX
 function MetricsSection({
   revision,
   metrics,
+  state,
+  onRetry,
 }: {
   revision: RevisionSummary
   metrics: RunMetrics | null
+  state: ChildResource<RunMetrics | null>
+  onRetry: () => void
 }): React.JSX.Element {
   const gQuality = metrics === null ? null : summariseGQuality(metrics.gQuality)
   return (
@@ -345,16 +374,25 @@ function MetricsSection({
       <div className="panel__header">
         <h2 className="panel__title">r{revision.revisionNumber} の指標</h2>
         <span className="panel__hint">
-          {metrics === null ? '読み込み中' : `警告 ${metrics.warningCount} 件`}
+          {metrics === null
+            ? state.kind === 'error'
+              ? '取得できませんでした'
+              : '読み込み中'
+            : `警告 ${metrics.warningCount} 件`}
         </span>
       </div>
-      <MetricsTable metrics={metrics} />
-      <p className="panel__hint">
-        解析ウィンドウ {formatSeconds(metrics?.windowSize)} 秒 ・{' '}
-        {gQuality === null
-          ? 'G-quality: 未計算'
-          : `G-quality: ${gQuality.windowCount} 窓 (${formatSeconds(gQuality.smallestWindow)}–${formatSeconds(gQuality.largestWindow)} s)`}
-      </p>
+      <ChildResourceError state={state} onRetry={onRetry} />
+      {metrics === null && state.kind === 'error' ? null : (
+        <>
+          <MetricsTable metrics={metrics} />
+          <p className="panel__hint">
+            解析ウィンドウ {formatSeconds(metrics?.windowSize)} 秒 ・{' '}
+            {gQuality === null
+              ? 'G-quality: 未計算'
+              : `G-quality: ${gQuality.windowCount} 窓 (${formatSeconds(gQuality.smallestWindow)}–${formatSeconds(gQuality.largestWindow)} s)`}
+          </p>
+        </>
+      )}
       <ProvenanceTable revision={revision} />
     </section>
   )
@@ -553,6 +591,8 @@ function CustomPosterList({
 function PostersSection({
   posters,
   autoPosterStatus,
+  state,
+  onRetryLoad,
   runCode,
   replayReady,
   busy,
@@ -562,6 +602,8 @@ function PostersSection({
 }: {
   posters: readonly PosterFigure[]
   autoPosterStatus: PosterStatus
+  state: ChildResource<readonly PosterFigure[]>
+  onRetryLoad: () => void
   runCode: string
   replayReady: boolean
   busy: boolean
@@ -575,32 +617,38 @@ function PostersSection({
     <section className="panel panel--framed" aria-label="ポスター図">
       <div className="panel__header">
         <h2 className="panel__title">ポスター図</h2>
-        <span className="panel__hint">{posters.length} 件</span>
+        <span className="panel__hint">
+          {state.kind === 'error' && posters.length === 0 ? '取得できませんでした' : `${posters.length} 件`}
+        </span>
       </div>
+      <ChildResourceError state={state} onRetry={onRetryLoad} />
+      {state.kind === 'error' && posters.length === 0 ? null : (
+        <>
+          <h3 className="panel__title">自動生成</h3>
+          <RunPosterImage
+            poster={autoPoster}
+            runCode={runCode}
+            size="full"
+            absentLabel="このリビジョンの自動ポスター図はまだ生成されていません。"
+          />
+          <AutoPosterControls
+            autoPoster={autoPoster}
+            replayReady={replayReady}
+            busy={busy}
+            canGeneratePoster={canGeneratePoster}
+            onGenerate={onGenerate}
+            onRetry={onRetry}
+          />
+          {autoPosterStatus.kind === 'queued' || autoPosterStatus.kind === 'rendering' ? (
+            <p className="panel__hint" role="status">
+              {posterLabel(autoPosterStatus).text}
+            </p>
+          ) : null}
 
-      <h3 className="panel__title">自動生成</h3>
-      <RunPosterImage
-        poster={autoPoster}
-        runCode={runCode}
-        size="full"
-        absentLabel="このリビジョンの自動ポスター図はまだ生成されていません。"
-      />
-      <AutoPosterControls
-        autoPoster={autoPoster}
-        replayReady={replayReady}
-        busy={busy}
-        canGeneratePoster={canGeneratePoster}
-        onGenerate={onGenerate}
-        onRetry={onRetry}
-      />
-      {autoPosterStatus.kind === 'queued' || autoPosterStatus.kind === 'rendering' ? (
-        <p className="panel__hint" role="status">
-          {posterLabel(autoPosterStatus).text}
-        </p>
-      ) : null}
-
-      <h3 className="panel__title">カスタム</h3>
-      <CustomPosterList posters={customPosters} runCode={runCode} />
+          <h3 className="panel__title">カスタム</h3>
+          <CustomPosterList posters={customPosters} runCode={runCode} />
+        </>
+      )}
     </section>
   )
 }
@@ -724,10 +772,16 @@ export function RunDetailScreen(): React.JSX.Element {
     run,
     setRun,
     revisions,
+    revisionsState,
+    retryRevisions,
     selectedRevisionId,
     setSelectedRevisionId,
     metrics,
+    metricsState,
+    retryMetrics,
     posters,
+    postersState,
+    retryPosters,
     setPosters,
     replay,
     setReplay,
@@ -805,10 +859,19 @@ export function RunDetailScreen(): React.JSX.Element {
       <RevisionsSection
         revisions={revisions}
         selectedRevisionId={selectedRevisionId}
+        state={revisionsState}
+        onRetry={retryRevisions}
         onSelect={setSelectedRevisionId}
       />
 
-      {selectedRevision === null ? null : <MetricsSection revision={selectedRevision} metrics={metrics} />}
+      {selectedRevision === null ? null : (
+        <MetricsSection
+          revision={selectedRevision}
+          metrics={metrics}
+          state={metricsState}
+          onRetry={retryMetrics}
+        />
+      )}
 
       <ReplaySection
         revision={selectedRevision}
@@ -824,6 +887,8 @@ export function RunDetailScreen(): React.JSX.Element {
 
       <PostersSection
         posters={posters}
+        state={postersState}
+        onRetryLoad={retryPosters}
         autoPosterStatus={autoPosterStatus}
         runCode={current.runCode}
         replayReady={replay.kind === 'ready'}

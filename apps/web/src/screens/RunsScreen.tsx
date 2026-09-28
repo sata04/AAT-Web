@@ -38,6 +38,7 @@
 import { hasCapability } from '@aat/shared'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { type CloudOutcome, listWorkspaceRuns } from '../cloud/gateway.ts'
+import { useMountedRef } from '../components/hooks.ts'
 import { RunCard } from '../components/RunCard.tsx'
 import { ScreenFrame } from '../components/ScreenFrame.tsx'
 import { Link } from '../router/Router.tsx'
@@ -98,13 +99,8 @@ export function RunsScreen(): React.JSX.Element {
   const [error, setError] = useState<string | null>(null)
   const [facts, setFacts] = useState<ReadonlyMap<string, RunFactsState>>(new Map())
 
-  const mounted = useRef(true)
-  useEffect(
-    () => () => {
-      mounted.current = false
-    },
-    [],
-  )
+  const mounted = useMountedRef()
+  const requestGeneration = useRef(0)
 
   /**
    * One loader for the screen's lifetime.
@@ -143,6 +139,7 @@ export function RunsScreen(): React.JSX.Element {
   /** Load one page. `reset` starts a new query; otherwise it continues the current one. */
   const loadPage = useCallback(
     async (activeScope: RunScope, activeFilter: RunFilter, from: string | null, reset: boolean) => {
+      const generation = ++requestGeneration.current
       setLoading(true)
       setError(null)
       const query = serverQueryFor(activeFilter, from)
@@ -151,7 +148,7 @@ export function RunsScreen(): React.JSX.Element {
       // owner is left null rather than asking the server to repeat what the scope already says.
       const outcome: CloudOutcome<{ runs: readonly GalleryRun[]; nextCursor: string | null }> =
         activeScope === 'team' ? await listWorkspaceRuns(query) : await listOwnRunsAsGallery(query)
-      if (!mounted.current) return
+      if (!mounted.current || generation !== requestGeneration.current) return
       setLoading(false)
       if (!outcome.ok) {
         setError(outcome.message)
@@ -166,7 +163,7 @@ export function RunsScreen(): React.JSX.Element {
       setCursor(outcome.value.nextCursor)
       setExhausted(outcome.value.nextCursor === null)
     },
-    [],
+    [mounted],
   )
 
   useEffect(() => {
@@ -175,6 +172,10 @@ export function RunsScreen(): React.JSX.Element {
     setCursor(null)
     setExhausted(false)
     void loadPage(scope, filter, null, true)
+    // Query changes and StrictMode cleanup invalidate both first pages and pagination.
+    return () => {
+      requestGeneration.current += 1
+    }
   }, [session.status, scope, filter, loadPage])
 
   const visible = useMemo(() => presentRuns(runs, filter), [runs, filter])

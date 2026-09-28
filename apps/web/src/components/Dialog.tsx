@@ -37,9 +37,19 @@ export function initialFocusTarget(panel: HTMLElement | null): HTMLElement | nul
  */
 const openDialogPanels = new Set<HTMLElement>()
 
+/**
+ * A panel inside a `hidden`/`inert` subtree (the kept-alive analyzer host on
+ * another route) cannot take keyboard ownership: its target would be unfocusable
+ * and its Tab trap would deadlock navigation on the visible screen.
+ */
+export function panelSuspended(panel: HTMLElement): boolean {
+  return panel.closest('[inert],[hidden]') !== null
+}
+
 function topmostDialogPanel(): HTMLElement | null {
   let topmost: HTMLElement | null = null
   for (const panel of openDialogPanels) {
+    if (panelSuspended(panel)) continue
     const follows =
       topmost === null || (topmost.compareDocumentPosition(panel) & Node.DOCUMENT_POSITION_FOLLOWING) !== 0
     if (follows) topmost = panel
@@ -109,6 +119,7 @@ export function Dialog(props: DialogProps): React.JSX.Element {
   // Cancelling the drop only works if `dragover` was cancelled first.
   useEffect(() => {
     const swallowFileDrag = (event: DragEvent) => {
+      if (panelRef.current === null || panelSuspended(panelRef.current)) return
       if (event.dataTransfer?.types.includes('Files') === true) event.preventDefault()
     }
     document.addEventListener('dragover', swallowFileDrag)

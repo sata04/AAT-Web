@@ -33,7 +33,7 @@ export interface OnboardingStageProps {
    * drove, so dismissing a re-shown tour from its intro card leaves a
    * researcher's own workspace untouched.
    */
-  readonly onFinish: (kind: TourFinish, drove: boolean) => void
+  readonly onFinish: (kind: TourFinish, drove: boolean, completed: boolean) => void
 }
 
 function useReducedMotion(): boolean {
@@ -315,15 +315,20 @@ export default function OnboardingStage(props: OnboardingStageProps): React.JSX.
   // between closing the intro card (touched nothing) and skipping mid-tour
   // (demo datasets to remove, a view to restore).
   const droveRef = useRef(false)
+  const completedRef = useRef(false)
   // Stable across renders: the cursor's rAF state re-renders the stage on
   // every frame of a tween, and an inline closure here would have
   // `useTopmostDialogKeys` tear down and re-register its document listener
   // sixty times a second.
   const { onFinish } = props
-  const finish = useCallback((kind: TourFinish) => onFinish(kind, droveRef.current), [onFinish])
+  const finish = useCallback(
+    (kind: TourFinish) => onFinish(kind, droveRef.current, completedRef.current),
+    [onFinish],
+  )
   const tour = useTour({ driver: props.driver, reducedMotion, onFinish: finish })
   const scene = tour.scene
   if (tour.index > 0) droveRef.current = true
+  if (scene.id === 'outro') completedRef.current = true
 
   useEffect(() => {
     restoreFocusTo.current = document.activeElement

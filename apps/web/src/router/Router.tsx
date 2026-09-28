@@ -33,7 +33,8 @@
  * would go on holding a query string the address bar no longer shows.
  */
 
-import { createContext, useContext, useMemo, useSyncExternalStore } from 'react'
+import { createContext, useContext, useEffect, useMemo, useSyncExternalStore } from 'react'
+import { initialFocusTarget, panelSuspended } from '../components/Dialog.tsx'
 
 /** Every screen this application can be at. `not-found` is the answer for anything else. */
 export type RouteName =
@@ -220,6 +221,48 @@ export function useRoute(): RouteMatch {
   const match = useContext(RouteContext)
   if (match === null) throw new Error('useRoute は RouterProvider の内側でのみ使用できます。')
   return match
+}
+
+/** Focus the visible destination after its own initial-focus effects have run. */
+export function useRouteFocus(host: React.RefObject<HTMLElement | null>): void {
+  const { pathname } = useRoute()
+  useEffect(() => {
+    let cancelled = false
+    queueMicrotask(() => {
+      if (matchLocation(readLocation()).pathname !== pathname) return
+      const destination = host.current
+      if (cancelled || destination === null || destination.hidden) return
+      const active = document.activeElement
+      // Sign-in and dialogs deliberately focus their primary action. Preserve
+      // that choice, but never accept focus left in the hidden analyzer host.
+      if (active !== null && destination.contains(active)) return
+      // A route left with a dialog open comes back to that dialog, not to the
+      // landmark behind it — the trap still owns the keyboard there.
+      const openDialogs = destination.querySelectorAll<HTMLElement>('[role="dialog"]')
+      let openDialog: HTMLElement | null = null
+      for (let index = openDialogs.length - 1; index >= 0; index--) {
+        const candidate = openDialogs.item(index)
+        if (candidate !== null && !panelSuspended(candidate)) {
+          openDialog = candidate
+          break
+        }
+      }
+      const target =
+        openDialog === null
+          ? (destination.querySelector<HTMLElement>('h1[tabindex]') ??
+            destination.querySelector<HTMLElement>('main'))
+          : (initialFocusTarget(openDialog) ?? openDialog)
+      if (target === null) return
+      // Only elements that cannot receive focus natively get an explicit -1:
+      // overwriting a button's tabindex would remove it from the dialog's own
+      // Tab order and strand keyboard navigation outside the trap.
+      if (target.tabIndex < 0 && !target.hasAttribute('tabindex')) target.tabIndex = -1
+      target.focus()
+    })
+    return () => {
+      cancelled = true
+    }
+  }, [host, pathname])
 }
 
 /** The navigate function. Module-scoped, so its identity never changes between renders. */
