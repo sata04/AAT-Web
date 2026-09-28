@@ -203,16 +203,18 @@ function columnForTime(grid: DisplayGrid, at: number): number {
 }
 
 /**
- * O(samples + columns), with no sorting or repeated walks over the input.
- * Every finite vertex contributes to its own bucket, including backward steps.
- * For empty buckets, record adjacent finite segments at their leftmost column
- * and sweep their coverage. Keeping the furthest-reaching segment is enough to
- * find a real interpolation bracket wherever one exists, without rescanning
- * overlapping segments for each column. Populated buckets retain their exact
- * vertex extrema; an empty bucket follows one covering segment.
+ * O(samples + columns + total coverage), with no sorting or repeated walks
+ * over the input. Every finite vertex contributes to its own bucket, including
+ * backward steps. Segments are recorded at their leftmost and rightmost
+ * columns, and every one that covers a column merges its interpolated values
+ * into that column's envelope — keeping only the furthest-reaching segment
+ * would erase parallel branches a non-monotone series draws through the same
+ * pixels. Populated buckets retain their exact vertex extrema; an empty bucket
+ * takes the union of the segments covering it.
  */
 function bucketUnorderedSamples(grid: DisplayGrid, series: SeriesWindow, y: Float64Array): DisplaySeries {
-  const brackets: (ColumnBracket | undefined)[] = new Array(grid.columns)
+  const starts: (ColumnBracket[] | undefined)[] = new Array(grid.columns)
+  const ends: (ColumnBracket[] | undefined)[] = new Array(grid.columns)
   let counted = 0
   let previous: { at: number; value: number } | undefined
   for (let index = 0; index < series.length; index++) {
@@ -234,19 +236,34 @@ function bucketUnorderedSamples(grid: DisplayGrid, series: SeriesWindow, y: Floa
           ? { x0: previous.at, v0: previous.value, x1: at, v1: value }
           : { x0: at, v0: value, x1: previous.at, v1: previous.value }
       if (bracket.x1 >= grid.xMin && bracket.x0 <= grid.xMax) {
-        const column = columnForTime(grid, bracket.x0)
-        const existing = brackets[column]
-        if (existing === undefined || bracket.x1 > existing.x1) brackets[column] = bracket
+        const start = columnForTime(grid, bracket.x0)
+        const end = columnForTime(grid, Math.min(bracket.x1, grid.xMax))
+        const bucket = starts[start] ?? []
+        if (starts[start] === undefined) starts[start] = bucket
+        bucket.push(bracket)
+        if (end > start) {
+          const departures = ends[end] ?? []
+          if (ends[end] === undefined) ends[end] = departures
+          departures.push(bracket)
+        }
       }
     }
     previous = { at, value }
   }
 
-  let covering: ColumnBracket | undefined
+  const covering = new Set<ColumnBracket>()
   for (let column = 0; column < grid.columns; column++) {
-    const bracket = brackets[column]
-    if (bracket !== undefined && (covering === undefined || bracket.x1 > covering.x1)) covering = bracket
-    if (Number.isNaN(y[column * 2]) && covering !== undefined) interpolateColumn(grid, column, y, covering)
+    const starters = starts[column]
+    if (starters !== undefined) for (const bracket of starters) covering.add(bracket)
+    // Populated buckets keep their exact vertex extrema; an empty bucket takes
+    // the union of every segment covering it.
+    if (Number.isNaN(y[column * 2])) {
+      for (const bracket of covering) mergeColumnBracket(grid, column, y, bracket)
+    }
+    // A bracket expiring here still covers the part of this column before its
+    // end, so it only leaves the set after contributing to the column.
+    const expiring = ends[column]
+    if (expiring !== undefined) for (const bracket of expiring) covering.delete(bracket)
   }
   return { [DISPLAY_SERIES]: true, y, grid, sourceLength: counted }
 }
@@ -313,6 +330,43 @@ interface ColumnBracket {
   readonly x1: number
   readonly v0: number
   readonly v1: number
+}
+
+/**
+ * Merge one bracket's interpolated values into a column's envelope — the lower
+ * position keeps the minimum, the upper keeps the maximum, across every
+ * covering segment. With exactly one covering segment this is identical to
+ * {@link interpolateColumn}; extra segments only widen the envelope where they
+ * genuinely reach. Positions outside the bracket's span are untouched; neither
+ * an explicit dropout nor an unordered timestamp permits extrapolation.
+ */
+function mergeColumnBracket(
+  grid: DisplayGrid,
+  column: number,
+  y: Float64Array,
+  bracket: ColumnBracket,
+): void {
+  const denominator = bracket.x1 - bracket.x0
+  if (
+    !Number.isFinite(bracket.x0) ||
+    !Number.isFinite(bracket.x1) ||
+    !Number.isFinite(bracket.v0) ||
+    !Number.isFinite(bracket.v1) ||
+    denominator <= 0
+  )
+    return
+  for (const slot of [0, 1] as const) {
+    const index = column * 2 + slot
+    const at = grid.x[index] as number
+    if (at < bracket.x0 || at > bracket.x1) continue
+    const value = bracket.v0 + ((at - bracket.x0) / denominator) * (bracket.v1 - bracket.v0)
+    const current = y[index] as number
+    y[index] = Number.isNaN(current)
+      ? value
+      : slot === 0
+        ? Math.min(current, value)
+        : Math.max(current, value)
+  }
 }
 
 /**

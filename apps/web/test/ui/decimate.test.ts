@@ -187,6 +187,18 @@ describe('gaps and coverage', () => {
     expect(series.y.slice(0, 8).every(Number.isNaN)).toBe(true)
   })
 
+  it.each([2, 600, 8192])('draws every overlapping branch through empty columns (%s columns)', (columns) => {
+    // Three segments cover the whole viewport — a lower branch, a diagonal,
+    // and an upper branch. Matplotlib draws all three; keeping only the
+    // furthest-reaching bracket collapses the viewport to the lower branch.
+    const time = asFullResolution(Float64Array.from([0, 10, 0, 10]))
+    const values = asFullResolution(Float64Array.from([0, 0, 10, 10]))
+    const series = decimateToGrid(buildDisplayGrid(2, 8, columns), time, values)
+    const finite = [...series.y].filter(Number.isFinite)
+    expect(Math.min(...finite)).toBe(0)
+    expect(Math.max(...finite)).toBe(10)
+  })
+
   it('leaves NaN where the sensor measured nothing', () => {
     const time = asFullResolution(Float64Array.from([0, 0.1, 0.2]))
     const values = asFullResolution(Float64Array.from([1, 1, 1]))
