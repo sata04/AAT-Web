@@ -19,6 +19,7 @@ import type { AnalysisConfig } from './config.ts'
 import type { CsvColumn, CsvTable } from './csv.ts'
 import { toNumericColumn } from './csv.ts'
 import { ColumnNotFoundError, DataProcessingError } from './errors.ts'
+import { windowSampleCount } from './statistics.ts'
 import { type AnalysisWarning, type SensorId, warning } from './warnings.ts'
 
 const EMPTY_SERIES = new Float64Array(0)
@@ -229,6 +230,17 @@ function readSensorColumn(table: CsvTable, columnName: string, warnings: Analysi
   return numeric.values
 }
 
+/** Explain an invalid fallback origin without changing data_processor.py's subtraction. */
+function syncOriginWarning(origin: number): string {
+  if (Number.isNaN(origin)) {
+    return ' The sync origin is invalid; every adjusted timestamp for this sensor is NaN.'
+  }
+  if (!Number.isFinite(origin)) {
+    return ' The sync origin is invalid; every adjusted timestamp for this sensor is non-finite.'
+  }
+  return ''
+}
+
 /**
  * Load a parsed table into synchronised gravity series.
  *
@@ -322,7 +334,8 @@ export function loadAndProcessData(table: CsvTable, config: AnalysisConfig): Loa
     warnings.push(
       warning(
         'SYNC_POINT_NOT_FOUND',
-        'No Drag Shield sample fell below the sync threshold; using sample 0.',
+        'No Drag Shield sample fell below the sync threshold; using sample 0.' +
+          syncOriginWarning(time[0] as number),
         {
           sensor: 'drag',
         },
@@ -344,7 +357,8 @@ export function loadAndProcessData(table: CsvTable, config: AnalysisConfig): Loa
     warnings.push(
       warning(
         'SYNC_POINT_NOT_FOUND',
-        'No Inner Capsule sample fell below the sync threshold; using sample 0.',
+        'No Inner Capsule sample fell below the sync threshold; using sample 0.' +
+          syncOriginWarning(time[0] as number),
         { sensor: 'inner' },
       ),
     )
@@ -465,6 +479,25 @@ export function filterData(loaded: LoadedData, config: AnalysisConfig): FilterRe
 
   const inner = filterSensor(loaded.inner, 'inner', hasInner, config, warnings)
   const drag = filterSensor(loaded.drag, 'drag', hasDrag, config, warnings)
+
+  const requiredSamples = windowSampleCount(config.windowSize, config.samplingRate)
+  for (const [sensor, retained, original] of [
+    ['inner', inner.filtered, loaded.inner],
+    ['drag', drag.filtered, loaded.drag],
+  ] as const) {
+    // The desktop's pre-trim warning misses segments shortened by the end
+    // crossing. Use calculate_statistics' rounded width for the retained data.
+    if (retained.gravity.length < original.gravity.length && retained.gravity.length < requiredSamples) {
+      warnings.push(
+        warning(
+          'DATA_SHORTER_THAN_WINDOW',
+          `The retained ${sensor} segment holds ${retained.gravity.length} sample(s) but one analysis ` +
+            `window needs ${requiredSamples}.`,
+          { sensor, samples: retained.gravity.length, required: requiredSamples, stage: 'retained' },
+        ),
+      )
+    }
+  }
 
   const endIndices = [inner.rawEndIndex, drag.rawEndIndex].filter((index) => index >= 0)
   const endIndex = endIndices.length > 0 ? Math.max(...endIndices) : -1

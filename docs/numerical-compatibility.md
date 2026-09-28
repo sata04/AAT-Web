@@ -41,6 +41,10 @@ committed, *become* stale for everyone else. Regeneration belongs on CI's
 platform (or `x86_64` emulation); `--check` mismatches on arm64 alone are not
 evidence of a drifted fixture.
 
+Pandas' decimal parser also has a platform-dependent last-bit difference (see
+CORE-009 below). The checked-in x86_64 goldens remain authoritative for both
+parsing and arithmetic; ARM64 reference results are not a replacement baseline.
+
 ## The guarantee: bit equality, not tolerance
 
 The TypeScript engine reproduces the Python reference **bit-for-bit** for every
@@ -153,10 +157,12 @@ because they are load-bearing, not incidental:
   Overflowing literals land in the same place: `1e400` parses to +Infinity —
   pandas' tokenizer emits `HUGE_VAL` for `exponent > 308` rather than failing —
   and is then excluded by the same incomplete-window rule.
-- **Incomplete windows cannot win** the minimum-standard-deviation search. A
-  standard deviation is only defined over a fully observed window; allowing
-  partial ones lets a window holding two valid samples win with std ≈ 0 while
-  reporting a mean computed over a different sample count.
+- **Incomplete windows are masked with NaN** before the minimum-standard-deviation
+  search. They cannot beat a finite deviation. The oracle's `np.nanargmin`
+  replaces NaNs with +Infinity: when the remaining deviations are all infinite,
+  index zero wins even if its original deviation was NaN. Complete windows with
+  all-NaN deviations instead raise (`STATISTICS_ALL_NAN` in the port); no complete
+  windows still yield empty statistics.
 - **Two-pass standard deviation.** Mean first, then the mean of squared
   deviations. This is what survives a large DC offset, and `large_dc_offset`
   exists to keep it that way.
@@ -192,6 +198,14 @@ analysis contract forbids. The threshold constant is preserved
 (`EXACT_ELEMENT_BUDGET`) so the boundary is identical — only the behaviour past
 it differs, and it differs by failing rather than by quietly approximating.
 
+The G-quality ladder also has an independent limit of **1,000,000 entries**
+(`MAX_GQUALITY_WINDOWS`, CORE-002). One Float64 buffer of that length is 8 MB;
+the cap bounds the ladder and its temporary copies before allocation, even
+when every individual window fits the exact-computation budget. Oversized
+sweeps raise `AnalysisSizeError`. Empty or too-short series take the documented
+skip-warning path first, and cancellation is checked before building the ladder.
+The existing NumPy-compatible ladder arithmetic is unchanged.
+
 ### 2. The XLSX row limit is enforced (legacy bug corrected)
 
 `core/export.py` guards the unified time axis at `MAX_UNIFIED_SAMPLES =
@@ -204,18 +218,30 @@ AAT Web keeps an independent memory guard *and* enforces the real worksheet
 limit before generating a workbook. When the data cannot be represented it
 raises `EXPORT_TOO_LARGE` with a clear message and offers CSV as the lossless
 alternative. It never silently truncates rows and never silently drops a sensor.
-This is the one place where the reference implementation is treated as carrying
-a bug rather than a specification.
+This corrects the desktop export limit without changing analysis values.
 
 ### 3. The CSV delimiter is sniffed, not fixed to `,`
 
 The desktop application is hard-wired to `pd.read_csv` with the default comma
 and reads a semicolon file as a single unanalysable column. The web parser
-(Papa Parse) sniffs `,`, `;`, `\t` and `|` from the header row, matching the
-files real instruments emit. Once a header is split the same way pandas would
-split it, every downstream rule — dtype inference, coercion, deduplication —
-behaves identically, so the widening cannot change the interpretation of a
-file the desktop app could already read.
+(Papa Parse) also supports other delimiters such as `;`, `\t` and `|`, matching
+the files real instruments emit. A comma parse takes precedence when its header
+has at least two fields and every body row has at most one more field than the
+header. The first body row determines whether an implicit index exists; when
+it does, even short rows consume their first field as the index and pad the
+end. A later wide row cannot establish an index and raises a parse error.
+Only otherwise does delimiter sniffing choose the layout. This resolves CORE-006: the comma
+header `t,a,n|o|t|e` and row `0,1,p|q|r|s` retain their three columns even though
+pipe splitting would yield more fields. Ambiguous files outside that supported
+comma layout still follow Papa's delimiter detection.
+
+Sniffing ignores quoted-empty records only while choosing the delimiter; the
+final parse preserves them. Quote tracking uses only the chosen delimiter, so
+a pipe followed by a quote remains literal content in a semicolon file. Blank
+record filtering skips only ASCII spaces and non-delimiter tabs (plus empty
+records), preserving form feeds, vertical tabs, Unicode whitespace, quoted
+whitespace and delimiter-only records. Non-comma regression inputs are checked
+against `pd.read_csv(..., sep=delimiter)` before invoking the vendored core.
 
 ### 4. Encoding fallback uses the WHATWG decoder
 
@@ -227,6 +253,38 @@ majority of real content but are not defined by the same table, so the
 actually matters. Note that CP932 has no U+00B2 SUPERSCRIPT TWO, so the CP932
 fixture spells its units out — a constraint any real Windows-31J instrument file
 shares.
+
+### 5. ARM64 decimal parsing can differ in the last bit (CORE-009)
+
+With pandas 3.0.5 on ARM64, the CSV
+
+```csv
+t,a
+0,4.8571748891845345
+1,4.857174889184535
+2,4.857174889184535
+```
+
+keeps the first acceleration as `4.8571748891845345`. The TypeScript digit
+accumulator rounds it to `4.857174889184535`, matching the other two samples.
+ARM64's fused multiply-add accumulation can differ from JavaScript's separately
+rounded multiplication and addition. With gravity constant 1, no inversion,
+sampling rate 1 Hz and a two-sample window, the ARM64 reference selects start
+time 1 while TypeScript selects 0; both report mean `4.857174889184535` and
+standard deviation 0. This is a decided platform difference: retain the x86_64
+baseline and the existing decimal arithmetic, without changing the goldens.
+
+### 6. All-negative-zero mean at the unrolled branch (CORE-013)
+
+For `new Float64Array(8).fill(-0)`, TypeScript `mean(values, 0, 8)` and
+`calculateRangeStatistics(values).mean` return `-0` (bits
+`0x8000000000000000`), while NumPy 2.5.3 `np.mean(np.full(8, -0.0))` and the
+vendored range-statistics function return `+0` (`0x0000000000000000`). At eight
+elements the frozen reduction seeds its unrolled accumulators from the data;
+the shorter branch starts from `+0`. An inverted all-zero acceleration channel
+can reach this shape. The magnitude is unchanged, but the zero sign differs.
+The decision is to retain TypeScript's `-0` and leave `numeric.ts` frozen;
+bit equality outside the recorded fixtures excludes this known reduction case.
 
 ## Reviewing a mismatch
 
@@ -244,6 +302,6 @@ holds; a mismatch means the port diverged. Work through, in order:
    in the start/end index searches.
 5. Is it an ordering difference? `np.argsort(kind='stable')` in the export
    resampler, or tie handling in `nanArgMin`.
-6. Only if the difference is genuinely inherent to the platform (it has not been
-   so far) may it be documented here as a new deliberate difference, with a
-   regression test pinning the new behaviour.
+6. Check the decided differences above, including platform-specific parsing and
+   signed zero. A new exception requires an explicit compatibility decision;
+   never regenerate or relax the goldens to hide it.

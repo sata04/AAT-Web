@@ -211,11 +211,8 @@ function scaleByPowerOfTen(number: number, exponent: number): number {
  *     accepts the infinity. `0e999` is therefore a real `0` — a sample pandas
  *     would count, and one this port must not silently turn into a gap.
  *
- * Deliberate, documented divergence: an all-integer column is `int64` in pandas
- * and converts to float in one correctly-rounded step, whereas this converter
- * accumulates digit by digit. The two agree for every integer below 2^53, which
- * covers any physically meaningful sample; they can differ only for integer
- * literals of 16+ digits.
+ * Integer-column inference belongs to `csv.ts`: pandas converts int64 values
+ * to float in one correctly-rounded step, bypassing this digit accumulator.
  */
 export function parsePandasFloat(text: string): number | null {
   const length = text.length

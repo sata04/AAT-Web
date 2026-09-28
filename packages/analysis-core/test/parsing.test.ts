@@ -10,10 +10,12 @@
 
 import { describe, expect, it } from 'vitest'
 import { detectColumns } from '../src/columns.ts'
+import { DEFAULT_ANALYSIS_CONFIG } from '../src/config.ts'
 import { isNumericColumn, parseCsvText, toNumericColumn } from '../src/csv.ts'
 import { decodeCsv } from '../src/decode.ts'
 import { type AnalysisError, CsvDecodeError, CsvParseError, DataProcessingError } from '../src/errors.ts'
 import { isMissingToken, parseCell, parsePandasFloat } from '../src/pandas-number.ts'
+import { loadAndProcessData } from '../src/pipeline.ts'
 import { loadFixtureBytes } from './golden.ts'
 
 const encoder = new TextEncoder()
@@ -120,6 +122,128 @@ describe('parseCsvText', () => {
     expect(table.columnNames).toEqual(['Time', 'Accel'])
   })
 
+  it.each([';', '\t', '|'])('still reads genuine %j-delimited tables', (delimiter) => {
+    const table = parseCsvText(`t${delimiter}a\n0${delimiter}1\n1${delimiter}2\n`)
+    expect(table.columnNames).toEqual(['t', 'a'])
+    expect(table.column('a')?.cells).toEqual(['1', '2'])
+  })
+
+  it.each([';', '\t', '|'])('sniffs %j without discarding quoted-empty records', (delimiter) => {
+    const table = parseCsvText(`t${delimiter}a\n0${delimiter}1\n""\n2${delimiter}1\n`)
+    expect(table.columnNames).toEqual(['t', 'a'])
+    expect(table.column('t')?.cells).toEqual(['0', '', '2'])
+    expect(Array.from(toNumericColumn(table.column('a') as never).values)).toEqual([1, Number.NaN, 1])
+  })
+
+  it.each([';', '\t', '|'])(
+    'uses the %j header when short records defeat delimiter averages',
+    (delimiter) => {
+      const table = parseCsvText(`t${delimiter}a\n0${delimiter}1\n\f\n\v\n\u00a0\n2${delimiter}1\n`)
+      expect(table.columnNames).toEqual(['t', 'a'])
+      expect(table.column('a')?.cells).toEqual(['1', '', '', '', '1'])
+    },
+  )
+
+  it.each([';', '\t', '|'])('tracks quotes using only the selected %j delimiter', (delimiter) => {
+    const other = delimiter === '|' ? ';' : '|'
+    const table = parseCsvText(
+      `t${delimiter}a${delimiter}n\r\n0${delimiter}1${delimiter}x${other}"q\r1${delimiter}2${delimiter}end\n`,
+    )
+    expect(table.column('a')?.cells).toEqual(['1', '2'])
+    expect(table.column('n')?.cells).toEqual([`x${other}"q`, 'end'])
+    const quoted = parseCsvText(
+      `t${delimiter}a${delimiter}n\r\n0${delimiter}1${delimiter}" ;,|\t "\r""\n1${delimiter}2${delimiter}end\n`,
+    )
+    expect(quoted.column('n')?.cells).toEqual([' ;,|\t ', '', 'end'])
+  })
+
+  it('prefers comma when metadata also forms a consistent pipe table', () => {
+    const table = parseCsvText('t,a,n|o|t|e\n0,1,p|q|r|s\n1,1,p|q|r|s\n')
+    expect(table.columnNames).toEqual(['t', 'a', 'n|o|t|e'])
+    expect(table.column('a')?.cells).toEqual(['1', '1'])
+  })
+
+  it.each(['\t', ';', '|'])(
+    'recognises %j tables with commas inside quoted headers and cells',
+    (delimiter) => {
+      // Verified with pandas 3.0.5 read_csv(..., sep=delimiter); the desktop's
+      // comma default does not autodetect alternative delimiters.
+      const table = parseCsvText(
+        `t${delimiter}a${delimiter}"note,unit"\n0${delimiter}1${delimiter}"a,b"\n1${delimiter}2${delimiter}"c,d"\n`,
+      )
+      expect(table.columnNames).toEqual(['t', 'a', 'note,unit'])
+      expect(table.column('a')?.cells).toEqual(['1', '2'])
+      expect(table.column('note,unit')?.cells).toEqual(['a,b', 'c,d'])
+    },
+  )
+
+  it.each(['\t', ';', '|'])('recognises %j when only the header contains a comma', (delimiter) => {
+    const table = parseCsvText(
+      `t${delimiter}a${delimiter}note,unit\n0${delimiter}1${delimiter}plain\n1${delimiter}2${delimiter}text\n`,
+    )
+    expect(table.columnNames).toEqual(['t', 'a', 'note,unit'])
+    expect(table.column('a')?.cells).toEqual(['1', '2'])
+    expect(table.column('note,unit')?.cells).toEqual(['plain', 'text'])
+  })
+
+  it.each(['\t', ';', '|'])(
+    'pads short %j records instead of falling back to a comma layout',
+    (delimiter) => {
+      // pandas pads the short record's trailing field; it does not reinterpret
+      // the file as comma-separated because of the header's lone comma.
+      const table = parseCsvText(
+        `t${delimiter}a${delimiter}note,unit\n0${delimiter}1${delimiter}plain\n1${delimiter}2\n`,
+      )
+      expect(table.columnNames).toEqual(['t', 'a', 'note,unit'])
+      expect(table.column('note,unit')?.cells).toEqual(['plain', ''])
+    },
+  )
+
+  it.each(['\t', ';', '|'])(
+    'keeps %j when a delimiter-free row trails full alternative rows',
+    (delimiter) => {
+      // Three or more alternative header fields cannot be a comma artifact:
+      // a comma table only yields a two-field header here. The trailing record
+      // is a short row pandas pads, not evidence of a comma layout.
+      const table = parseCsvText(
+        `Time${delimiter}Acceleration${delimiter}note,unit\n0${delimiter}1${delimiter}ok\n1\n`,
+      )
+      expect(table.columnNames).toEqual(['Time', 'Acceleration', 'note,unit'])
+      expect(table.column('Acceleration')?.cells).toEqual(['1', ''])
+      expect(table.column('note,unit')?.cells).toEqual(['ok', ''])
+    },
+  )
+
+  it('keeps comma when no data row carries the alternative delimiter', () => {
+    // A sparse comma table whose one header cell happens to hold semicolons:
+    // header width alone cannot prove a semicolon layout — some record has to.
+    const table = parseCsvText('Time,Acceleration;raw;unit\n0\n1\n')
+    expect(table.columnNames).toEqual(['Time', 'Acceleration;raw;unit'])
+    expect(table.column('Time')?.cells).toEqual(['0', '1'])
+    expect(table.column('Acceleration;raw;unit')?.cells).toEqual(['', ''])
+  })
+
+  it('keeps comma when delimiter-free records can be omitted comma fields', () => {
+    // A valid comma CSV whose values happen to carry a semicolon: `1` has no
+    // semicolon, so nothing proves the file is semicolon-separated — the row
+    // is just a comma record with an omitted trailing field.
+    const table = parseCsvText('Time,Acceleration;raw\n0;1\n1\n')
+    expect(table.columnNames).toEqual(['Time', 'Acceleration;raw'])
+    expect(table.column('Time')?.cells).toEqual(['0;1', '1'])
+    expect(table.column('Acceleration;raw')?.cells).toEqual(['', ''])
+  })
+
+  it.each([
+    ['quotes', 't,a,n|o|t|e\n0,1,"p|q|r|s\n1,2,p|q|r|s\n'],
+    ['width after an implicit index', 't,a,n|o|t|e\nr0,0,1,p|q|r|s\nr1,1,2,3,p|q|r|s\n'],
+    ['width without an index', 't,a,n|o|t|e\n0,1,p|q|r|s\n1,2,3,p|q|r|s\n'],
+  ])('does not reinterpret pipes to hide comma %s errors', (_kind, text) => {
+    expect(() => parseCsvText(text as string)).toThrow(CsvParseError)
+    expect(() => parseCsvText(text as string)).toThrowError(
+      expect.objectContaining({ code: 'CSV_PARSE_FAILED' }),
+    )
+  })
+
   it('mangles duplicate headers the way pandas does', () => {
     const table = parseCsvText('a,a,a\n1,2,3\n')
     expect(table.columnNames).toEqual(['a', 'a.1', 'a.2'])
@@ -158,8 +282,126 @@ describe('parseCsvText', () => {
     expect(table.column('b')?.cells).toEqual(['2.0', ''])
   })
 
-  it('refuses a row with more fields than the header instead of shifting columns', () => {
-    expect(() => parseCsvText('t,a\n0.0,1.0,9.0\n')).toThrow(CsvParseError)
+  it('preserves a quoted empty record as a missing sample', () => {
+    const table = parseCsvText('t,a\n0,1\n""\n2,1\n')
+    expect(table.rowCount).toBe(3)
+    expect(table.column('t')?.cells).toEqual(['0', '', '2'])
+    expect(Array.from(toNumericColumn(table.column('a') as never).values)).toEqual([1, Number.NaN, 1])
+  })
+
+  it('skips whitespace-only physical lines before the header and within the body', () => {
+    const table = parseCsvText(' \t\r\n\t\nt,a\n0,1\n  \t  \n1,1\n   ')
+    expect(table.columnNames).toEqual(['t', 'a'])
+    expect(table.rowCount).toBe(2)
+    expect(table.column('t')?.cells).toEqual(['0', '1'])
+  })
+
+  describe.each([',', ';', '\t', '|'])('pandas blank records with delimiter %j', (delimiter) => {
+    it.each(['', '   ', '\t', ' \t ', '\t \t'])('skips %j only if it creates no fields', (record) => {
+      const table = parseCsvText(`t${delimiter}a${delimiter}n\n0${delimiter}1\n${record}\n2${delimiter}1\n`)
+      const kept = delimiter === '\t' && record.includes('\t')
+      expect(table.rowCount).toBe(kept ? 3 : 2)
+      expect(table.column('t')?.cells).toEqual(kept ? ['0', record.split('\t')[0], '2'] : ['0', '2'])
+    })
+
+    it.each(['\f', '\v', '\u00a0', '\u2028', '\u2029', '\u0085', '\u2003', ' \f ', '\u00a0 '])(
+      'preserves the nonblank record %j',
+      (record) => {
+        const table = parseCsvText(`t${delimiter}a\n0${delimiter}1\n${record}\n2${delimiter}1\n`)
+        expect(table.column('t')?.cells).toEqual(['0', record, '2'])
+        expect(Array.from(toNumericColumn(table.column('a') as never).values)).toEqual([1, Number.NaN, 1])
+      },
+    )
+
+    it.each(['""', '" "', 'delimiter', 'two delimiters', 'spaced delimiter'])(
+      'preserves fields created by %s',
+      (kind) => {
+        const record =
+          kind === 'delimiter'
+            ? delimiter
+            : kind === 'two delimiters'
+              ? delimiter.repeat(2)
+              : kind === 'spaced delimiter'
+                ? ` ${delimiter} `
+                : kind
+        const table = parseCsvText(`t${delimiter}a${delimiter}n\n0${delimiter}1\n${record}\n2${delimiter}1\n`)
+        expect(table.rowCount).toBe(3)
+        expect(table.column('t')?.cells[1]).toBe(kind === '" "' || kind === 'spaced delimiter' ? ' ' : '')
+      },
+    )
+  })
+
+  it('normalises mixed CRLF, LF and CR record separators', () => {
+    const table = parseCsvText('t,a\r\n0,1\r\n1,1\n2,1\r3,1\r\n')
+    expect(table.rowCount).toBe(4)
+    expect(table.column('t')?.cells).toEqual(['0', '1', '2', '3'])
+  })
+
+  it('preserves quoted newlines, whitespace lines and escaped quotes inside cells', () => {
+    const table = parseCsvText('t,a,note\r\n0,1,"first\r\n \t\nlast ""line""\rend"\n1,2,ok\r')
+    expect(table.rowCount).toBe(2)
+    expect(table.column('note')?.cells).toEqual(['first\r\n \t\nlast "line"\rend', 'ok'])
+    expect(table.column('a')?.cells).toEqual(['1', '2'])
+  })
+
+  it('keeps literal quotes in unquoted fields from swallowing later records', () => {
+    const table = parseCsvText('t,a,note\n0,1,a|"b\r1,2,ok\n')
+    expect(table.rowCount).toBe(2)
+    expect(table.column('note')?.cells).toEqual(['a|"b', 'ok'])
+  })
+
+  it('accepts a consistent leading implicit index, matching pandas', () => {
+    // read_csv infers an index from the first body row.
+    const table = parseCsvText('t,a\nrow0,0,1\nrow1,1,1\n')
+    expect(table.columnNames).toEqual(['t', 'a'])
+    expect(table.column('t')?.cells).toEqual(['0', '1'])
+    expect(table.column('a')?.cells).toEqual(['1', '1'])
+  })
+
+  it('keeps comma columns when an indexed table contains a quoted-empty record', () => {
+    const table = parseCsvText('t,a,n|o|t|e\nr0,0,1,p|q|r|s\nr1,1,2,p|q|r|s\n""\n')
+    expect(table.columnNames).toEqual(['t', 'a', 'n|o|t|e'])
+    expect(table.column('t')?.cells).toEqual(['0', '1', ''])
+    expect(table.column('a')?.cells).toEqual(['1', '2', ''])
+  })
+
+  it.each([',', ';', '\t', '|'])(
+    'pads short rows after inferring a %j index from the first row',
+    (delimiter) => {
+      const table = parseCsvText(
+        ['t,a,n', 'r0,0,1,note', 'r1,1,2', '2,3', '4', '""'].join('\n').replaceAll(',', delimiter),
+      )
+      expect(table.column('t')?.cells).toEqual(['0', '1', '3', '', ''])
+      expect(table.column('a')?.cells).toEqual(['1', '2', '', '', ''])
+      expect(table.column('n')?.cells).toEqual(['note', '', '', '', ''])
+      const short = parseCsvText(['t,a,n', 'r1,1,2', 'r2,2'].join('\n').replaceAll(',', delimiter))
+      expect(short.column('t')?.cells).toEqual(['r1', 'r2'])
+      expect(short.column('a')?.cells).toEqual(['1', '2'])
+      expect(short.column('n')?.cells).toEqual(['2', ''])
+      expect(() =>
+        parseCsvText(['t,a,n', '""', 'r0,0,1,note'].join('\n').replaceAll(',', delimiter)),
+      ).toThrow(CsvParseError)
+    },
+  )
+
+  it.each(['t,a\n0,1\nrow1,1,1\n', 't,a\ni,j,0,1\n'])(
+    'refuses inconsistent or unsupported excess fields in %j',
+    (text) => {
+      expect(() => parseCsvText(text)).toThrow(CsvParseError)
+    },
+  )
+
+  it('truncates cells at NUL without dropping fields or samples', () => {
+    const table = parseCsvText('t,a,note\n0,2\0junk,first\n1,2,last\n')
+    expect(table.rowCount).toBe(2)
+    expect(table.column('note')?.cells).toEqual(['first', 'last'])
+    const column = table.column('a') as never
+    expect(isNumericColumn(column)).toBe(true)
+    expect(toNumericColumn(column)).toEqual({
+      values: Float64Array.of(2, 2),
+      missingCount: 0,
+      coercedCount: 0,
+    })
   })
 
   it('refuses an empty file', () => {
@@ -191,6 +433,254 @@ describe('toNumericColumn', () => {
     expect(result.coercedCount).toBe(0)
   })
 
+  it.each(['NA', '', 'null'])('converts boolean values with a %j gap from pandas object dtype', (missing) => {
+    const table = parseCsvText(`t,a\n0,True\n1,${missing}\n2,False\n`)
+    const column = table.column('a') as never
+    expect(isNumericColumn(column)).toBe(false)
+    expect(toNumericColumn(column)).toEqual({
+      values: Float64Array.of(1, Number.NaN, 0),
+      missingCount: 1,
+      coercedCount: 0,
+    })
+  })
+
+  it('still coerces boolean strings in mixed numeric columns and rejects boolean/text columns', () => {
+    expect(toNumericColumn({ name: 'a', cells: ['True', '1', 'False'] })).toEqual({
+      values: Float64Array.of(Number.NaN, 1, Number.NaN),
+      missingCount: 0,
+      coercedCount: 2,
+    })
+    expect(() => toNumericColumn({ name: 'a', cells: ['True', 'ERR', 'False'] })).toThrow(DataProcessingError)
+  })
+
+  it('converts zero-padded integer columns exactly before casting to float64', () => {
+    const table = parseCsvText('t,a\n0,0000000000000000001\n1,1\n')
+    expect(Array.from(toNumericColumn(table.column('a') as never).values)).toEqual([1, 1])
+  })
+
+  it('normalises signed integer zero, including columns with NA', () => {
+    const result = toNumericColumn({ name: 'a', cells: ['-0', '+0', 'NA', '000000000000000001'] })
+    expect(Array.from(result.values)).toEqual([0, 0, Number.NaN, 1])
+    expect(Object.is(result.values[0], 0)).toBe(true)
+    expect(result.missingCount).toBe(1)
+    expect(result.coercedCount).toBe(0)
+  })
+
+  it('casts both int64 boundaries in one rounding step', () => {
+    const result = toNumericColumn({ name: 'a', cells: ['9223372036854775807', '-9223372036854775808'] })
+    expect(Array.from(result.values)).toEqual([9223372036854776000, -9223372036854776000])
+  })
+
+  it.each([
+    ['9223372036854775808', 0x43e0000000000000n],
+    ['9223372036854775809', 0x43e0000000000000n],
+    ['18446744073709551615', 0x43f0000000000000n],
+  ] as const)('casts uint64 %s exactly before converting to float64', (integer, bits) => {
+    const column = { name: 'a', cells: [integer, '1'] }
+    const values = toNumericColumn(column).values
+    const encoded = new DataView(new ArrayBuffer(8))
+    encoded.setFloat64(0, values[0] as number)
+    expect(encoded.getBigUint64(0)).toBe(bits)
+    expect(values[1]).toBe(1)
+    expect(isNumericColumn(column)).toBe(true)
+  })
+
+  it('uses int64-min as an NA sentinel only when missing cells require a float cast', () => {
+    const minimum = '-9223372036854775808'
+    expect(Array.from(toNumericColumn({ name: 'a', cells: [minimum] }).values)).toEqual([
+      -9223372036854776000,
+    ])
+    expect(toNumericColumn({ name: 'a', cells: [minimum, '1', 'NA'] })).toEqual({
+      values: Float64Array.of(Number.NaN, 1, Number.NaN),
+      missingCount: 2,
+      coercedCount: 0,
+    })
+    expect(() => toNumericColumn({ name: 'a', cells: [minimum, 'NA'] })).toThrow(DataProcessingError)
+    expect(
+      Array.from(toNumericColumn({ name: 'a', cells: ['-9223372036854775807', '1', 'NA'] }).values),
+    ).toEqual([-9223372036854776000, 1, Number.NaN])
+    expect(Array.from(toNumericColumn({ name: 'a', cells: [minimum, '1.0'] }).values)).toEqual([
+      -9223372036854778000, 1,
+    ])
+  })
+
+  it.each([
+    ['-9223372036854775809', -9223372036854776000],
+    ['18446744073709551616', 18446744073709552000],
+    ['18446744073709551617', 18446744073709552000],
+  ] as const)('casts pandas 3 integer objects outside the 64-bit bounds: %s', (integer, expected) => {
+    const column = { name: 'a', cells: [integer, '1', 'NA'] }
+    expect(Array.from(toNumericColumn(column).values)).toEqual([expected, 1, Number.NaN])
+    expect(isNumericColumn(column)).toBe(false)
+  })
+
+  it.each(['NA', '-1'])('keeps uint64 mixed with %s on string-to-float conversion', (tail) => {
+    const column = { name: 'a', cells: ['9223372036854775808', '1', tail] }
+    expect(Array.from(toNumericColumn(column).values)).toEqual([
+      9223372036854778000,
+      1,
+      tail === 'NA' ? Number.NaN : -1,
+    ])
+    expect(isNumericColumn(column)).toBe(false)
+  })
+
+  it('distinguishes unsigned dtype detection from subsequent conversion of negative zero', () => {
+    const column = { name: 'a', cells: ['9223372036854775808', '-0'] }
+    expect(isNumericColumn(column)).toBe(false)
+    expect(Array.from(toNumericColumn(column).values)).toEqual([9223372036854776000, 0])
+    expect(isNumericColumn({ ...column, cells: ['9223372036854775808', '+0'] })).toBe(true)
+  })
+
+  it('keeps out-of-int64 mixed-sign columns on pandas object-to-float conversion', () => {
+    const result = toNumericColumn({ name: 'a', cells: ['9223372036854775808', '-1'] })
+    expect(Array.from(result.values)).toEqual([9223372036854778000, -1])
+  })
+
+  it.each([false, true])(
+    'uses decimal conversion for signed underflow with uint64 (reversed: %s)',
+    (reversed) => {
+      // pandas 3.0.5 infers strings, so _to_numeric_series uses the decimal
+      // converter, one ULP away from converting Python integer objects.
+      const cells = ['-9223372036854775809', '9223372036854775808']
+      const expected = [-9.223372036854778e18, 9.223372036854778e18]
+      if (reversed) {
+        cells.reverse()
+        expected.reverse()
+      }
+      const table = parseCsvText(`t,a\n0,${cells[0]}\n1,${cells[1]}\n`)
+      const column = table.column('a') as never
+      expect(isNumericColumn(column)).toBe(false)
+      expect(toNumericColumn(column)).toEqual({
+        values: Float64Array.from(expected),
+        missingCount: 0,
+        coercedCount: 0,
+      })
+    },
+  )
+
+  it.each([
+    { cells: ['9223372036854775808', 'NA'], coercedCount: 1 },
+    { cells: ['9223372036854775808', '-1', 'NA'], coercedCount: 1 },
+    { cells: ['-9223372036854775809', '9223372036854775808', 'NA'], coercedCount: 1 },
+    { cells: ['18446744073709551616', '1.5', 'NA'], coercedCount: 1 },
+    { cells: ['18446744073709551616', 'ERR', 'NA'], coercedCount: 2 },
+  ])(
+    'counts literal NA as coercion when integer inference preserves strings: $cells',
+    ({ cells, coercedCount }) => {
+      const table = parseCsvText(`t,a\n${cells.map((cell, index) => `${index},${cell}`).join('\n')}\n`)
+      const result = toNumericColumn(table.column('a') as never)
+      expect(result.missingCount).toBe(0)
+      expect(result.coercedCount).toBe(coercedCount)
+      expect(result.values[result.values.length - 1]).toBeNaN()
+      const loaded = loadAndProcessData(table, {
+        ...DEFAULT_ANALYSIS_CONFIG,
+        timeColumn: 't',
+        accelerationColumnInnerCapsule: 'a',
+        useDragAcceleration: false,
+      })
+      expect(loaded.warnings).toContainEqual(
+        expect.objectContaining({ code: 'CELLS_COERCED', details: { column: 'a', count: coercedCount } }),
+      )
+    },
+  )
+
+  it.each(['', 'null', 'NaN'])('also coerces the literal NA spelling %j in uint64 conflicts', (missing) => {
+    expect(toNumericColumn({ name: 'a', cells: ['9223372036854775808', missing] })).toEqual({
+      values: Float64Array.of(9.223372036854778e18, Number.NaN),
+      missingCount: 0,
+      coercedCount: 1,
+    })
+  })
+
+  it.each([
+    { cells: ['ERR', '18446744073709551616', 'NA'], coercedCount: 1 },
+    { cells: ['1.5', '18446744073709551616', 'NA'], coercedCount: 0 },
+    { cells: ['9223372036854775808', 'ERR', 'NA'], coercedCount: 1 },
+    { cells: ['-9223372036854775809', '1.5', 'NA'], coercedCount: 0 },
+  ])('still counts actual missing values when inference normalises NA: $cells', ({ cells, coercedCount }) => {
+    const result = toNumericColumn({ name: 'a', cells })
+    expect(result.missingCount).toBe(1)
+    expect(result.coercedCount).toBe(coercedCount)
+  })
+
+  it('retains exact integer objects when positive uint64 overflow accompanies uint64 and NA', () => {
+    expect(
+      toNumericColumn({ name: 'a', cells: ['9223372036854775808', '18446744073709551616', 'NA'] }),
+    ).toEqual({
+      values: Float64Array.of(9.223372036854776e18, 1.8446744073709552e19, Number.NaN),
+      missingCount: 1,
+      coercedCount: 0,
+    })
+  })
+
+  it.each(['', '-'])('rejects a %s309-digit integer as a load failure', (sign) => {
+    // read_csv raises OverflowError; detect_columns wraps it as DataLoadError.
+    const table = parseCsvText(`t,a\n0,${sign}${'9'.repeat(309)}\n1,1\n`)
+    expect(() => detectColumns(table)).toThrow(CsvParseError)
+    expect(() => toNumericColumn(table.column('a') as never)).toThrowError(
+      expect.objectContaining({ code: 'CSV_PARSE_FAILED' }),
+    )
+  })
+
+  it.each(['', '-'])('defers later %s309-digit integer overflow until numeric conversion', (sign) => {
+    // pandas loads Python integer objects when its first nonmissing value is
+    // float-representable, but _to_numeric_series still rejects the later value.
+    const table = parseCsvText(`t,a\n0,1\n1,${sign}${'9'.repeat(309)}\n`)
+    expect(() => detectColumns(table)).not.toThrow()
+    expect(isNumericColumn(table.column('a') as never)).toBe(false)
+    expect(() => toNumericColumn(table.column('a') as never)).toThrowError(
+      expect.objectContaining({ code: 'CSV_PARSE_FAILED' }),
+    )
+  })
+
+  it('accepts a float-representable 309-digit integer', () => {
+    expect(toNumericColumn({ name: 'a', cells: [`1${'0'.repeat(308)}`, 'NA'] })).toEqual({
+      values: Float64Array.of(1e308, Number.NaN),
+      missingCount: 1,
+      coercedCount: 0,
+    })
+  })
+
+  it.each([
+    {
+      cells: ['9'.repeat(309), '1.5', 'NA'],
+      values: [Number.POSITIVE_INFINITY, 1.5, Number.NaN],
+      missingCount: 0,
+      coercedCount: 1,
+    },
+    {
+      cells: ['1.5', '9'.repeat(309), 'NA'],
+      values: [1.5, Number.POSITIVE_INFINITY, Number.NaN],
+      missingCount: 1,
+      coercedCount: 0,
+    },
+    {
+      cells: [`-${'9'.repeat(309)}`, '9223372036854775808', 'NA'],
+      values: [Number.NEGATIVE_INFINITY, 9.223372036854778e18, Number.NaN],
+      missingCount: 0,
+      coercedCount: 1,
+    },
+  ])(
+    'preserves pandas overflow behavior outside integer-object conversion (case $coercedCount/$missingCount)',
+    ({ cells, values, missingCount, coercedCount }) => {
+      expect(toNumericColumn({ name: 'a', cells })).toEqual({
+        values: Float64Array.from(values),
+        missingCount,
+        coercedCount,
+      })
+    },
+  )
+
+  it('keeps the float parser for integer tokens mixed with decimal or text cells', () => {
+    expect(Array.from(toNumericColumn({ name: 'a', cells: ['0000000000000000001', '1.0'] }).values)).toEqual([
+      0, 1,
+    ])
+    expect(Array.from(toNumericColumn({ name: 'a', cells: ['0000000000000000001', 'ERR'] }).values)).toEqual([
+      0,
+      Number.NaN,
+    ])
+  })
+
   it('accepts a column that is empty because the file has no rows', () => {
     const table = parseCsvText('a,b\n')
     expect(toNumericColumn(table.column('a') as never).values.length).toBe(0)
@@ -213,6 +703,11 @@ describe('isNumericColumn', () => {
     expect(isNumericColumn(table.column('a') as never)).toBe(true)
   })
 
+  it('respects the first uint64 overflow when mixed with decimal cells', () => {
+    expect(isNumericColumn({ name: 'a', cells: ['18446744073709551616', '1.0'] })).toBe(false)
+    expect(isNumericColumn({ name: 'a', cells: ['1.0', '18446744073709551616'] })).toBe(true)
+  })
+
   it('keeps bool columns un-numeric when a missing or numeric cell makes them object dtype', () => {
     // bool dtype cannot hold NaN, and booleans mixed with numbers are object.
     const gapped = parseCsvText('a,b\nTrue,1\n,x\nFalse,2\n')
@@ -223,6 +718,17 @@ describe('isNumericColumn', () => {
 })
 
 describe('detectColumns', () => {
+  it('offers no numeric candidates for a header-only table', () => {
+    expect(detectColumns(parseCsvText('x,y\n'))).toEqual({ time: [], acceleration: [] })
+  })
+
+  it('includes Python IGNORECASE equivalents without changing word boundaries', () => {
+    const table = parseCsvText('tıme,Time,acc\n0,10,1\n1,11,1\n')
+    expect(detectColumns(table)).toEqual({ time: ['tıme', 'Time'], acceleration: ['acc'] })
+    expect(detectColumns(parseCsvText('TİME,ſec,Ktime,acc\n0,1,2,3\n')).time).toEqual(['ſec'])
+    expect(detectColumns(parseCsvText('TİME,Time,acc\n0,1,2\n')).time).toEqual(['Time'])
+  })
+
   it('applies Python’s Unicode word boundaries, not JavaScript’s', () => {
     // U+00B2 is alphanumeric to Python, so `\bs\b` does not match "m/s²" and the
     // acceleration columns are not offered as time candidates. A plain

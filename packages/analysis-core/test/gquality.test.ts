@@ -6,8 +6,13 @@
 
 import { describe, expect, it } from 'vitest'
 import { type AnalysisConfig, DEFAULT_ANALYSIS_CONFIG } from '../src/config.ts'
-import { AnalysisCancelledError } from '../src/errors.ts'
-import { calculateGQuality, type GQualityProgress, gQualityWindowSizes } from '../src/gquality.ts'
+import { AnalysisCancelledError, AnalysisSizeError } from '../src/errors.ts'
+import {
+  calculateGQuality,
+  type GQualityProgress,
+  gQualityWindowSizes,
+  MAX_GQUALITY_WINDOWS,
+} from '../src/gquality.ts'
 import type { FilterResult } from '../src/pipeline.ts'
 
 function series(length: number, value: (index: number) => number): Float64Array {
@@ -63,6 +68,17 @@ describe('gQualityWindowSizes', () => {
 
   it('returns a single window when the range does not admit a step', () => {
     expect(Array.from(gQualityWindowSizes(0.5, 0.5, 0.1))).toEqual([0.5])
+  })
+
+  it.each([
+    [0.1, 1e12, 1e-9],
+    [0.1, 1, 1e-9],
+    [1, MAX_GQUALITY_WINDOWS + 1, 1],
+  ])('rejects oversized finite bounds [%s, %s] at step %s before allocation', (start, end, step) => {
+    expect(() => gQualityWindowSizes(start, end, step)).toThrow(AnalysisSizeError)
+    expect(() => gQualityWindowSizes(start, end, step)).toThrow(
+      expect.objectContaining({ code: 'ANALYSIS_TOO_LARGE' }),
+    )
   })
 })
 
@@ -122,6 +138,50 @@ describe('calculateGQuality', () => {
     )
     expect(result.rows).toEqual([])
     expect(result.warnings[0]?.details.reason).toBe('no-data')
+  })
+
+  it.each([0, 4])('skips an oversized ladder when the series has only %s samples', async (length) => {
+    const result = await calculateGQuality(
+      filterResult(
+        series(length, () => 1),
+        new Float64Array(0),
+        100,
+      ),
+      { ...CONFIG, gQualityEnd: 1e12, gQualityStep: 1e-9 },
+    )
+    expect(result.rows).toEqual([])
+    expect(result.warnings[0]?.code).toBe('GQUALITY_SKIPPED')
+    expect(result.warnings[0]?.details.reason).toBe(length === 0 ? 'no-data' : 'too-short')
+  })
+
+  it('checks cancellation before building even an oversized ladder', async () => {
+    const attempt = calculateGQuality(
+      filterResult(
+        series(40, () => 1),
+        new Float64Array(0),
+        100,
+      ),
+      { ...CONFIG, gQualityEnd: 1e12, gQualityStep: 1e-9 },
+      {
+        checkpoint: () => {
+          throw new AnalysisCancelledError()
+        },
+      },
+    )
+    await expect(attempt).rejects.toBeInstanceOf(AnalysisCancelledError)
+  })
+
+  it('propagates the declared size error when data is present for an oversized sweep', async () => {
+    await expect(
+      calculateGQuality(
+        filterResult(
+          series(40, () => 1),
+          new Float64Array(0),
+          100,
+        ),
+        { ...CONFIG, gQualityEnd: 1e12, gQualityStep: 1e-9 },
+      ),
+    ).rejects.toBeInstanceOf(AnalysisSizeError)
   })
 
   it('stops the sweep when the checkpoint throws, without losing earlier rows', async () => {

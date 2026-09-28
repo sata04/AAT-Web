@@ -23,6 +23,13 @@ import {
 } from './statistics.ts'
 import { type AnalysisWarning, warning } from './warnings.ts'
 
+/**
+ * Bounds the ladder itself, independently of the per-window element budget.
+ * One million entries use 8 MB per Float64 buffer and keep the temporary copies
+ * bounded; normal sweeps need only tens of entries. Arithmetic is unchanged.
+ */
+export const MAX_GQUALITY_WINDOWS = 1_000_000
+
 export interface GQualityRow {
   /** Window width in seconds, exactly as the ladder produced it. */
   windowSize: number
@@ -53,7 +60,7 @@ export interface GQualityOptions {
   /** Called after each window size, matching the desktop progress signal. */
   onProgress?: (progress: GQualityProgress) => void
   /**
-   * Awaited once per window size, before that window's work starts.
+   * Awaited before allocating the ladder, then before each subsequent window.
    *
    * A synchronous loop cannot be interrupted: a `cancel` message sits in the
    * worker's queue until the function suspends on a *macrotask*, and a promise
@@ -94,6 +101,12 @@ function sweepBounds(start: number, end: number, step: number): { count: number;
     throw new AnalysisParameterError(
       `The G-quality sweep range [${start}, ${end}] at step ${step} is unbounded.`,
       'g_quality_step',
+    )
+  }
+  if (count > MAX_GQUALITY_WINDOWS) {
+    throw new AnalysisSizeError(
+      `The G-quality sweep range [${start}, ${end}] at step ${step} requires ${count} entries, ` +
+        `above the ${MAX_GQUALITY_WINDOWS} window limit. Increase the step or narrow the range.`,
     )
   }
   return { count, stop }
@@ -143,9 +156,6 @@ export async function calculateGQuality(
   const hasInner = innerLength > 0
   const hasDrag = dragLength > 0
 
-  const windowSizes = gQualityWindowSizes(config.gQualityStart, config.gQualityEnd, config.gQualityStep)
-  const total = windowSizes.length
-
   if (!hasInner && !hasDrag) {
     warnings.push(
       warning('GQUALITY_SKIPPED', 'Neither sensor has data, so the G-quality sweep was skipped.', {
@@ -170,9 +180,12 @@ export async function calculateGQuality(
     return { rows: [], warnings }
   }
 
+  await options.checkpoint?.()
+  const windowSizes = gQualityWindowSizes(config.gQualityStart, config.gQualityEnd, config.gQualityStep)
+  const total = windowSizes.length
   const rows: GQualityRow[] = []
   for (let index = 0; index < total; index++) {
-    await options.checkpoint?.()
+    if (index > 0) await options.checkpoint?.()
     const windowSize = windowSizes[index] as number
     const windowSamples = windowSampleCount(windowSize, samplingRate)
     const statisticsConfig = { windowSize, samplingRate }
