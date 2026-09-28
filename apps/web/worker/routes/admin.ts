@@ -62,6 +62,15 @@ adminRoutes.use('*', withDatabase, requireSession)
 
 const PAGE_SIZE = 50
 
+/*
+ * How many leftover reservation keys account deletion removes inline. Failed uploads
+ * leave one retry record each, so a long-lived account can hold far more keys than a
+ * request's subrequest budget — and a killed request retries with no progress. Past
+ * this budget the copied rows in deleted_account_object_keys finish the job via the
+ * sweeper instead.
+ */
+const RESERVATION_KEY_DELETE_BUDGET = 2_000
+
 function deletionPending(): ApiError {
   return new ApiError('FORBIDDEN', { details: { reason: ACCOUNT_DELETION_REASON } })
 }
@@ -272,8 +281,21 @@ adminRoutes.delete('/users/:userId', requireCapability('user:manage'), async (co
     .select({ r2Key: quotaReservations.r2Key })
     .from(quotaReservations)
     .where(eq(quotaReservations.userId, targetId))
+  // An account can accumulate far more released reservations than a request's subrequest
+  // budget (failed uploads leave one retry record each), and a killed request retries with
+  // no progress — deletion would never finish. The transaction already copied every key
+  // into deleted_account_object_keys, so cap this eager pass; the sweeper drains the rest
+  // once the user row is gone.
+  const deletedKeys = new Set(objects.map((object) => object.r2Key))
+  const reservationKeys = new Set<string>()
   for (const reservation of reservations) {
-    if (reservation.r2Key) await context.env.AAT_OBJECTS.delete(reservation.r2Key)
+    if (reservation.r2Key && !deletedKeys.has(reservation.r2Key)) reservationKeys.add(reservation.r2Key)
+  }
+  let reservationKeysDeleted = 0
+  for (const r2Key of reservationKeys) {
+    if (reservationKeysDeleted >= RESERVATION_KEY_DELETE_BUDGET) break
+    await context.env.AAT_OBJECTS.delete(r2Key)
+    reservationKeysDeleted++
   }
   // No cascade may erase an object that appeared outside the enumeration. A retry will find it.
   const deleted = await db

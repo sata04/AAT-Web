@@ -208,6 +208,93 @@ describe('account deletion barrier', () => {
     ).toBe(200)
   })
 
+  it('deletes an account whose released reservations exceed the subrequest budget', async () => {
+    const admin = await createUser({ role: 'Admin' })
+    const user = await createUser()
+    await ensureQuotaRow(db(), user.userId, 1048576)
+    // One retry record per failed upload — an account can accumulate far more
+    // than a request's subrequest budget, and every one used to be deleted
+    // inline with no progress recorded.
+    const keys = 2_100
+    await db()
+      .insert(quotaReservations)
+      .values(
+        Array.from({ length: keys }, (_, index) => ({
+          id: `stale-${index}`,
+          userId: user.userId,
+          bytes: 1,
+          purpose: 'source',
+          r2Key: `sources/${user.userId}/stale-${index}`,
+          status: 'released',
+          createdAt: new Date(0),
+          expiresAt: new Date(0),
+        })),
+      )
+    let deletes = 0
+    const countDeletes = withBucket({
+      put: env.AAT_OBJECTS.put.bind(env.AAT_OBJECTS),
+      delete: async (...args: Parameters<R2Bucket['delete']>) => {
+        deletes += 1
+        return env.AAT_OBJECTS.delete(...args)
+      },
+    })
+    const response = await worker.fetch(
+      new Request(`${ORIGIN}/api/v1/admin/users/${user.userId}`, {
+        method: 'DELETE',
+        headers: { origin: ORIGIN, cookie: admin.cookie },
+      }),
+      countDeletes,
+      createExecutionContext(),
+    )
+    expect(response.status).toBe(200)
+    expect(deletes).toBeLessThanOrEqual(2_000)
+    expect(await db().select().from(userTable).where(eq(userTable.id, user.userId))).toHaveLength(0)
+    // Every skipped key stays in the recovery table; the sweeper drains it
+    // once the owner row is gone.
+    const retained = await db()
+      .select()
+      .from(deletedAccountObjectKeys)
+      .where(eq(deletedAccountObjectKeys.userId, user.userId))
+    expect(retained.map((row) => row.r2Key)).toHaveLength(keys)
+  })
+
+  it('reclaims an already-accounted legacy row without releasing its usage twice', async () => {
+    const admin = await createUser({ role: 'Admin' })
+    const user = await createUser()
+    await ensureQuotaRow(db(), user.userId, 1048576)
+    const key = `sources/${user.userId}/legacy-dead`
+    // State after a racing cleanup took the accounting claim: marker set,
+    // usage already released — a second decrement would free quota that is
+    // still owed by live uploads.
+    await db()
+      .insert(cloudObjects)
+      .values({
+        id: 'legacy-dead',
+        ownerUserId: user.userId,
+        kind: 'source',
+        r2Key: key,
+        byteSize: 4,
+        sha256: 'a'.repeat(64),
+        contentType: 'text/csv',
+        reservationId: null,
+        settledClaim: 'claimed-elsewhere',
+        createdAt: new Date(0),
+        deletedAt: new Date(),
+      })
+    await env.AAT_OBJECTS.put(key, 'data')
+    const swept = await sweepStaleReservations(db(), env.AAT_OBJECTS, new Date(), 20, user.userId)
+    expect(swept.deadRowsReclaimed).toBe(1)
+    const [quota] = await db().select().from(quotaUsage).where(eq(quotaUsage.userId, user.userId))
+    expect(quota?.bytesUsed).toBe(0)
+    expect(quota?.objectCount).toBe(0)
+    expect(await env.AAT_OBJECTS.head(key)).toBeNull()
+    expect(await db().select().from(cloudObjects).where(eq(cloudObjects.id, 'legacy-dead'))).toHaveLength(0)
+    expect(
+      (await apiFetch(`/api/v1/admin/users/${user.userId}`, { method: 'DELETE', cookie: admin.cookie }))
+        .status,
+    ).toBe(200)
+  })
+
   it('unwinds a resumed PUT after its expired reservation and account have been removed', async () => {
     const admin = await createUser({ role: 'Admin' })
     const user = await createUser()

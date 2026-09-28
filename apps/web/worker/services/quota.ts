@@ -661,7 +661,19 @@ export async function sweepStaleReservations(
       .update(cloudObjects)
       // Legacy rows use this field to claim their accounting; leave NULL until unwind settles it.
       .set({ settledClaim: object.reservationId === null ? object.settledClaim : newId() })
-      .where(and(eq(cloudObjects.id, object.id), reclaimable))
+      .where(
+        and(
+          eq(cloudObjects.id, object.id),
+          reclaimable,
+          // Writing the marker back is only safe while it still holds the value this
+          // sweep read: another cleanup's claim both satisfies `reclaimable` again and
+          // would be clobbered by this write, letting a second unwind decrement usage
+          // for bytes that were only charged once.
+          object.settledClaim === null
+            ? isNull(cloudObjects.settledClaim)
+            : eq(cloudObjects.settledClaim, object.settledClaim),
+        ),
+      )
     if (rowsAffected(claimed) !== 1) continue
     await unwindUploadedObject(db, bucket, object, now)
     deadRowsReclaimed++
