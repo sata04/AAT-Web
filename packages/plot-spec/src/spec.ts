@@ -60,6 +60,15 @@ export const FIGURE_DIMENSION_MAX_INCHES = 20
 export const DPI_MIN = 72
 export const DPI_MAX = 600
 
+/**
+ * Raster budget for one figure: `figureWidth × dpi` by `figureHeight × dpi` must not exceed
+ * this many pixels. 2^24 pixels is 64 MiB of RGBA canvas — the individual dimension and DPI
+ * bounds would otherwise admit a 12000×12000 (≈549 MiB) raster, which no deployed renderer
+ * container holds. The budget is checked as a product precisely because each bound alone is
+ * legitimate: a tall narrow figure at high DPI is fine; both maxima together are not.
+ */
+export const MAX_RASTER_PIXELS = 16_777_216 // 4096 × 4096
+
 export const TITLE_MAX_LENGTH = 120
 
 // ---------------------------------------------------------------------------------------------
@@ -246,6 +255,16 @@ function validateSeriesEntry(
 }
 
 export const PosterPlotSpecSchema = PosterPlotSpecShape.superRefine((value, ctx) => {
+  const rasterPixels = value.figureWidth * value.dpi * (value.figureHeight * value.dpi)
+  if (rasterPixels > MAX_RASTER_PIXELS) {
+    ctx.addIssue({
+      code: 'custom',
+      message:
+        `figureWidth × dpi and figureHeight × dpi produce ${Math.ceil(rasterPixels)} raster pixels, ` +
+        `exceeding the ${MAX_RASTER_PIXELS}-pixel budget the renderer container holds`,
+      path: ['figureWidth'],
+    })
+  }
   if (value.xMin >= value.xMax) {
     ctx.addIssue({ code: 'custom', message: 'xMin must be less than xMax', path: ['xMin'] })
   }

@@ -216,7 +216,6 @@ export function PosterDialog(props: PosterDialogProps): React.JSX.Element {
   const [presetVersion, setPresetVersion] = useState<PosterPresetVersion>(defaults.posterPresetVersion)
 
   const sizeOptions = useMemo(() => posterFigureSizeOptions(presetVersion), [presetVersion])
-  const dpiOptions = useMemo(() => posterDpiOptions(presetVersion), [presetVersion])
   const seriesOptions = useMemo(() => posterSeriesOptionsFor(dataset), [dataset])
 
   const [series, setSeries] = useState<SeriesSelection>(defaultSeriesFor(dataset) ?? defaults.series)
@@ -242,6 +241,13 @@ export function PosterDialog(props: PosterDialogProps): React.JSX.Element {
   }
 
   const size = findPosterFigureSize(figureSizeId, presetVersion) ?? sizeOptions[0]
+  // The spec caps the rendered raster: only offer the resolutions that fit the selected size,
+  // and let the select fall back to the largest offerable one when the stored dpi no longer
+  // does — a choice the form cannot show is a choice the form must not submit.
+  const dpiOptions = useMemo(() => posterDpiOptions(presetVersion, size), [presetVersion, size])
+  const effectiveDpi = dpiOptions.some((option) => option.dpi === dpi)
+    ? dpi
+    : (dpiOptions[dpiOptions.length - 1]?.dpi ?? dpi)
   const titlePreview = posterTitleLine(runCode, title, presetVersion)
 
   const submit = async () => {
@@ -250,7 +256,7 @@ export function PosterDialog(props: PosterDialogProps): React.JSX.Element {
     setCreated(null)
 
     const request = posterRequestFor(
-      { series, title, showLegend, presetVersion, size, dpi, bounds },
+      { series, title, showLegend, presetVersion, size, dpi: effectiveDpi, bounds },
       defaults,
     )
     if (request === null) {
@@ -325,7 +331,7 @@ export function PosterDialog(props: PosterDialogProps): React.JSX.Element {
       <FormatSection
         presetVersion={presetVersion}
         figureSizeId={figureSizeId}
-        dpi={dpi}
+        dpi={effectiveDpi}
         sizeOptions={sizeOptions}
         dpiOptions={dpiOptions}
         onPresetVersion={setPresetVersion}

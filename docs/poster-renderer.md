@@ -199,6 +199,9 @@ CREATE UNIQUE INDEX `poster_figures_auto_unique`
   ON `poster_figures` (`analysis_revision_id`,`preset_version`) WHERE kind = 'auto';
 ```
 
+Only the revision owner may publish or retry its canonical automatic poster. Shared readers
+can list/download it and render custom figures through the existing shared custom endpoint.
+
 `POST /api/v1/revisions/:revisionId/poster/auto` claims the figure with
 `INSERT ... ON CONFLICT DO NOTHING`. Exactly one caller inserts a row; everyone else gets zero rows
 affected and reads back the row that already exists. A double-submitted request, a reload halfway

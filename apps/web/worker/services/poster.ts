@@ -26,7 +26,7 @@
 
 import type { PosterPlotSpec } from '@aat/plot-spec'
 import { ApiError } from '@aat/shared'
-import { and, eq, gt, inArray, sql } from 'drizzle-orm'
+import { and, eq, gt, inArray, type SQL, sql } from 'drizzle-orm'
 import { type Database, rowsAffected } from '../db/client.ts'
 import { posterFigures } from '../db/schema.ts'
 import { newId } from '../lib/ids.ts'
@@ -224,11 +224,12 @@ export async function markRendered(
   rendererVersion: string,
   attempt: string,
   now: Date = new Date(),
+  publicationGuard?: SQL,
 ): Promise<boolean> {
   const result = await db
     .update(posterFigures)
     .set({ status: 'ready', objectId, rendererVersion, completedAt: now, updatedAt: now, errorCode: null })
-    .where(and(eq(posterFigures.id, posterId), eq(posterFigures.renderAttempt, attempt)))
+    .where(and(eq(posterFigures.id, posterId), eq(posterFigures.renderAttempt, attempt), publicationGuard))
   return rowsAffected(result) === 1
 }
 

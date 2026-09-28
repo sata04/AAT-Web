@@ -22,12 +22,14 @@
  * | -------------------------------------------- | ----- | ---------- | ----- | ------ |
  * | Read runs, revisions, metrics, posters        | yes   | yes        | yes   | no     |
  * | Read/download snapshots and original CSVs     | yes   | yes        | yes   | no     |
- * | Generate a poster from a revision             | yes   | yes        | yes   | no     |
+ * | Generate/retry a custom poster                | yes   | yes        | yes   | no     |
+ * | Publish/retry the canonical automatic poster  | yes   | no         | no    | no     |
  * | Edit memo and tags                            | yes   | yes        | yes   | no     |
  * | Delete a run, upload/delete an original CSV   | yes   | no         | yes   | no     |
  * | Create a revision, upload a snapshot          | yes   | no         | no    | no     |
  *
- * Every refusal is asserted as **404, never 403**. That distinction carries more weight under this
+ * Hidden resources answer 404. Canonical writes by an authorised shared reader answer 403.
+ * That distinction carries more weight under this
  * policy, not less: a Viewer is the one role still confined to their own runs, and a 403 would tell
  * them exactly which run ids the rest of the team holds.
  */
@@ -316,7 +318,7 @@ describe('a Researcher reads and reuses a colleague’s work', () => {
     expect(ownedBody.posters.filter((poster) => poster.kind === 'custom')).toHaveLength(1)
   })
 
-  it('generates the automatic poster on a colleague’s revision that has none', async () => {
+  it('WORKER-016 refuses a colleague’s canonical spec before the owner publishes', async () => {
     const owner = await createUser()
     const colleague = await createUser()
     const runId = await createRun(owner)
@@ -325,19 +327,27 @@ describe('a Researcher reads and reuses a colleague’s work', () => {
     const auto = await apiFetch(`/api/v1/revisions/${revisionId}/poster/auto`, {
       method: 'POST',
       cookie: colleague.cookie,
-      body: JSON.stringify({ spec: posterSpec(revisionId) }),
+      body: JSON.stringify({ spec: { ...posterSpec(revisionId), title: 'Colleague spec' } }),
     })
-    expect(auto.status).toBe(201)
+    expect(auto.status).toBe(403)
 
-    // The one automatic figure per revision, whoever asked for it: the owner polling the same
-    // endpoint is handed the colleague's render rather than making a second one.
+    // Rejection must leave the canonical slot free for the owner's specification.
     const again = await apiFetch(`/api/v1/revisions/${revisionId}/poster/auto`, {
       method: 'POST',
       cookie: owner.cookie,
       body: JSON.stringify({ spec: posterSpec(revisionId) }),
     })
-    expect(again.status).toBe(200)
-    expect(((await again.json()) as { created: boolean }).created).toBe(false)
+    expect(again.status).toBe(201)
+    const canonical = (await again.json()) as { poster: { posterId: string; specHash: string } }
+    const read = await apiFetch(`/api/v1/revisions/${revisionId}/posters`, { cookie: colleague.cookie })
+    expect(read.status).toBe(200)
+    expect(await read.json()).toMatchObject({ posters: [canonical.poster] })
+    const retry = await apiFetch(`/api/v1/posters/${canonical.poster.posterId}/retry`, {
+      method: 'POST',
+      cookie: colleague.cookie,
+      body: JSON.stringify({ spec: { ...posterSpec(revisionId), title: 'Replacement' } }),
+    })
+    expect(retry.status).toBe(403)
   })
 
   it('edits the memo and the tags', async () => {

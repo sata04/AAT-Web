@@ -92,10 +92,10 @@ describe('audit log', () => {
     const runId = await createRun(owner)
     const revisionId = await createRevision(owner, runId)
 
-    const rendered = await apiFetch(`/api/v1/revisions/${revisionId}/poster/auto`, {
+    const rendered = await apiFetch(`/api/v1/revisions/${revisionId}/posters`, {
       method: 'POST',
       cookie: colleague.cookie,
-      body: JSON.stringify({ spec: posterSpec(revisionId) }),
+      body: JSON.stringify({ spec: posterSpec(revisionId, 'custom') }),
     })
     expect(rendered.status).toBe(201)
 

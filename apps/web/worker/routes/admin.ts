@@ -21,17 +21,21 @@
  */
 
 import { ApiError, ROLES } from '@aat/shared'
-import { and, desc, eq, isNull, lt, sql } from 'drizzle-orm'
+import { and, desc, eq, isNotNull, isNull, lt, sql } from 'drizzle-orm'
 import { Hono } from 'hono'
 import { z } from 'zod'
 import { toPublicUser } from '../auth/identity.ts'
 import { createInvitation, revokeInvitation } from '../auth/invitations.ts'
+import { deletePasskeyKeepingOne } from '../auth/passkey-plugin.ts'
 import { resolveConfig } from '../config.ts'
+import { rowsAffected } from '../db/client.ts'
 import {
   analysisRevisions,
   auditLogs,
   cloudObjects,
+  deletedAccountObjectKeys,
   passkey,
+  quotaReservations,
   quotaUsage,
   registrationInvites,
   runs,
@@ -41,9 +45,15 @@ import {
 import type { AppEnv } from '../middleware/authorize.ts'
 import { requireCapability, requireSession, withDatabase } from '../middleware/authorize.ts'
 import { validate } from '../middleware/validate.ts'
-import { writeAuditLog } from '../services/audit.ts'
+import { auditLogInsert, writeAuditLog } from '../services/audit.ts'
 import { getCircuitBreaker, setCircuitBreaker } from '../services/flags.ts'
-import { ensureQuotaRow, setQuotaLimit } from '../services/quota.ts'
+import {
+  ACCOUNT_DELETION_REASON,
+  ensureQuotaRow,
+  releaseObjectAccounting,
+  setQuotaLimit,
+  sweepStaleReservations,
+} from '../services/quota.ts'
 import { consumeRateLimit, RATE_LIMITS, rateLimitKey } from '../services/rate-limit.ts'
 
 export const adminRoutes = new Hono<AppEnv>()
@@ -51,6 +61,27 @@ export const adminRoutes = new Hono<AppEnv>()
 adminRoutes.use('*', withDatabase, requireSession)
 
 const PAGE_SIZE = 50
+
+/*
+ * How many leftover reservation keys account deletion removes inline. Failed uploads
+ * leave one retry record each, so a long-lived account can hold far more keys than a
+ * request's subrequest budget — and a killed request retries with no progress. Past
+ * this budget the copied rows in deleted_account_object_keys finish the job via the
+ * sweeper instead.
+ */
+const RESERVATION_KEY_DELETE_BUDGET = 2_000
+
+/*
+ * Same budget, applied to owned cloud objects — each iteration costs several
+ * subrequests (R2 delete + accounting batch + row delete), so it is lower than
+ * the reservation-key cap. Rows past the budget cascade with the user; their
+ * keys are already in deleted_account_object_keys for the sweeper.
+ */
+const OBJECT_DELETE_BUDGET = 1_000
+
+function deletionPending(): ApiError {
+  return new ApiError('FORBIDDEN', { details: { reason: ACCOUNT_DELETION_REASON } })
+}
 
 const paginationSchema = z.object({
   limit: z.coerce.number().int().min(1).max(200).optional(),
@@ -107,6 +138,7 @@ adminRoutes.patch(
 
     const [target] = await db.select().from(userTable).where(eq(userTable.id, targetId)).limit(1)
     if (!target) throw new ApiError('RESOURCE_NOT_FOUND')
+    if (target.banReason === ACCOUNT_DELETION_REASON) throw deletionPending()
 
     if (targetId === actor.userId && (body.role !== undefined || body.banned === true)) {
       // An administrator who demotes or bans themselves can leave a deployment with no
@@ -120,7 +152,20 @@ adminRoutes.patch(
       patch.banned = body.banned
       patch.banReason = body.banned ? (body.banReason ?? null) : null
     }
-    await db.update(userTable).set(patch).where(eq(userTable.id, targetId))
+    const updated = await db
+      .update(userTable)
+      .set(patch)
+      .where(
+        and(
+          eq(userTable.id, targetId),
+          sql`(${userTable.banReason} IS NULL OR ${userTable.banReason} != ${ACCOUNT_DELETION_REASON})`,
+        ),
+      )
+    const [current] = await db.select().from(userTable).where(eq(userTable.id, targetId)).limit(1)
+    if (!current) throw new ApiError('RESOURCE_NOT_FOUND')
+    if (rowsAffected(updated) !== 1 || current.banReason === ACCOUNT_DELETION_REASON) {
+      throw deletionPending()
+    }
 
     /*
      * Banning ends the account's live sessions, here and now.
@@ -180,13 +225,121 @@ adminRoutes.delete('/users/:userId', requireCapability('user:manage'), async (co
   const [target] = await db.select().from(userTable).where(eq(userTable.id, targetId)).limit(1)
   if (!target) throw new ApiError('RESOURCE_NOT_FOUND')
 
+  const now = new Date()
+  await ensureQuotaRow(db, targetId, resolveConfig(context.env).defaultQuotaBytes, now)
+  // Ban/revoke new sessions and close quota admission for requests already authorised. The
+  // run tombstone is the durable barrier that commitUploadedObject actually checks after PUT.
+  // Keep these markers on a failed cleanup so DELETE can safely be retried.
+  await db.batch([
+    auditLogInsert(db, {
+      actorUserId: actor.userId,
+      action: 'user.delete_pending',
+      targetType: 'user',
+      targetId,
+      targetOwnerUserId: targetId,
+      headers: context.req.raw.headers,
+    }),
+    db
+      .update(userTable)
+      .set({ banned: true, banReason: ACCOUNT_DELETION_REASON, banExpires: null, updatedAt: now })
+      .where(eq(userTable.id, targetId)),
+    db.delete(sessionTable).where(eq(sessionTable.userId, targetId)),
+    db.update(quotaUsage).set({ bytesLimit: 0, updatedAt: now }).where(eq(quotaUsage.userId, targetId)),
+    db
+      .update(runs)
+      .set({ deletedAt: now, updatedAt: now })
+      .where(and(eq(runs.ownerUserId, targetId), isNull(runs.deletedAt))),
+    // This snapshot includes previously swept reservations and every owned object. Admission
+    // closes in this same transaction, and these keys survive the user cascade even if a late
+    // PUT's handler dies or the eager cleanup below runs out of subrequest budget.
+    db
+      .insert(deletedAccountObjectKeys)
+      .select(
+        db
+          .select({
+            r2Key: sql<string>`${quotaReservations.r2Key}`.as('r2_key'),
+            userId: quotaReservations.userId,
+            lastCheckedAt: sql<Date>`0`.as('last_checked_at'),
+          })
+          .from(quotaReservations)
+          .where(and(eq(quotaReservations.userId, targetId), isNotNull(quotaReservations.r2Key))),
+      )
+      .onConflictDoNothing(),
+    db
+      .insert(deletedAccountObjectKeys)
+      .select(
+        db
+          .select({
+            r2Key: cloudObjects.r2Key,
+            userId: cloudObjects.ownerUserId,
+            lastCheckedAt: sql<Date>`0`.as('last_checked_at'),
+          })
+          .from(cloudObjects)
+          .where(eq(cloudObjects.ownerUserId, targetId)),
+      )
+      .onConflictDoNothing(),
+  ])
+  // Expired holds must not keep a dead writer's account forever. Non-expired writers still
+  // block deletion; the independent key records cover PUTs that land after expiry/cascade.
+  await sweepStaleReservations(db, context.env.AAT_OBJECTS, now, 20, targetId)
+  const [uploading] = await db
+    .select({ id: quotaReservations.id })
+    .from(quotaReservations)
+    .where(and(eq(quotaReservations.userId, targetId), eq(quotaReservations.status, 'pending')))
+    .limit(1)
+  if (uploading) throw deletionPending()
+
   // Delete the bytes before the row: the cascade would otherwise remove every record of which
   // objects existed, leaving them in R2 with nothing pointing at them and no way to find them.
+  // Bound the eager pass like the reservation pass below — every owned key is already in
+  // deleted_account_object_keys, so rows past the budget lose nothing but promptness: the
+  // sweeper drains their bytes once the owner is gone.
   const objects = await db.select().from(cloudObjects).where(eq(cloudObjects.ownerUserId, targetId))
+  let objectsEagerlyDeleted = 0
   for (const object of objects) {
+    if (objectsEagerlyDeleted >= OBJECT_DELETE_BUDGET) break
     await context.env.AAT_OBJECTS.delete(object.r2Key)
+    await releaseObjectAccounting(db, object, now)
+    await db.delete(cloudObjects).where(eq(cloudObjects.id, object.id))
+    objectsEagerlyDeleted++
   }
-  await db.delete(userTable).where(eq(userTable.id, targetId))
+  // Rows past the budget lose their bookkeeping with the cascade; the NOT EXISTS guard
+  // below then protects only objects a racing commit inserted after this enumeration,
+  // whose keys the same snapshot already holds for the sweeper.
+  await db.delete(cloudObjects).where(eq(cloudObjects.ownerUserId, targetId))
+  // Failed uploads can retain a reservation key without an object row. Those retry records
+  // also cascade with the user, so their bytes must be deleted before removing the account.
+  const reservations = await db
+    .select({ r2Key: quotaReservations.r2Key })
+    .from(quotaReservations)
+    .where(eq(quotaReservations.userId, targetId))
+  // An account can accumulate far more released reservations than a request's subrequest
+  // budget (failed uploads leave one retry record each), and a killed request retries with
+  // no progress — deletion would never finish. The transaction already copied every key
+  // into deleted_account_object_keys, so cap this eager pass; the sweeper drains the rest
+  // once the user row is gone.
+  const objectKeys = new Set(objects.map((object) => object.r2Key))
+  const reservationKeys = new Set<string>()
+  for (const reservation of reservations) {
+    if (reservation.r2Key && !objectKeys.has(reservation.r2Key)) reservationKeys.add(reservation.r2Key)
+  }
+  let reservationKeysDeleted = 0
+  for (const r2Key of reservationKeys) {
+    if (reservationKeysDeleted >= RESERVATION_KEY_DELETE_BUDGET) break
+    await context.env.AAT_OBJECTS.delete(r2Key)
+    reservationKeysDeleted++
+  }
+  // No cascade may erase an object that appeared outside the enumeration. A retry will find it.
+  const deleted = await db
+    .delete(userTable)
+    .where(
+      and(
+        eq(userTable.id, targetId),
+        sql`NOT EXISTS (SELECT 1 FROM cloud_objects WHERE owner_user_id = ${targetId})`,
+        sql`NOT EXISTS (SELECT 1 FROM quota_reservations WHERE user_id = ${targetId} AND status = 'pending')`,
+      ),
+    )
+  if (rowsAffected(deleted) !== 1) throw deletionPending()
 
   await writeAuditLog(db, {
     actorUserId: actor.userId,
@@ -242,15 +395,10 @@ adminRoutes.delete('/passkeys/:passkeyId', requireCapability('user:manage'), asy
   const [target] = await db.select().from(passkey).where(eq(passkey.id, passkeyId)).limit(1)
   if (!target) throw new ApiError('RESOURCE_NOT_FOUND')
 
-  const [counted] = await db
-    .select({ count: sql<number>`count(*)` })
-    .from(passkey)
-    .where(eq(passkey.userId, target.userId))
-  if ((counted?.count ?? 0) <= 1) {
+  if (!(await deletePasskeyKeepingOne(db, passkeyId, target.userId))) {
     throw new ApiError('FORBIDDEN', { details: { reason: 'cannot_delete_last_passkey' } })
   }
 
-  await db.delete(passkey).where(eq(passkey.id, passkeyId))
   await writeAuditLog(db, {
     actorUserId: actor.userId,
     action: 'passkey.delete',
@@ -512,12 +660,13 @@ adminRoutes.put(
     const body = context.req.valid('json')
 
     const [target] = await db
-      .select({ id: userTable.id })
+      .select({ id: userTable.id, banReason: userTable.banReason })
       .from(userTable)
       .where(eq(userTable.id, targetId))
       .limit(1)
     if (!target) throw new ApiError('RESOURCE_NOT_FOUND')
 
+    if (target.banReason === ACCOUNT_DELETION_REASON) throw deletionPending()
     await ensureQuotaRow(db, targetId, config.defaultQuotaBytes)
     const state = await setQuotaLimit(db, targetId, body.bytesLimit)
 

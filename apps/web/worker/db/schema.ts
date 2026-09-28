@@ -644,6 +644,21 @@ export const quotaReservations = sqliteTable(
 )
 
 /**
+ * Keys retained by the deletion barrier for PUTs that may finish after the account cascade.
+ * Deliberately no user foreign key: even a dead writer's late bytes must remain discoverable.
+ * Keep successful/empty checks too; an empty bucket does not prove an admitted PUT has stopped.
+ */
+export const deletedAccountObjectKeys = sqliteTable(
+  'deleted_account_object_keys',
+  {
+    r2Key: text('r2_key').primaryKey(),
+    userId: text('user_id').notNull(),
+    lastCheckedAt: integer('last_checked_at', { mode: 'timestamp_ms' }).notNull(),
+  },
+  (table) => [index('deleted_account_object_keys_checked_idx').on(table.lastCheckedAt)],
+)
+
+/**
  * Append-only record of security-relevant actions.
  *
  * `details` is JSON and is written by code that must never put a credential in it: invitation rows

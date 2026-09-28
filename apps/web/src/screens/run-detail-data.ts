@@ -14,7 +14,7 @@ import {
   listRevisions,
   type PosterFigure,
   type RevisionSummary,
-  type RunSummary,
+  type RunDetailSummary,
   updateRun,
 } from '../cloud/gateway.ts'
 import type { PosterStatus } from '../cloud/status.ts'
@@ -63,7 +63,7 @@ export type SourceState =
 
 type Notify = (tone: NoticeItem['tone'], text: string) => void
 
-function runLoadOutcome(outcome: Awaited<ReturnType<typeof fetchRun>>): LoadState<RunSummary> {
+function runLoadOutcome(outcome: Awaited<ReturnType<typeof fetchRun>>): LoadState<RunDetailSummary> {
   if (outcome.ok) return { kind: 'ready', value: outcome.value.run }
   // The gateway cannot distinguish "no cloud" from "no such run", so neither does this.
   return {
@@ -79,7 +79,7 @@ function loadRun(
   mounted: { current: boolean },
   sessionStatus: SessionStatus,
   runId: string,
-  setRun: Dispatch<SetStateAction<LoadState<RunSummary>>>,
+  setRun: Dispatch<SetStateAction<LoadState<RunDetailSummary>>>,
 ): void {
   if (sessionStatus !== 'signed-in' || runId === '') return
   setRun({ kind: 'loading' })
@@ -154,8 +154,8 @@ function invalidateStaleReplay(
 
 export interface RunDetailData {
   mounted: { current: boolean }
-  run: LoadState<RunSummary>
-  setRun: Dispatch<SetStateAction<LoadState<RunSummary>>>
+  run: LoadState<RunDetailSummary>
+  setRun: Dispatch<SetStateAction<LoadState<RunDetailSummary>>>
   revisions: readonly RevisionSummary[]
   selectedRevisionId: string | null
   setSelectedRevisionId: Dispatch<SetStateAction<string | null>>
@@ -171,7 +171,7 @@ export interface RunDetailData {
 /** The screen's loaded state and the effects that fill it. */
 export function useRunDetailData(sessionStatus: SessionStatus, runId: string): RunDetailData {
   const mounted = useMountedRef()
-  const [run, setRun] = useState<LoadState<RunSummary>>({ kind: 'loading' })
+  const [run, setRun] = useState<LoadState<RunDetailSummary>>({ kind: 'loading' })
   const [revisions, setRevisions] = useState<readonly RevisionSummary[]>([])
   const [selectedRevisionId, setSelectedRevisionId] = useState<string | null>(null)
   const [metrics, setMetrics] = useState<RunMetrics | null>(null)
@@ -285,7 +285,7 @@ export async function runAutoPosterFor(
   deps: {
     mounted: { current: boolean }
     replay: ReplayState
-    run: LoadState<RunSummary>
+    run: LoadState<RunDetailSummary>
     notify: Notify
     setBusy: Dispatch<SetStateAction<boolean>>
     setAutoPosterStatus: Dispatch<SetStateAction<PosterStatus>>
@@ -320,7 +320,7 @@ export async function runAutoPosterFor(
 
 export async function getSourceFor(deps: {
   mounted: { current: boolean }
-  run: LoadState<RunSummary>
+  run: LoadState<RunDetailSummary>
   runId: string
   setSource: Dispatch<SetStateAction<SourceState>>
 }): Promise<void> {
@@ -369,10 +369,10 @@ export async function removeRunFor(deps: {
 export function saveTagsFor(
   deps: {
     runId: string
-    current: RunSummary
+    current: RunDetailSummary
     mounted: { current: boolean }
     notify: Notify
-    setRun: Dispatch<SetStateAction<LoadState<RunSummary>>>
+    setRun: Dispatch<SetStateAction<LoadState<RunDetailSummary>>>
   },
   tags: readonly string[],
 ): void {
@@ -392,7 +392,7 @@ export function saveTagsFor(
 
 /** Functional, so the write advances whatever the screen holds now rather than the copy a debounced save closed over. */
 export function applySavedMemo(
-  setRun: Dispatch<SetStateAction<LoadState<RunSummary>>>,
+  setRun: Dispatch<SetStateAction<LoadState<RunDetailSummary>>>,
   value: string | null,
 ): void {
   setRun((state) =>

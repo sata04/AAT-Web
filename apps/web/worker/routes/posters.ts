@@ -18,10 +18,13 @@
  *
  * ## Rendering a colleague's revision reads it; the figure belongs to them
  *
- * Every route here resolves its revision at `read`, which under the shared-workspace policy any
+ * Custom renders and reads resolve their revision at `read`, which under the shared-workspace policy any
  * Researcher or Admin holds for any member's work. A poster is derived from a revision and leaves
  * it untouched, so drawing one needs no more reach than looking at one — the thing that separates a
  * Viewer from a Researcher here is the `poster:generate` capability, not the resolver.
+ *
+ * Canonical auto publication and retry require the revision owner: a reader-supplied spec must
+ * never occupy the single canonical slot. Shared custom rendering remains supported.
  *
  * The figure and its PNG are then recorded against the **revision's owner**: their quota is
  * charged, the R2 key sits under their id, and deleting their run reclaims the bytes. Mixed
@@ -66,7 +69,9 @@ import {
   type Reservation,
   releaseReservation,
   reserveQuota,
+  sweepStaleReservations,
   unwindUploadedObject,
+  uploadedObjectIsPublishable,
 } from '../services/quota.ts'
 import { consumeRateLimit, RATE_LIMITS, rateLimitKey } from '../services/rate-limit.ts'
 import { posterKey, streamObject } from '../services/storage.ts'
@@ -153,8 +158,8 @@ interface StoredObject {
 /**
  * Claim the key, write the PNG, and settle the reservation — all inside the rollback-able
  * section. Returns null when the attempt was superseded while rendering: the row just inserted is
- * unwound and nothing is put, since R2 has no conditional write and the key now belongs to the
- * takeover. Any failure unwinds the object before propagating, so the caller only ever sees a
+ * unwound and nothing is put. Each attempt has its own physical key because R2 has no conditional
+ * delete. Any failure unwinds the object before propagating, so the caller only ever sees a
  * committed object or an error — never a remnant.
  */
 async function storePosterObject(
@@ -182,8 +187,7 @@ async function storePosterObject(
     )
 
   try {
-    // The row claims the deterministic key BEFORE the bytes are written — the same ordering as the
-    // snapshot path — so a second render that finishes cannot put over the winner's checksum.
+    // Claim the attempt's physical key before writing bytes so interrupted cleanup stays discoverable.
     await insertObjectRowClaimingKey(
       db,
       key,
@@ -204,9 +208,8 @@ async function storePosterObject(
       now,
     )
 
-    // A takeover while this attempt was rendering replaced the figure's render_attempt: this
-    // attempt is stale, and the ownership check BEFORE putting is the only thing keeping its
-    // old-spec bytes from the key the new attempt is about to claim.
+    // Avoid writing an already-superseded attempt. Distinct keys also isolate a PUT or cleanup
+    // that finishes after this check from the takeover's bytes.
     if (!(await attemptOwnsFigure(db, figureId, attempt))) {
       await unwind()
       return null
@@ -234,7 +237,7 @@ async function storePosterObject(
   } catch (error) {
     // Cleanup failure must not replace the error the request actually died of — a remnant it
     // leaves is reclaimable by the next contender for the key or the sweeper.
-    await unwind().catch(() => {})
+    await unwind().catch(() => context.env.AAT_OBJECTS.delete(key).catch(() => {}))
     throw error
   }
 }
@@ -276,10 +279,17 @@ async function commitPosterRender(
       headers: context.req.raw.headers,
     })
 
-    const published = await markRendered(db, figureId, stored.id, outcome.rendererVersion, attempt, now)
+    const published = await markRendered(
+      db,
+      figureId,
+      stored.id,
+      outcome.rendererVersion,
+      attempt,
+      now,
+      uploadedObjectIsPublishable(stored.id),
+    )
     if (!published) {
-      // Superseded inside the narrow put→publish window: the figure's new attempt will write the
-      // key itself, so this attempt's object — row, bytes and charge — goes back.
+      // Superseded inside the put→publish window: return only this attempt's row, bytes and charge.
       await unwindUploadedObject(
         db,
         context.env.AAT_OBJECTS,
@@ -301,7 +311,7 @@ async function commitPosterRender(
         context.env.AAT_OBJECTS,
         { ...uploaded, r2Key: key, ownerUserId, reservationId: reservation.id },
         now,
-      ).catch(() => {})
+      ).catch(() => context.env.AAT_OBJECTS.delete(key).catch(() => {}))
     }
     throw error
   }
@@ -345,19 +355,15 @@ async function performRender(context: AppContext, work: RenderWork, spec: Poster
   const { figureId, revision } = work
   const ownerUserId = revision.ownerUserId
   const now = new Date()
+  let reservation: Reservation | null = null
 
   try {
-    const outcome = await renderViaContainer(context.env, spec)
-
-    if (outcome.png.length === 0 || outcome.png.length > config.maxPosterBytes) {
-      throw new ApiError('POSTER_RENDER_FAILED', { details: { reason: 'png_size_out_of_range' } })
-    }
-
+    await sweepStaleReservations(db, context.env.AAT_OBJECTS, now, 20, ownerUserId)
     await ensureQuotaRow(db, ownerUserId, config.defaultQuotaBytes, now)
-    const key = posterKey(ownerUserId, revision.runId, revision.id, figureId)
-    // The PNG's size is only known now, so the reservation is taken against the configured
-    // maximum and finalised against what was actually produced.
-    const reservation = await reserveQuota(
+    const key = posterKey(ownerUserId, revision.runId, revision.id, `${figureId}-${work.attempt}`)
+    // Admit the configured output budget before paid rendering; finalisation charges the PNG's
+    // actual size. Retries with exhausted quota therefore cannot spend renderer time.
+    reservation = await reserveQuota(
       db,
       ownerUserId,
       config.maxPosterBytes,
@@ -366,6 +372,11 @@ async function performRender(context: AppContext, work: RenderWork, spec: Poster
       config.reservationTtlSeconds,
       now,
     )
+    const outcome = await renderViaContainer(context.env, spec)
+
+    if (outcome.png.length === 0 || outcome.png.length > config.maxPosterBytes) {
+      throw new ApiError('POSTER_RENDER_FAILED', { details: { reason: 'png_size_out_of_range' } })
+    }
     const published = await commitPosterRender(context, outcome, { ...work, key, reservation }, now)
 
     const [figure] = await db.select().from(posterFigures).where(eq(posterFigures.id, figureId)).limit(1)
@@ -374,6 +385,7 @@ async function performRender(context: AppContext, work: RenderWork, spec: Poster
     // rather than pretending its own render won.
     return context.json({ poster: figureResponse(figure) }, published ? 201 : 200)
   } catch (error) {
+    if (reservation) await releaseReservation(db, reservation, ownerUserId, now).catch(() => {})
     await recordRenderFailure(db, work, error, now)
     throw error
   }
@@ -392,6 +404,9 @@ posterRoutes.post(
     const actor = context.get('actor')
     const config = resolveConfig(context.env)
     const revision = await requireRevision(context, context.req.param('revisionId'), 'read')
+    if (actor.userId !== revision.ownerUserId) {
+      throw new ApiError('FORBIDDEN', { details: { reason: 'canonical_poster_requires_owner' } })
+    }
     const spec = validateSpec(context.req.valid('json').spec, revision.id, 'auto')
     const now = new Date()
 
@@ -564,6 +579,9 @@ posterRoutes.post(
     // One statement resolves the figure, the revision it draws and the liveness of their run, so
     // the deleted-run filter cannot be applied to one and forgotten on the other.
     const { figure, revision } = await requirePosterFigure(context, context.req.param('posterId'), 'read')
+    if (figure.kind === 'auto' && actor.userId !== revision.ownerUserId) {
+      throw new ApiError('FORBIDDEN', { details: { reason: 'canonical_poster_requires_owner' } })
+    }
     const spec = validateSpec(
       context.req.valid('json').spec,
       revision.id,
@@ -573,15 +591,19 @@ posterRoutes.post(
     await consumeRateLimit(db, rateLimitKey('posterRender', actor.userId), RATE_LIMITS.posterRender, now)
     await assertRenderCapacity(db, config.maxConcurrentRenders, config.renderStaleSeconds, now)
 
-    // Only a failed or queued figure may be retried, and only by the caller that wins this
+    // Failed, queued, and abandoned rendering figures may be retried by the caller that wins this
     // transition — so a user hammering "retry" starts one render, not five. The retry's spec is
     // the caller's, not necessarily the one the figure was created with, so the claim writes its
     // hash onto the row: `specHash` must always describe the render that produced the PNG.
-    const attempt = await claimForRender(db, figure.id, ['failed', 'queued'], {
+    const claimOptions = {
       maxConcurrent: config.maxConcurrentRenders,
       staleSeconds: config.renderStaleSeconds,
       spec: { specHash: await specHash(spec), presetVersion: spec.posterPresetVersion },
-    })
+    }
+    const attempt =
+      figure.status === 'rendering'
+        ? await takeOverStaleRender(db, figure.id, claimOptions, now)
+        : await claimForRender(db, figure.id, ['failed', 'queued'], claimOptions, now)
     if (attempt === null) {
       throw new ApiError('POSTER_BUSY', { details: { reason: 'not_retryable' } })
     }

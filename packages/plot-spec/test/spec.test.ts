@@ -237,6 +237,23 @@ describe('PosterPlotSpecSchema: rejection rules', () => {
     expect(safeParsePosterPlotSpec(input).success).toBe(false)
   })
 
+  it('rejects a figure whose raster exceeds the renderer budget', () => {
+    // Each bound is legitimate alone; their product is a 12000×12000 canvas the
+    // renderer container cannot hold.
+    const input = validSpecInput({ figureWidth: 20, figureHeight: 20, dpi: 600 })
+    const result = safeParsePosterPlotSpec(input)
+    expect(result.success).toBe(false)
+    if (!result.success) {
+      expect(result.error.issues.some((issue) => issue.path.includes('figureWidth'))).toBe(true)
+    }
+  })
+
+  it('accepts a maximum-dimension figure at a DPI inside the raster budget', () => {
+    // 20in × 2in at 300 dpi → 6000×600 px, well inside the budget.
+    const input = validSpecInput({ figureWidth: 20, figureHeight: 2, dpi: 300 })
+    expect(safeParsePosterPlotSpec(input).success).toBe(true)
+  })
+
   it('rejects a malformed runCode', () => {
     expect(safeParsePosterPlotSpec(validSpecInput({ runCode: 'not-a-run-code' })).success).toBe(false)
     expect(safeParsePosterPlotSpec(validSpecInput({ runCode: '2608111' })).success).toBe(false)

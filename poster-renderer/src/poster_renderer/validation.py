@@ -41,6 +41,7 @@ from .limits import (
     FIGURE_DIMENSION_MIN_INCHES,
     MAX_PAYLOAD_BYTES,
     MAX_POINTS,
+    MAX_RASTER_PIXELS,
     PLOT_DATA_KEYS,
     POSTER_KINDS,
     POSTER_PRESET_VERSIONS,
@@ -407,6 +408,14 @@ def validate_spec(value: Any) -> PosterPlotSpec:
         "figureHeight",
     )
     dpi = int(_bounded(_integer(document["dpi"], "dpi"), DPI_MIN, DPI_MAX, "dpi"))
+
+    raster_pixels = figure_width * dpi * (figure_height * dpi)
+    if raster_pixels > MAX_RASTER_PIXELS:
+        raise SpecValidationError(
+            f"figureWidth × dpi and figureHeight × dpi produce {raster_pixels:g} raster pixels, "
+            f"exceeding the {MAX_RASTER_PIXELS}-pixel budget the renderer container holds",
+            field="figureWidth",
+        )
 
     data = _object(document["data"], "data")
     _exact_keys(data, PLOT_DATA_KEYS, frozenset(), "data")

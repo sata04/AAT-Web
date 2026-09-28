@@ -352,18 +352,23 @@ runRoutes.patch(
     // under the shared-workspace policy. See the module doc.
     const patch: Record<string, unknown> = { updatedAt: now }
     if (body.memo !== undefined) patch.memo = body.memo
-    await db.update(runs).set(patch).where(eq(runs.id, run.id))
-
+    const update = db.update(runs).set(patch).where(eq(runs.id, run.id))
     if (body.tags) {
-      // Replace wholesale: the client sends the set it wants, not a diff, so there is no
-      // ordering question between an add and a remove that arrive together.
-      await db.delete(runTags).where(eq(runTags.runId, run.id))
-      if (body.tags.length > 0) {
-        await db
-          .insert(runTags)
-          .values(body.tags.map((tag) => ({ runId: run.id, tag, createdAt: now })))
-          .onConflictDoNothing()
-      }
+      // A replacement is one write: concurrent sets cannot interleave their deletes and inserts.
+      await db.batch([
+        update,
+        db.delete(runTags).where(eq(runTags.runId, run.id)),
+        ...(body.tags.length > 0
+          ? [
+              db
+                .insert(runTags)
+                .values(body.tags.map((tag) => ({ runId: run.id, tag, createdAt: now })))
+                .onConflictDoNothing(),
+            ]
+          : []),
+      ])
+    } else {
+      await update
     }
 
     await writeAuditLog(db, {
@@ -402,10 +407,19 @@ runRoutes.delete('/:runId', requireCapability('analysis:delete'), async (context
 
   // Delete the bytes first and correct the quota as each object goes, so a failure partway through
   // leaves the account charged for objects that still exist rather than for objects that do not.
+  // Live rows are not the whole set that must die: a staged object inserted mid-upload already
+  // carries a tombstone, so `deleted_at IS NULL` would skip it and its bytes — and quota — would
+  // outlive the run until a sweep. Walk anything still live or still unclaimed; a claimed row is
+  // fully dead (the sweep owns its physical cleanup).
   const objects = await db
     .select()
     .from(cloudObjects)
-    .where(and(eq(cloudObjects.runId, run.id), isNull(cloudObjects.deletedAt)))
+    .where(
+      and(
+        eq(cloudObjects.runId, run.id),
+        or(isNull(cloudObjects.deletedAt), isNull(cloudObjects.settledClaim)),
+      ),
+    )
 
   /*
    * The quota settlement runs *before* the tombstone, which inverts an earlier version of this

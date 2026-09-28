@@ -39,9 +39,17 @@
  */
 
 import { ApiError } from '@aat/shared'
-import { and, eq, inArray, isNotNull, isNull, lte, or, sql } from 'drizzle-orm'
+import { and, asc, eq, inArray, isNotNull, isNull, lte, or, sql } from 'drizzle-orm'
 import { type Database, rowsAffected } from '../db/client.ts'
-import { cloudObjects, quotaReservations, quotaUsage, runs } from '../db/schema.ts'
+import {
+  analysisRevisions,
+  cloudObjects,
+  deletedAccountObjectKeys,
+  quotaReservations,
+  quotaUsage,
+  runs,
+  user,
+} from '../db/schema.ts'
 import { newId } from '../lib/ids.ts'
 
 /*
@@ -59,10 +67,19 @@ import { newId } from '../lib/ids.ts'
 const claimedBy = (reservationId: string, token: string) =>
   sql`EXISTS (SELECT 1 FROM quota_reservations WHERE id = ${reservationId} AND claim_token = ${token})`
 
-/** Lowercase hex of an R2 checksum ArrayBuffer, matching the `sha256` column's format. */
-function checksumHex(buffer: ArrayBuffer): string {
-  return [...new Uint8Array(buffer)].map((byte) => byte.toString(16).padStart(2, '0')).join('')
-}
+// Existing durable account marker; admin PATCH and quota updates cannot remove this barrier.
+export const ACCOUNT_DELETION_REASON = 'account_deletion_in_progress'
+const outsideDeletionBarrier = (userId: string) => sql`EXISTS (SELECT 1 FROM user
+  WHERE user.id = ${userId} AND (user.ban_reason IS NULL OR user.ban_reason != ${ACCOUNT_DELETION_REASON}))`
+
+/** The publication CAS must race cleanup's settled_claim in the same D1 statement. */
+export const uploadedObjectIsPublishable = (objectId: string) => sql`EXISTS (
+  SELECT 1 FROM cloud_objects candidate
+  JOIN quota_reservations reservation ON reservation.id = candidate.reservation_id
+  JOIN runs live_run ON live_run.id = candidate.run_id
+  WHERE candidate.id = ${objectId} AND candidate.settled_claim IS NULL
+    AND candidate.deleted_at IS NULL AND reservation.status = 'finalised'
+    AND live_run.deleted_at IS NULL)`
 
 export type ReservationPurpose = 'snapshot' | 'poster' | 'source'
 
@@ -130,15 +147,36 @@ export async function reserveQuota(
     throw new ApiError('QUOTA_EXCEEDED', { details: { reason: 'invalid_declared_size' } })
   }
 
-  const result = await db
-    .update(quotaUsage)
-    .set({ bytesReserved: sql`${quotaUsage.bytesReserved} + ${bytes}`, updatedAt: now })
-    .where(
-      and(
-        eq(quotaUsage.userId, userId),
-        sql`${quotaUsage.bytesUsed} + ${quotaUsage.bytesReserved} + ${bytes} <= ${quotaUsage.bytesLimit}`,
-      ),
-    )
+  const id = newId()
+  const capacity = and(
+    eq(quotaUsage.userId, userId),
+    outsideDeletionBarrier(userId),
+    sql`${quotaUsage.bytesUsed} + ${quotaUsage.bytesReserved} + ${bytes} <= ${quotaUsage.bytesLimit}`,
+  )
+  // Insert and hold commit together. The second statement only charges this batch's admission;
+  // a failed insert rolls back the batch, and a full account inserts no reservation at all.
+  const [result] = await db.batch([
+    db.insert(quotaReservations).select(
+      db
+        .select({
+          id: sql<string>`${id}`.as('id'),
+          userId: quotaUsage.userId,
+          bytes: sql<number>`${bytes}`.as('bytes'),
+          purpose: sql<string>`${purpose}`.as('purpose'),
+          r2Key: sql<string>`${r2Key}`.as('r2_key'),
+          status: sql<string>`'pending'`.as('status'),
+          claimToken: sql<string | null>`NULL`.as('claim_token'),
+          createdAt: sql<Date>`${Math.floor(now.getTime() / 1000)}`.as('created_at'),
+          expiresAt: sql<Date>`${Math.floor(now.getTime() / 1000) + ttlSeconds}`.as('expires_at'),
+        })
+        .from(quotaUsage)
+        .where(capacity),
+    ),
+    db
+      .update(quotaUsage)
+      .set({ bytesReserved: sql`${quotaUsage.bytesReserved} + ${bytes}`, updatedAt: now })
+      .where(and(capacity, sql`EXISTS (SELECT 1 FROM quota_reservations WHERE id = ${id})`)),
+  ])
 
   if (rowsAffected(result) !== 1) {
     const state = await getQuotaState(db, userId)
@@ -148,18 +186,6 @@ export async function reserveQuota(
         : { reason: 'no_quota_row' },
     })
   }
-
-  const id = newId()
-  await db.insert(quotaReservations).values({
-    id,
-    userId,
-    bytes,
-    purpose,
-    r2Key,
-    status: 'pending',
-    createdAt: now,
-    expiresAt: new Date(now.getTime() + ttlSeconds * 1000),
-  })
 
   return { id, bytes, purpose, r2Key }
 }
@@ -187,7 +213,13 @@ export async function finaliseReservation(
     db
       .update(quotaReservations)
       .set({ status: 'finalised', claimToken: token })
-      .where(and(eq(quotaReservations.id, reservation.id), eq(quotaReservations.status, 'pending'))),
+      .where(
+        and(
+          eq(quotaReservations.id, reservation.id),
+          eq(quotaReservations.status, 'pending'),
+          outsideDeletionBarrier(userId),
+        ),
+      ),
     // Both ledger writes are correlated to the claim: a sweeper's or deleter's winning claim
     // already released `bytesReserved`, and charging usage for bytes this caller will now roll
     // back would charge for storage that does not exist.
@@ -250,6 +282,10 @@ export async function releaseReservation(
  * previous order (tombstone, then release) made a release failure permanent, because a retried
  * delete could no longer see the tombstoned object.
  */
+/**
+ * Returns whether this call performed the once-only claim, so a deleter can count the object it
+ * actually retired rather than every row it happened to walk past.
+ */
 export async function releaseObjectAccounting(
   db: Database,
   object: {
@@ -260,14 +296,14 @@ export async function releaseObjectAccounting(
     reservationId: string | null
   },
   now: Date = new Date(),
-): Promise<void> {
+): Promise<boolean> {
   const token = newId()
 
   // Rows committed before `reservation_id` existed have NULL — those bytes were always charged,
   // and there is no reservation row to carry the claim, so the object itself carries it: the
   // `settled_claim` write is the once-only marker a retry or a racing delete consults.
   if (object.reservationId === null) {
-    await db.batch([
+    const [claim] = await db.batch([
       db
         .update(cloudObjects)
         .set({ settledClaim: token })
@@ -286,7 +322,7 @@ export async function releaseObjectAccounting(
           ),
         ),
     ])
-    return
+    return rowsAffected(claim) === 1
   }
 
   // The reservation's bytes are fixed at insert, so the amount the pending-path release owes is
@@ -296,10 +332,10 @@ export async function releaseObjectAccounting(
     .from(quotaReservations)
     .where(eq(quotaReservations.id, object.reservationId))
     .limit(1)
-  if (reservation === undefined) return
+  if (reservation === undefined) return false
 
   const rid = object.reservationId
-  await db.batch([
+  const [released, settled] = await db.batch([
     // A reservation still open belongs to an upload that never charged usage — its release comes
     // out of `bytesReserved`.
     db
@@ -339,6 +375,7 @@ export async function releaseObjectAccounting(
         ),
       ),
   ])
+  return rowsAffected(released) === 1 || rowsAffected(settled) === 1
 }
 
 /**
@@ -373,8 +410,20 @@ export async function commitUploadedObject(
     : await finaliseReservation(db, reservation, object.byteSize, object.ownerUserId, now)
   if (finalised) return
 
-  await db.delete(cloudObjects).where(eq(cloudObjects.id, object.id))
-  await bucket.delete(object.r2Key)
+  // A swept upload may have lost its row to a newer generation at this legacy key.
+  // Only its own row permits physical cleanup; never delete merely because finalisation lost.
+  const [owned] = await db
+    .select()
+    .from(cloudObjects)
+    .where(
+      and(
+        eq(cloudObjects.id, object.id),
+        eq(cloudObjects.r2Key, object.r2Key),
+        eq(cloudObjects.reservationId, reservation.id),
+      ),
+    )
+    .limit(1)
+  if (owned) await unwindUploadedObject(db, bucket, owned, now)
   if (runGone) {
     // The reservation may already have been released by the deleter — releasing again is a
     // no-op on a settled row — so this is safe from either side of that race.
@@ -389,23 +438,16 @@ export async function commitUploadedObject(
  *
  * Handlers have statements after `commitUploadedObject` — the figure row, the snapshot pointer,
  * the audit entry — that can still fail. Releasing the reservation there is already a no-op: the
- * charge settled. Without this unwind the object row, the R2 bytes and the quota charge all
- * survive, and because every upload key is deterministic the `cloud_objects_r2_key_unique`
- * constraint then refuses the retry itself — the upload is permanently wedged, not just leaked.
+ * charge settled. Without this unwind the object row, the R2 bytes and the quota charge survive
+ * even though no published record names them. A legacy deterministic key can also block a retry.
  *
  * `releaseObjectAccounting` covers whatever state the commit reached — a still-pending
  * reservation, a finalised charge — exactly once, so the unwind is safe to re-run after a crash
  * mid-cleanup.
  *
- * The row is deleted BEFORE the bucket object, and the bucket delete is gated on having won the
- * row, because the unique index on `r2_key` makes the row the claim ticket: a retry that finds a
- * dead row (`evictDeadObject`) removes it and re-puts its own bytes, and that re-put must never be
- * reachable by this unwind's bucket delete. If the row is already gone the unwind is over — the
- * bytes at the key now belong to whoever took the key. The sha256 guard then narrows the
- * delete to the bytes this object actually wrote: a different-sha256 retry that raced the row
- * delete leaves its put intact. (A byte-identical retry landing inside the head→delete gap is the
- * residual window; it is uncloseable without a conditional delete R2 does not offer, and bounded
- * by the re-put the recovery path performs.)
+ * Accounting marks the row as reclaimable before R2 is touched. Keep that durable record until
+ * physical deletion confirms, so a transient R2 failure is retried by the sweeper. New uploads
+ * must use generation-specific keys: D1 ownership checks cannot make an R2 delete conditional.
  */
 export async function unwindUploadedObject(
   db: Database,
@@ -416,81 +458,62 @@ export async function unwindUploadedObject(
     sha256: string
     ownerUserId: string
     byteSize: number
-    reservationId: string
+    reservationId: string | null
   },
   now: Date = new Date(),
 ): Promise<void> {
-  await releaseObjectAccounting(db, object, now)
-  const removed = await db.delete(cloudObjects).where(eq(cloudObjects.id, object.id))
-  if (rowsAffected(removed) !== 1) return
-  const head = await bucket.head(object.r2Key)
-  if (head?.checksums.sha256 && checksumHex(head.checksums.sha256) === object.sha256) {
-    await bucket.delete(object.r2Key)
+  let accountingError: unknown
+  try {
+    await releaseObjectAccounting(db, object, now)
+  } catch (error) {
+    accountingError = error
   }
+  // Uploads use unique generation keys. Even if a sweep/account cascade removed this row
+  // during PUT, the late writer must delete its bytes. A different legacy-key owner wins.
+  const [owned] = await db.select().from(cloudObjects).where(eq(cloudObjects.r2Key, object.r2Key)).limit(1)
+  if (owned && (owned.id !== object.id || owned.reservationId !== object.reservationId)) {
+    if (accountingError) throw accountingError
+    return
+  }
+  await bucket.delete(object.r2Key)
+  // Keep the row if settlement failed: a later sweep still owes the accounting transition.
+  if (accountingError) throw accountingError
+  if (!owned) return
+  await db.batch([
+    // An unwind may follow failed publication bookkeeping. Only clear this object's pointer.
+    db
+      .update(analysisRevisions)
+      .set({ snapshotObjectId: null })
+      .where(eq(analysisRevisions.snapshotObjectId, object.id)),
+    db.delete(cloudObjects).where(eq(cloudObjects.id, object.id)),
+  ])
 }
 
 /**
- * Finish the cleanup of an object whose accounting is terminal but whose row still occupies a
- * deterministic key — the state an unwind dies in.
- *
- * "Dead" has to be provable from the row alone, because the only actor who ever calls this is a
- * stranger: a later upload that needs the key. `settled_claim` set, a reservation released or
- * settled, or a reservation row gone entirely all mean no one can still be committing it. A
- * `finalised` reservation is deliberately NOT dead — it is the steady state of every committed
- * object, and its `expires_at` lapses while the object lives legitimately, so expiry cannot
- * separate a crashed unwind from a live record.
- *
- * R2 is never touched here: the caller got to this row because its own put already wrote the key,
- * so the bytes present are the caller's, not the dead row's.
- *
- * Returns whether the key is free — true when no row existed or the row was dead and removed.
+ * A row holds its physical key until the sweeper confirms R2 deletion. Evicting even a dead row
+ * without a bucket would discard the recovery record and let a retry race its pending cleanup.
  */
-export async function evictDeadObject(db: Database, r2Key: string, now: Date = new Date()): Promise<boolean> {
-  const [row] = await db
-    .select()
-    .from(cloudObjects)
-    .where(and(eq(cloudObjects.r2Key, r2Key), isNull(cloudObjects.deletedAt)))
-    .limit(1)
-  if (!row) return true
-
-  let dead = row.settledClaim !== null
-  if (!dead && row.reservationId !== null) {
-    const [reservation] = await db
-      .select({ status: quotaReservations.status })
-      .from(quotaReservations)
-      .where(eq(quotaReservations.id, row.reservationId))
-      .limit(1)
-    dead = reservation === undefined || reservation.status === 'released' || reservation.status === 'settled'
-  }
-  if (!dead) return false
-
-  // Accounting first, row second — the same order unwindUploadedObject uses, so whoever removes
-  // the row is always the last writer the key sees.
-  await releaseObjectAccounting(db, row, now)
-  await db.delete(cloudObjects).where(eq(cloudObjects.id, row.id))
-  return true
-}
-
-/**
- * Insert the object row that claims a deterministic key, finishing a dead predecessor's eviction
- * to take the key back when the unique index still blocks the insert.
- *
- * The row is written BEFORE the bytes are put: a second contender for the same key fails its
- * insert rather than its put, so it can never leave its bytes under the winner's checksum. A live
- * predecessor keeps its key and the original error flies.
- */
-export async function insertObjectRowClaimingKey(
+export async function evictDeadObject(
   db: Database,
   r2Key: string,
+  _now: Date = new Date(),
+): Promise<boolean> {
+  const [row] = await db
+    .select({ id: cloudObjects.id })
+    .from(cloudObjects)
+    .where(eq(cloudObjects.r2Key, r2Key))
+    .limit(1)
+  return row === undefined
+}
+
+/** Claim the physical key before writing bytes; existing cleanup records retain ownership. */
+export async function insertObjectRowClaimingKey(
+  db: Database,
+  _r2Key: string,
   values: typeof cloudObjects.$inferInsert,
-  now: Date = new Date(),
+  _now: Date = new Date(),
 ): Promise<void> {
-  try {
-    await db.insert(cloudObjects).values(values)
-  } catch (insertError) {
-    if (!(await evictDeadObject(db, r2Key, now))) throw insertError
-    await db.insert(cloudObjects).values(values)
-  }
+  await db.insert(cloudObjects).values(values)
 }
 
 export interface SweepResult {
@@ -515,11 +538,18 @@ export async function sweepStaleReservations(
   bucket: R2Bucket,
   now: Date = new Date(),
   limit = 20,
+  userId?: string,
 ): Promise<SweepResult> {
   const stale = await db
     .select()
     .from(quotaReservations)
-    .where(and(eq(quotaReservations.status, 'pending'), lte(quotaReservations.expiresAt, now)))
+    .where(
+      and(
+        eq(quotaReservations.status, 'pending'),
+        lte(quotaReservations.expiresAt, now),
+        userId ? eq(quotaReservations.userId, userId) : undefined,
+      ),
+    )
     .limit(limit)
 
   let reservationsReleased = 0
@@ -531,7 +561,13 @@ export async function sweepStaleReservations(
       db
         .update(quotaReservations)
         .set({ status: 'released', claimToken: token })
-        .where(and(eq(quotaReservations.id, row.id), eq(quotaReservations.status, 'pending'))),
+        .where(
+          and(
+            eq(quotaReservations.id, row.id),
+            eq(quotaReservations.status, 'pending'),
+            lte(quotaReservations.expiresAt, now),
+          ),
+        ),
       db
         .update(quotaUsage)
         .set({
@@ -542,75 +578,170 @@ export async function sweepStaleReservations(
     ])
     if (rowsAffected(claimed) !== 1) continue
     reservationsReleased++
+  }
 
-    if (row.r2Key) {
-      // Only delete when no committed object claims the key: a finalised upload owns its bytes,
-      // and deleting those would destroy a snapshot the database still points at.
-      const [committed] = await db
+  // A released reservation is itself the retry record when no object row was ever inserted.
+  // Retain its key for delayed PUTs, rotating inspected entries so old records cannot starve new
+  // cleanup. A live object at a legacy reused key always takes precedence over this reservation.
+  const orphans = await db
+    .select()
+    .from(quotaReservations)
+    .where(
+      and(
+        inArray(quotaReservations.status, ['released', 'settled']),
+        userId ? eq(quotaReservations.userId, userId) : undefined,
+        isNotNull(quotaReservations.r2Key),
+        sql`NOT EXISTS (SELECT 1 FROM cloud_objects WHERE r2_key = ${quotaReservations.r2Key})`,
+      ),
+    )
+    .orderBy(asc(quotaReservations.expiresAt))
+    .limit(limit)
+  for (const row of orphans) {
+    if (row.r2Key && (await bucket.head(row.r2Key))) {
+      const [owner] = await db
         .select({ id: cloudObjects.id })
         .from(cloudObjects)
         .where(eq(cloudObjects.r2Key, row.r2Key))
         .limit(1)
-      if (!committed) {
+      if (!owner) {
         await bucket.delete(row.r2Key)
         orphanedObjectsDeleted++
       }
     }
+    await db.update(quotaReservations).set({ expiresAt: now }).where(eq(quotaReservations.id, row.id))
   }
 
-  // Rows whose accounting is terminal but which still occupy their deterministic key — what an
-  // unwind that dies between `releaseObjectAccounting` and its row delete leaves behind. The
-  // predicate is the one `evictDeadObject` uses: a settled_claim marker, a released or settled
-  // reservation, or a reservation row that vanished. `finalised` is deliberately not dead — it is
-  // the steady state of every committed object, and its `expires_at` lapses while the object
-  // lives legitimately, so expiry cannot separate a crashed unwind from a live record.
+  /* Object state machine:
+   * pending -> finalised/unpublished -> live (revision/figure pointer; source untombstone).
+   * pending -> released; finalised -> settled. Both are reclaimable terminal states.
+   * Expiry permits reclaiming unpublished finalised objects, but NEVER a live reference.
+   * A failed unwind can leave a finalised object untouched: absence of a live reference plus
+   * expiry makes that state reachable here. Legacy NULL-reservation orphans use created_at.
+   * Claim the predicate again atomically; publication may have won since the SELECT.
+   */
+  const unreferenced = sql`(
+    (${cloudObjects.kind} = 'snapshot' AND NOT EXISTS (
+      SELECT 1 FROM analysis_revisions WHERE snapshot_object_id = ${cloudObjects.id})) OR
+    (${cloudObjects.kind} = 'poster' AND NOT EXISTS (
+      SELECT 1 FROM poster_figures WHERE object_id = ${cloudObjects.id})) OR
+    (${cloudObjects.kind} = 'source' AND ${cloudObjects.deletedAt} IS NOT NULL))`
+  const reclaimable = and(
+    userId ? eq(cloudObjects.ownerUserId, userId) : undefined,
+    // Protect non-expired writers under the barrier, including from other cleanup predicates.
+    sql`NOT EXISTS (SELECT 1 FROM quota_reservations held JOIN user owner ON owner.id = held.user_id
+      WHERE held.id = ${cloudObjects.reservationId} AND held.status = 'pending'
+        AND held.expires_at > ${Math.floor(now.getTime() / 1000)}
+        AND owner.ban_reason = ${ACCOUNT_DELETION_REASON})`,
+    or(
+      isNotNull(cloudObjects.settledClaim),
+      sql`EXISTS (SELECT 1 FROM quota_reservations terminal WHERE terminal.id = ${cloudObjects.reservationId}
+        AND terminal.status IN ('released', 'settled'))`,
+      and(
+        isNotNull(cloudObjects.reservationId),
+        sql`NOT EXISTS (
+        SELECT 1 FROM quota_reservations WHERE id = ${cloudObjects.reservationId})`,
+      ),
+      and(
+        unreferenced,
+        sql`COALESCE((SELECT expires_at FROM quota_reservations
+        WHERE id = ${cloudObjects.reservationId}), ${cloudObjects.createdAt}) <= ${Math.floor(now.getTime() / 1000)}`,
+      ),
+    ),
+  )
   const deadRows = await db
     .select({ object: cloudObjects })
     .from(cloudObjects)
     .leftJoin(quotaReservations, eq(quotaReservations.id, cloudObjects.reservationId))
-    .where(
-      and(
-        isNull(cloudObjects.deletedAt),
-        or(
-          isNotNull(cloudObjects.settledClaim),
-          inArray(quotaReservations.status, ['released', 'settled']),
-          and(isNotNull(cloudObjects.reservationId), isNull(quotaReservations.id)),
-        ),
-      ),
-    )
+    .where(reclaimable)
     .limit(limit)
 
   let deadRowsReclaimed = 0
   for (const { object } of deadRows) {
-    // Accounting first, row second, bytes last — the order unwindUploadedObject keeps, so the
-    // row's presence always gates the bucket delete.
-    await releaseObjectAccounting(db, object, now)
-    const removed = await db.delete(cloudObjects).where(eq(cloudObjects.id, object.id))
-    if (rowsAffected(removed) !== 1) continue
-    const head = await bucket.head(object.r2Key)
-    if (head?.checksums.sha256 && checksumHex(head.checksums.sha256) === object.sha256) {
-      await bucket.delete(object.r2Key)
-    }
+    const claimed = await db
+      .update(cloudObjects)
+      // Legacy rows use this field to claim their accounting; leave NULL until unwind settles it.
+      .set({ settledClaim: object.reservationId === null ? object.settledClaim : newId() })
+      .where(
+        and(
+          eq(cloudObjects.id, object.id),
+          reclaimable,
+          // Writing the marker back is only safe while it still holds the value this
+          // sweep read: another cleanup's claim both satisfies `reclaimable` again and
+          // would be clobbered by this write, letting a second unwind decrement usage
+          // for bytes that were only charged once.
+          object.settledClaim === null
+            ? isNull(cloudObjects.settledClaim)
+            : eq(cloudObjects.settledClaim, object.settledClaim),
+        ),
+      )
+    if (rowsAffected(claimed) !== 1) continue
+    await unwindUploadedObject(db, bucket, object, now)
     deadRowsReclaimed++
+  }
+
+  // Account deletion copied every reserved key before cascading the reservation rows. Check
+  // these globally even on a user-scoped sweep: the deleted owner cannot upload to trigger one.
+  // Rotate but never discard an empty/successful check; a still-running PUT can land later.
+  const deletedKeys = await db
+    .select()
+    .from(deletedAccountObjectKeys)
+    .where(sql`NOT EXISTS (SELECT 1 FROM user WHERE id = ${deletedAccountObjectKeys.userId})`)
+    .orderBy(asc(deletedAccountObjectKeys.lastCheckedAt), asc(deletedAccountObjectKeys.r2Key))
+    .limit(limit)
+  for (const row of deletedKeys) {
+    try {
+      if (await bucket.head(row.r2Key)) {
+        await bucket.delete(row.r2Key)
+        orphanedObjectsDeleted++
+      }
+    } catch {
+      // Unrelated uploads need not fail on this account's cleanup. The retained key retries.
+    }
+    await db
+      .update(deletedAccountObjectKeys)
+      .set({ lastCheckedAt: now })
+      .where(eq(deletedAccountObjectKeys.r2Key, row.r2Key))
   }
 
   return { reservationsReleased, orphanedObjectsDeleted, deadRowsReclaimed }
 }
 
-/** Change a user's storage ceiling. Never lowers below what is already stored. */
+/** Change a user's ceiling without revoking capacity already admitted to uploads. */
 export async function setQuotaLimit(
   db: Database,
   userId: string,
   bytesLimit: number,
   now: Date = new Date(),
 ): Promise<QuotaState> {
+  const updated = await db
+    .update(quotaUsage)
+    .set({ bytesLimit, updatedAt: now })
+    .where(
+      and(
+        eq(quotaUsage.userId, userId),
+        outsideDeletionBarrier(userId),
+        sql`${quotaUsage.bytesUsed} + ${quotaUsage.bytesReserved} <= ${bytesLimit}`,
+      ),
+    )
+  const [owner] = await db
+    .select({ banReason: user.banReason })
+    .from(user)
+    .where(eq(user.id, userId))
+    .limit(1)
+  if (!owner) throw new ApiError('RESOURCE_NOT_FOUND')
+  if (owner.banReason === ACCOUNT_DELETION_REASON) {
+    throw new ApiError('FORBIDDEN', { details: { reason: ACCOUNT_DELETION_REASON } })
+  }
   const state = await getQuotaState(db, userId)
   if (!state) throw new ApiError('RESOURCE_NOT_FOUND')
-  if (bytesLimit < state.bytesUsed) {
+  if (rowsAffected(updated) !== 1) {
     throw new ApiError('QUOTA_EXCEEDED', {
-      details: { reason: 'limit_below_current_usage', bytesUsed: state.bytesUsed },
+      details: {
+        reason: 'limit_below_current_usage',
+        bytesUsed: state.bytesUsed,
+        bytesReserved: state.bytesReserved,
+      },
     })
   }
-  await db.update(quotaUsage).set({ bytesLimit, updatedAt: now }).where(eq(quotaUsage.userId, userId))
-  return { ...state, bytesLimit }
+  return state
 }

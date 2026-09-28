@@ -115,44 +115,70 @@ app.all('/api/auth/*', async (context) => {
     // "you may not" would describe a surface that is deliberately not on offer to anyone.
     throw new ApiError('RESOURCE_NOT_FOUND')
   }
-  return getAuth(context.env).handler(context.req.raw)
+  return getAuth(context.env).handler(await boundedBodyRequest(context.req.raw, MAX_AUTH_BODY_BYTES))
 })
 
 const v1 = new Hono<AppEnv>()
 
 /**
- * JSON bodies are buffered whole before a schema ever sees them, so a request whose declared
- * size is already impossible — the largest legitimate body is a poster spec, a few hundred KB —
- * is refused before a byte is paid for in isolate memory. The bound is on `Content-Length`.
- * A body that arrives without one (chunked or HTTP/2 streaming) cannot be bounded by declaration
- * at all, so on methods that carry a body it is refused rather than buffered blind — every real
- * client sends a length, because none of them stream request bodies.
+ * Count bytes before either router buffers or parses them. Content-Length is only an early
+ * rejection: lengthless streams and understated lengths still have to pass the actual byte cap.
  */
 const MAX_JSON_BODY_BYTES = 16 * 1024 * 1024
-const METHODS_WITH_BODY = new Set(['POST', 'PUT', 'PATCH'])
+// Auth carries tokens and WebAuthn responses, never uploads. 64 KiB leaves room for attestation
+// certificates while keeping public invitation redemption far below the application upload cap.
+const MAX_AUTH_BODY_BYTES = 64 * 1024
 
 /**
- * The size the request declares, or NaN when it declares none.
- *
- * An absent or blank header is the lengthless case, not a zero-byte body — `Number('')` is 0,
- * which would sail under the ceiling and buffer the very request the bound exists to refuse.
+ * The size the request declares, or NaN when it declares none. Every admitted declaration,
+ * including a missing one, is still checked against the bytes read from the stream.
  */
-function declaredBodyBytes(header: string | undefined): number {
+function declaredBodyBytes(header: string | null): number {
   const value = header?.trim()
   return value === undefined || value === '' ? Number.NaN : Number(value)
 }
 
 /** Whether this request is one the JSON ceiling applies to. */
-function boundsJsonBody(method: string, contentType: string): boolean {
-  return METHODS_WITH_BODY.has(method) && contentType.includes('application/json')
+function boundsJsonBody(contentType: string): boolean {
+  const mediaType = contentType.split(';', 1)[0]?.trim().toLowerCase() ?? ''
+  return mediaType === 'application/json' || /^application\/[^;\s]+\+json$/.test(mediaType)
+}
+
+async function boundedBodyRequest(request: Request, maxBytes: number): Promise<Request> {
+  const tooLarge = () => new ApiError('REQUEST_TOO_LARGE', { details: { maxBytes } })
+  if (declaredBodyBytes(request.headers.get('content-length')) > maxBytes) throw tooLarge()
+  if (!request.body) return request
+
+  const reader = request.body.getReader()
+  // Grow a bounded buffer instead of retaining arbitrarily many tiny/empty stream chunks.
+  let buffer = new Uint8Array(Math.min(4096, maxBytes))
+  let bytes = 0
+  try {
+    for (;;) {
+      const { done, value } = await reader.read()
+      if (done) break
+      const total = bytes + value.byteLength
+      if (total > maxBytes) {
+        await reader.cancel().catch(() => {})
+        throw tooLarge()
+      }
+      if (total > buffer.byteLength) {
+        const expanded = new Uint8Array(Math.min(maxBytes, Math.max(total, buffer.byteLength * 2)))
+        expanded.set(buffer.subarray(0, bytes))
+        buffer = expanded
+      }
+      buffer.set(value, bytes)
+      bytes = total
+    }
+  } finally {
+    reader.releaseLock()
+  }
+  return new Request(request, { body: buffer.subarray(0, bytes) })
 }
 
 v1.use('*', async (context, next) => {
-  if (boundsJsonBody(context.req.method, context.req.header('content-type') ?? '')) {
-    const declared = declaredBodyBytes(context.req.header('content-length'))
-    if (!Number.isFinite(declared) || declared > MAX_JSON_BODY_BYTES) {
-      throw new ApiError('REQUEST_TOO_LARGE', { details: { maxBytes: MAX_JSON_BODY_BYTES } })
-    }
+  if (boundsJsonBody(context.req.header('content-type') ?? '')) {
+    context.req.raw = await boundedBodyRequest(context.req.raw, MAX_JSON_BODY_BYTES)
   }
   await next()
 })
