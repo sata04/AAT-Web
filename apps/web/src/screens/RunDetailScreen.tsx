@@ -744,12 +744,12 @@ export function RunDetailScreen(): React.JSX.Element {
 
   const capabilities = session.capabilities
   const canEdit = hasCapability(capabilities, 'analysis:update')
-  // The poster routes are owner-only, not capability-only: a shared reader holding
-  // `poster:generate` on a colleague's run would get a 403 — hide the controls instead.
-  const canGeneratePoster =
-    hasCapability(capabilities, 'poster:generate') &&
-    run.kind === 'ready' &&
-    run.value.ownerUserId === session.user?.id
+  const canGeneratePoster = hasCapability(capabilities, 'poster:generate')
+  // Canonical poster routes are owner-only, not capability-only: a shared reader holding
+  // `poster:generate` on a colleague's run would get a 403 — hide those controls instead.
+  // Custom posters stay capability-gated: that route accepts shared readers.
+  const canGenerateAutoPoster =
+    canGeneratePoster && run.kind === 'ready' && run.value.ownerUserId === session.user?.id
   const canDownloadSource = hasCapability(capabilities, 'raw:download')
   const canDelete = hasCapability(capabilities, 'analysis:delete')
 
@@ -833,7 +833,7 @@ export function RunDetailScreen(): React.JSX.Element {
         runCode={current.runCode}
         replayReady={replay.kind === 'ready'}
         busy={busy}
-        canGeneratePoster={canGeneratePoster}
+        canGeneratePoster={canGenerateAutoPoster}
         onGenerate={() => void runAutoPoster(null)}
         onRetry={(posterId) => void runAutoPoster(posterId)}
       />
