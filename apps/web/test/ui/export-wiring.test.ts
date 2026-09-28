@@ -338,8 +338,8 @@ describe('identified PNG export', () => {
       foreground: '#111',
       title,
       legend: [
-        { color: '#123456', label },
-        { color: '#abcdef', label: 'Run B' },
+        { color: '#123456', label, kind: 'trace' },
+        { color: '#abcdef', label: 'Run B', kind: 'band' },
       ],
     })
     const titleLines = probe.text.filter((call) => call.font.startsWith('500'))

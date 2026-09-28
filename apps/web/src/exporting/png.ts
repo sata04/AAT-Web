@@ -35,7 +35,7 @@ export interface CanvasPngOptions {
   background: string
   /** Identification is painted into the PNG, including the visible series colours. */
   title: string
-  legend: readonly { color: string; label: string }[]
+  legend: readonly { color: string; label: string; kind: 'trace' | 'band' }[]
   foreground: string
 }
 
@@ -68,7 +68,7 @@ function wrapText(context: CanvasRenderingContext2D, text: string, width: number
 function layoutHeader(context: CanvasRenderingContext2D, width: number, options: CanvasPngOptions) {
   const available = Math.max(1, width - 2 * PADDING)
   const text: { label: string; x: number; y: number; font: string }[] = []
-  const swatches: { x: number; y: number; color: string }[] = []
+  const swatches: { x: number; y: number; color: string; alpha: number }[] = []
   let top = PADDING
   context.font = TITLE_FONT
   for (const label of wrapText(context, options.title, available)) {
@@ -88,7 +88,14 @@ function layoutHeader(context: CanvasRenderingContext2D, width: number, options:
       left = PADDING
       rowHeight = 0
     }
-    swatches.push({ x: left, y: top + (LINE_HEIGHT - SWATCH) / 2, color: entry.color })
+    // Bands shade at 10% alpha on the plot; an opaque swatch would claim a
+    // saturated colour the graph never shows.
+    swatches.push({
+      x: left,
+      y: top + (LINE_HEIGHT - SWATCH) / 2,
+      color: entry.color,
+      alpha: entry.kind === 'band' ? 0.1 : 1,
+    })
     lines.forEach((label, index) => {
       text.push({ label, x: left + SWATCH + SWATCH_GAP, y: top + index * LINE_HEIGHT, font: LEGEND_FONT })
     })
@@ -138,8 +145,10 @@ export async function canvasToPng(canvas: HTMLCanvasElement, options: CanvasPngO
     context.fillText(item.label, item.x, item.y)
   }
   for (const item of header.swatches) {
+    context.globalAlpha = item.alpha
     context.fillStyle = item.color
     context.fillRect(item.x, item.y, SWATCH, SWATCH)
+    context.globalAlpha = 1
   }
   context.imageSmoothingEnabled = true
   context.imageSmoothingQuality = 'high'

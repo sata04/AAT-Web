@@ -11,7 +11,7 @@ export interface PlotLegendEntry {
 export interface PlotCanvas {
   canvas: HTMLCanvasElement
   title: string
-  legend: readonly { color: string; label: string }[]
+  legend: readonly { color: string; label: string; kind: PlotLegendEntry['kind'] }[]
 }
 
 export function plotCanvasFor(
@@ -22,7 +22,11 @@ export function plotCanvasFor(
   return {
     canvas,
     title: model.title,
-    legend: plotLegendEntries(model, hiddenTraceKeys).map(({ colour, label }) => ({ color: colour, label })),
+    legend: plotLegendEntries(model, hiddenTraceKeys).map(({ colour, label, kind }) => ({
+      color: colour,
+      label,
+      kind,
+    })),
   }
 }
 

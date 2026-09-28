@@ -675,7 +675,9 @@ textarea {
 .plot-frame__chart {
   position: relative;
   flex: 1 1 0;
-  min-height: 0;
+  /* The heading wraps unboundedly; without a floor a long title could consume
+     the whole fixed-height replay frame and leave no chart at all. */
+  min-height: 10rem;
   min-width: 0;
 }
 
