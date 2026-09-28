@@ -342,10 +342,10 @@ describe('retrying', () => {
 
     expect(outcome.ok).toBe(true)
     // A takeover render runs inline on the Worker for far longer than the
-    // gateway's deadline. An unreachable POST gets exactly one bounded
-    // re-claim — idempotent against a live render — then the row is observed
-    // until the polling deadline.
-    expect(trace().filter((entry) => entry.startsWith('POST'))).toHaveLength(2)
+    // gateway's deadline. The listing is polled while the bounded re-claim
+    // waits, so the render finishing inside the window settles the lane with
+    // no second POST at all.
+    expect(trace().filter((entry) => entry.startsWith('POST'))).toHaveLength(1)
     expect(trace().every((entry) => !entry.includes('/retry'))).toBe(true)
   })
 

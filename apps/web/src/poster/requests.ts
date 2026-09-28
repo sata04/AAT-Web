@@ -200,10 +200,24 @@ export async function retryAutoPoster(
         // the first attempt never reached, and is a no-op against a render
         // the first attempt started.
         if (outcome.ok || outcome.kind !== 'unavailable') return outcome
-        await delay(TAKEOVER_RETRY_DELAY_MS, signal)
-        if (isAborted(signal)) return { ok: true as const, value: { poster: found } }
+        // Keep watching the row while the re-claim waits: a takeover that did
+        // reach the Worker publishes `ready` (or `failed`) well inside this
+        // window, and a listing that settles makes the second POST pointless.
+        let figure = found
+        const reclaimAt = Date.now() + TAKEOVER_RETRY_DELAY_MS
+        while (!isAborted(signal) && Date.now() < reclaimAt) {
+          await delay(POLL_INTERVAL_MS, signal)
+          const listedAgain = await listPosters(context.revisionId)
+          if (!listedAgain.ok) continue
+          const seen = listedAgain.value.posters.find((poster) => poster.posterId === posterId)
+          if (seen === undefined) continue
+          figure = seen
+          if (seen.status === 'ready' || seen.status === 'failed')
+            return { ok: true as const, value: { poster: seen } }
+        }
+        if (isAborted(signal)) return { ok: true as const, value: { poster: figure } }
         const retried = await requestAutoPoster(context.revisionId, spec)
-        return retried.ok ? retried : { ok: true as const, value: { poster: found } }
+        return retried.ok ? retried : { ok: true as const, value: { poster: figure } }
       })
       return settleRequest(context, pending, onStatus, signal, posterId)
     }
