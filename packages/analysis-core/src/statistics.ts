@@ -18,7 +18,7 @@
  * The threshold and the failure are documented in docs/numerical-compatibility.md.
  */
 
-import { AnalysisParameterError, AnalysisSizeError } from './errors.ts'
+import { AnalysisParameterError, AnalysisSizeError, DataProcessingError } from './errors.ts'
 import { absoluteMean, mean, nanArgMin, standardDeviation, sumTransformed } from './numeric.ts'
 
 // The classes live in `errors.ts` so they carry the declared wire codes;
@@ -82,23 +82,31 @@ export function roundHalfToEven(value: number): number {
 
 /** Window width in samples, matching `max(1, round(window_size * sampling_rate))`. */
 export function windowSampleCount(windowSize: number, samplingRate: number): number {
-  return Math.max(1, roundHalfToEven(windowSize * samplingRate))
+  const product = windowSize * samplingRate
+  // core/statistics.py raises at round(infinity), even when each operand is
+  // finite. An overflowing width is a parameter error, not a short recording.
+  if (!Number.isFinite(product)) {
+    throw new AnalysisParameterError(
+      `windowSize * samplingRate must be finite (received ${windowSize} * ${samplingRate})`,
+      'windowSize',
+    )
+  }
+  return Math.max(1, roundHalfToEven(product))
 }
 
 /**
  * Per-window absolute mean and standard deviation.
  *
- * Windows containing any missing sample are excluded from the search by being
- * set to NaN: a standard deviation is only defined over a fully observed
- * window, and allowing partial ones lets a window holding two valid samples win
- * with std ~ 0 while reporting a mean computed over a different sample count.
+ * Windows containing any missing sample are set to NaN, matching the oracle's
+ * completeness mask. This excludes them whenever a finite deviation exists;
+ * calculateStatistics also preserves nanargmin's NaN/+Infinity tie behavior.
  */
 function rollingWindowStatistics(
   values: Float64Array,
   validMask: Uint8Array,
   windowSamples: number,
   windowCount: number,
-): { means: Float64Array; stdDevs: Float64Array; anyComplete: boolean } {
+): { means: Float64Array; stdDevs: Float64Array; firstComplete: number; firstComputed: number } {
   if (windowCount * windowSamples > EXACT_ELEMENT_BUDGET) {
     throw new AnalysisSizeError(
       `Analysis would need ${windowCount * windowSamples} window elements, above the ` +
@@ -110,7 +118,8 @@ function rollingWindowStatistics(
 
   const means = new Float64Array(windowCount)
   const stdDevs = new Float64Array(windowCount)
-  let anyComplete = false
+  let firstComplete = -1
+  let firstComputed = -1
 
   // Rolling count of valid samples, so completeness costs O(n) rather than O(n*w).
   let validInWindow = 0
@@ -122,16 +131,17 @@ function rollingWindowStatistics(
       validInWindow += validMask[windowStart + windowSamples - 1] as number
     }
     if (validInWindow >= windowSamples) {
-      anyComplete = true
+      if (firstComplete < 0) firstComplete = windowStart
       means[windowStart] = absoluteMean(values, windowStart, windowSamples)
       stdDevs[windowStart] = standardDeviation(values, windowStart, windowSamples)
+      if (firstComputed < 0 && !Number.isNaN(stdDevs[windowStart])) firstComputed = windowStart
     } else {
       means[windowStart] = Number.NaN
       stdDevs[windowStart] = Number.NaN
     }
   }
 
-  return { means, stdDevs, anyComplete }
+  return { means, stdDevs, firstComplete, firstComputed }
 }
 
 /**
@@ -173,8 +183,8 @@ export function calculateStatistics(
   if (!anyValid) return EMPTY_WINDOW_STATISTICS
 
   // Windows are computed over the raw buffer, but invalid entries must not
-  // contribute a value. The desktop core zero-fills them and then discards any
-  // window that was not fully observed, so the zeros can never reach a result.
+  // contribute a value. The desktop core zero-fills them and then masks any
+  // window that was not fully observed with NaN.
   let analysisValues = gravity
   if (validMask.some((flag) => flag === 0)) {
     analysisValues = new Float64Array(gravity.length)
@@ -183,16 +193,24 @@ export function calculateStatistics(
     }
   }
 
-  const { means, stdDevs, anyComplete } = rollingWindowStatistics(
+  const { means, stdDevs, firstComplete, firstComputed } = rollingWindowStatistics(
     analysisValues,
     validMask,
     windowSamples,
     windowCount,
   )
-  if (!anyComplete) return EMPTY_WINDOW_STATISTICS
+  if (firstComplete < 0) return EMPTY_WINDOW_STATISTICS
+  if (firstComputed < 0) {
+    throw new DataProcessingError('STATISTICS_ALL_NAN', 'All-NaN slice encountered')
+  }
 
-  const minIndex = nanArgMin(stdDevs)
-  if (minIndex < 0) return EMPTY_WINDOW_STATISTICS
+  // Finite observations can overflow the squared deviations to +Infinity.
+  // np.nanargmin first rejects all-NaN arrays, then replaces NaNs with +Inf.
+  // If no finite minimum exists, all entries tie at +Inf and index 0 wins —
+  // even if that original entry is NaN (including an incomplete prefix).
+  // The frozen nanArgMin helper's strict comparison returns -1 in this case.
+  const argMin = nanArgMin(stdDevs)
+  const minIndex = argMin < 0 ? 0 : argMin
 
   return {
     mean: means[minIndex] as number,

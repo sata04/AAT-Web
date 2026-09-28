@@ -104,23 +104,161 @@ function deduplicateHeader(header: readonly string[]): string[] {
 }
 
 /**
+ * pandas' C tokenizer skips physically blank records, but keeps `""` as a
+ * missing observation. Papa's empty-line modes both discard that quoted record,
+ * so skip blank records before tokenising and normalise only unquoted newlines.
+ */
+function normaliseRecords(text: string, delimiter: string): string {
+  const records: string[] = []
+  // The C tokenizer's blank-line whitespace is ASCII space/tab, not JS trim's
+  // Unicode whitespace. A tab delimiter starts a field even on a tab-only row.
+  const blankRecord = delimiter === '\t' ? /^ *$/ : /^[ \t]*$/
+  let start = 0
+  let quoted = false
+  let fieldStart = true
+  for (let index = 0; index < text.length; index++) {
+    const character = text[index]
+    if (quoted) {
+      if (character === '"') {
+        if (text[index + 1] === '"') index++
+        else quoted = false
+      }
+    } else if (character === '"' && fieldStart) {
+      quoted = true
+      fieldStart = false
+    } else if (character === '\r' || character === '\n') {
+      const record = text.slice(start, index)
+      if (!blankRecord.test(record)) records.push(record)
+      if (character === '\r' && text[index + 1] === '\n') index++
+      start = index + 1
+      fieldStart = true
+    } else {
+      // A quote inside an unquoted field is literal text and must not swallow
+      // the next record separator.
+      fieldStart = character === delimiter
+    }
+  }
+  const last = text.slice(start)
+  if (!blankRecord.test(last)) records.push(last)
+  return records.join('\n')
+}
+
+/** Validate a candidate before letting it replace an apparent comma table. */
+function hasCleanLayout(parsed: Papa.ParseResult<string[]>): boolean {
+  const width = parsed.data[0]?.length ?? 0
+  if (width < 2 || parsed.errors.length > 0) return false
+  const body = parsed.data.slice(1)
+  const expected = body[0]?.length === width + 1 ? width + 1 : width
+  return body.every((row) => row.length <= expected)
+}
+
+/** A header comma alone is weak evidence when the entire body lacks commas. */
+function hasOnlySingleFieldBody(parsed: Papa.ParseResult<string[]>): boolean {
+  return (
+    parsed.errors.length === 0 &&
+    parsed.data.length > 1 &&
+    parsed.data.slice(1).every((row) => row.length === 1)
+  )
+}
+
+/**
+ * Commas inside quoted alternative-delimiter headers are metadata, not evidence
+ * of a comma layout. Unquoted header commas favor comma precedence even when
+ * later rows contain malformed quoting or too many fields.
+ */
+function hasUnquotedHeaderComma(records: string, delimiter: string): boolean {
+  let quoted = false
+  let fieldStart = true
+  for (let index = 0; index < records.length; index++) {
+    const character = records[index]
+    if (quoted) {
+      if (character === '"') {
+        if (records[index + 1] === '"') index++
+        else quoted = false
+      }
+    } else if (character === '"' && fieldStart) {
+      quoted = true
+      fieldStart = false
+    } else if (character === ',') {
+      return true
+    } else if (character === '\n') {
+      return false
+    } else {
+      fieldStart = character === delimiter
+    }
+  }
+  return false
+}
+
+/** Sniff without discarding any records from the eventual, explicit parse. */
+function sniffDelimiter(source: string): string {
+  // Empty quoted records lower Papa's average field count below its 1.99
+  // threshold. Ignore those for sniffing only; normaliseRecords preserves them.
+  const preview = Papa.parse<string[]>(source, { skipEmptyLines: true, preview: 10 })
+  if (!preview.errors.some((error) => error.code === 'UndetectableDelimiter')) {
+    return preview.meta.delimiter
+  }
+  // Many short records can defeat the average even with empty lines excluded.
+  // In that case use the first header with multiple fields, tokenising each
+  // candidate with its own quote boundaries and record separators.
+  for (const delimiter of ['\t', '|', ';', '\x1e', '\x1f']) {
+    const header = Papa.parse<string[]>(normaliseRecords(source, delimiter), {
+      delimiter,
+      newline: '\n',
+      preview: 1,
+    })
+    if ((header.data[0]?.length ?? 0) > 1 && !header.errors.some((error) => error.type === 'Quotes')) {
+      return delimiter
+    }
+  }
+  return ','
+}
+
+/**
  * Parse CSV text into a table of raw cell text.
  *
  * The first non-blank row is the header. Blank lines are dropped, matching
  * pandas' `skip_blank_lines=True`; a row with fewer fields than the header is
- * padded with empty cells, which pandas reads as missing values. A row with
- * *more* fields than the header is an error in pandas ("Expected N fields") and
- * is an error here too — the alternative is silently analysing shifted columns.
+ * padded with empty cells, which pandas reads as missing values. An extra
+ * leading field in the first body row establishes an implicit index for all
+ * rows. More than one implicit index field is unsupported.
  */
 export function parseCsvText(text: string): CsvTable {
-  const parsed = Papa.parse<string[]>(text, {
+  const source = text.replace(/^\uFEFF/, '')
+  const records = normaliseRecords(source, ',')
+  if (records === '') throw new CsvParseError('CSV_EMPTY', 'The file contains no header row.')
+  const options: Papa.ParseConfig<string[]> & { worker: false } = {
     header: false,
     // Raw text only: every conversion has to go through the pandas-compatible
     // converter, so papaparse must not guess types of its own.
     dynamicTyping: false,
-    skipEmptyLines: true,
+    newline: '\n',
+    skipEmptyLines: false,
     worker: false,
-  })
+  }
+  // data_processor.py reads comma CSVs by default. Genuine comma separators in
+  // the header establish that layout independently of any errors in its data.
+  const comma = Papa.parse<string[]>(records, { ...options, delimiter: ',' })
+  const delimiter = sniffDelimiter(source)
+  let parsed = comma
+  if (delimiter !== ',') {
+    const alternativeRecords = normaliseRecords(source, delimiter)
+    const alternative = Papa.parse<string[]>(alternativeRecords, { ...options, delimiter })
+    const fullAlternativeRows = alternative.data
+      .slice(1)
+      .every((row) => row.length === alternative.data[0]?.length)
+    // A one-column comma header supplies no competing layout: keep the
+    // alternative's errors so a malformed TSV cannot become a one-column CSV.
+    // Otherwise require both positive header evidence and a clean alternative.
+    if (
+      (comma.data[0]?.length ?? 0) < 2 ||
+      (hasCleanLayout(alternative) &&
+        (!hasUnquotedHeaderComma(records, delimiter) ||
+          (hasOnlySingleFieldBody(comma) && fullAlternativeRows)))
+    ) {
+      parsed = alternative
+    }
+  }
 
   const quoteError = parsed.errors.find((error) => error.type === 'Quotes')
   if (quoteError !== undefined) {
@@ -129,7 +267,14 @@ export function parseCsvText(text: string): CsvTable {
     })
   }
 
-  const rows = parsed.data
+  // pandas' C tokenizer terminates a field at the first NUL. Truncate the
+  // token, not the record, so later fields and sample alignment are preserved.
+  const rows = parsed.data.map((row) =>
+    row.map((cell) => {
+      const nul = cell.indexOf('\0')
+      return nul < 0 ? cell : cell.slice(0, nul)
+    }),
+  )
   const headerRow = rows[0]
   if (headerRow === undefined || headerRow.length === 0) {
     throw new CsvParseError('CSV_EMPTY', 'The file contains no header row.')
@@ -145,17 +290,17 @@ export function parseCsvText(text: string): CsvTable {
 /**
  * Transpose the body rows into column-major cell arrays.
  *
- * A row with more fields than the header is an error in pandas ("Expected N
- * fields") and is an error here — the alternative is silently analysing shifted
- * columns. A *short* row is padded with empty cells, which pandas reads as
- * missing values.
+ * pandas infers an index from the first body row, then consumes that index
+ * field even in short rows, padding the end with missing values. A later wide
+ * row cannot retroactively establish an index.
  */
 function pivotRows(rows: string[][], header: readonly string[], rowCount: number): string[][] {
   const cells: string[][] = header.map(() => new Array<string>(rowCount))
+  const indexFields = rows[1]?.length === header.length + 1 ? 1 : 0
 
   for (let rowIndex = 0; rowIndex < rowCount; rowIndex++) {
     const row = rows[rowIndex + 1] as string[]
-    if (row.length > header.length) {
+    if (row.length > header.length + indexFields) {
       throw new CsvParseError(
         'CSV_PARSE_FAILED',
         `Row ${rowIndex + 2} has ${row.length} fields but the header declares ${header.length}.`,
@@ -163,7 +308,7 @@ function pivotRows(rows: string[][], header: readonly string[], rowCount: number
       )
     }
     for (let columnIndex = 0; columnIndex < header.length; columnIndex++) {
-      ;(cells[columnIndex] as string[])[rowIndex] = row[columnIndex] ?? ''
+      ;(cells[columnIndex] as string[])[rowIndex] = row[columnIndex + indexFields] ?? ''
     }
   }
 
@@ -172,6 +317,7 @@ function pivotRows(rows: string[][], header: readonly string[], rowCount: number
 
 /** The boolean spellings the C parser accepts; a bool column is numeric to pandas. */
 const BOOLEAN_TOKENS: ReadonlySet<string> = new Set(['True', 'TRUE', 'true', 'False', 'FALSE', 'false'])
+const INTEGER_TOKEN = /^[\t\n\v\f\r ]*[+-]?\d+[\t\n\v\f\r ]*$/
 
 /**
  * How the pandas C parser would classify one cell for dtype inference: a
@@ -195,6 +341,10 @@ function cellNumericKind(cell: string): 'missing' | 'number' | 'boolean' | null 
  * Booleans count as numeric too, because `is_numeric_dtype(bool)` is `True`.
  */
 export function isNumericColumn(column: CsvColumn): boolean {
+  if (column.cells.length === 0) return false
+  const integers = integerColumnValues(column, 'inference')
+  if (integers !== null) return integers.dtype === 'int64' || integers.dtype === 'uint64'
+  if (startsWithUint64Overflow(column)) return false
   const kinds = new Set(column.cells.map(cellNumericKind))
   if (kinds.has(null)) return false
   // bool dtype can hold no NaN, so a boolean column with a missing cell — like
@@ -222,28 +372,140 @@ export interface NumericColumn {
  */
 export function toNumericColumn(column: CsvColumn): NumericColumn {
   const booleans = booleanColumnValues(column)
-  if (booleans !== null) {
-    return { values: booleans, missingCount: 0, coercedCount: 0 }
+  if (booleans !== null) return booleans
+  const integers = integerColumnValues(column, 'numeric')
+  if (integers !== null && integers.dtype !== 'str') {
+    const { values, missingCount } = integers
+    if (values.length > 0 && missingCount === values.length) {
+      throw new DataProcessingError(
+        'COLUMN_NOT_NUMERIC',
+        `Column '${column.name}' contains no numeric data.`,
+        {
+          column: column.name,
+          rows: values.length,
+        },
+      )
+    }
+    return { values, missingCount, coercedCount: 0 }
   }
-  return coerceNumericCells(column)
+  return coerceNumericCells(
+    column,
+    integers?.dtype === 'str' || (integers === null && startsWithUint64Overflow(column)),
+  )
 }
 
 /**
- * The all-boolean fast path: a column of pure boolean tokens is bool dtype to
- * pandas, and `pd.to_numeric` leaves it as 1.0/0.0 rather than coercing it to
- * NaN. Returns null when any cell is not a boolean token; an empty column is
- * vacuously all-boolean, which returns the same empty result the coercion path
- * would.
+ * pandas keeps boolean values as bool objects when missing cells require object
+ * dtype. `_to_numeric_series` in data_processor.py converts those to 1/0 with
+ * gaps, but boolean tokens mixed with numbers or text remain strings.
  */
-function booleanColumnValues(column: CsvColumn): Float64Array | null {
+function booleanColumnValues(column: CsvColumn): NumericColumn | null {
   const length = column.cells.length
   const values = new Float64Array(length)
+  let missingCount = 0
   for (let index = 0; index < length; index++) {
     const cell = column.cells[index] as string
+    if (isMissingToken(cell)) {
+      values[index] = Number.NaN
+      missingCount++
+      continue
+    }
     if (!BOOLEAN_TOKENS.has(cell)) return null
     values[index] = cell === 'True' || cell === 'TRUE' || cell === 'true' ? 1 : 0
   }
-  return values
+  if (length > 0 && missingCount === length) return null
+  return { values, missingCount, coercedCount: 0 }
+}
+
+/**
+ * pandas tries int64, then uint64, before its float converter. Unsigned values
+ * mixed with negatives or NA remain strings. Entirely integral columns beyond
+ * the 64-bit bounds become Python integer objects in pandas 3; to_numeric then
+ * casts those exactly too, although their read_csv dtype is not numeric.
+ */
+function integerColumnValues(
+  column: CsvColumn,
+  stage: 'inference' | 'numeric',
+): { values: Float64Array; missingCount: number; dtype: 'int64' | 'uint64' | 'object' | 'str' } | null {
+  const values = new Float64Array(column.cells.length)
+  let missingCount = 0
+  let unsigned = false
+  let negative = false
+  let negativeSign = false
+  let outOfRange = false
+  let unsignedOverflow = false
+  const sentinelIndices: number[] = []
+  for (let index = 0; index < column.cells.length; index++) {
+    const cell = column.cells[index] as string
+    if (isMissingToken(cell)) {
+      values[index] = Number.NaN
+      missingCount++
+      continue
+    }
+    if (!INTEGER_TOKEN.test(cell)) return null
+    const integer = BigInt(cell)
+    if (integer > 9223372036854775807n) unsigned = true
+    if (integer < 0n) negative = true
+    if (cell.trimStart().startsWith('-')) negativeSign = true
+    if (integer < -9223372036854775808n || integer > 18446744073709551615n) outOfRange = true
+    if (integer > 18446744073709551615n) unsignedOverflow = true
+    if (integer === -9223372036854775808n) sentinelIndices.push(index)
+    values[index] = Number(integer)
+  }
+  if (column.cells.length > 0 && missingCount === column.cells.length) return null
+  // Signed underflow does not override a uint64/negative conflict: pandas
+  // retains those cells as strings, including literal NA tokens. Positive
+  // uint64 overflow instead makes an all-integral column Python int objects.
+  if (unsigned && !unsignedOverflow && (missingCount > 0 || negative)) {
+    return { values, missingCount, dtype: 'str' }
+  }
+  if (outOfRange) {
+    // Defer this check until we know the whole column is integral. A later
+    // decimal/text cell takes another inference path that can accept infinity.
+    // read_csv's object inference probes the first nonmissing integer only;
+    // to_numeric subsequently converts all objects, including later overflow.
+    const firstValue = values.find((value) => !Number.isNaN(value))
+    const overflows =
+      stage === 'inference'
+        ? firstValue !== undefined && !Number.isFinite(firstValue)
+        : values.some((value) => !Number.isNaN(value) && !Number.isFinite(value))
+    if (overflows) {
+      throw new CsvParseError(
+        'CSV_PARSE_FAILED',
+        `An integer in column '${column.name}' is too large to convert to float.`,
+        {
+          column: column.name,
+        },
+      )
+    }
+    return { values, missingCount, dtype: 'object' }
+  }
+  if (unsigned) {
+    // read_csv rejects even '-0' for uint64. to_numeric on those strings can
+    // still infer uint64, so preserve the exact conversion but object detection.
+    return { values, missingCount, dtype: negativeSign ? 'object' : 'uint64' }
+  }
+  if (missingCount > 0) {
+    // int64-min is the C parser's sentinel only when NA forces a float cast.
+    // Compare the integer itself: neighbouring integers round to the same float.
+    for (const index of sentinelIndices) values[index] = Number.NaN
+    missingCount += sentinelIndices.length
+  }
+  return { values, missingCount, dtype: 'int64' }
+}
+
+/**
+ * A positive uint64 overflow before the first non-integer aborts both numeric
+ * inference and NA conversion. Reversing those rows can instead yield floats
+ * or strings with actual missing values, so this check must respect row order.
+ */
+function startsWithUint64Overflow(column: CsvColumn): boolean {
+  for (const cell of column.cells) {
+    if (isMissingToken(cell)) continue
+    if (!INTEGER_TOKEN.test(cell)) return false
+    if (BigInt(cell) > 18446744073709551615n) return true
+  }
+  return false
 }
 
 /**
@@ -251,7 +513,7 @@ function booleanColumnValues(column: CsvColumn): Float64Array | null {
  * through `parseCell`, and unconvertible text is counted and coerced to a
  * missing value. A column with no numeric value at all is an error.
  */
-function coerceNumericCells(column: CsvColumn): NumericColumn {
+function coerceNumericCells(column: CsvColumn, preserveNaStrings: boolean): NumericColumn {
   const length = column.cells.length
   const values = new Float64Array(length)
   const counts: Record<CellKind, number> = { number: 0, missing: 0, invalid: 0 }
@@ -259,7 +521,9 @@ function coerceNumericCells(column: CsvColumn): NumericColumn {
   for (let index = 0; index < length; index++) {
     const parsed = parseCell(column.cells[index] as string)
     values[index] = parsed.value
-    counts[parsed.kind]++
+    // Integer conflicts can leave pandas' NA spellings as literal strings.
+    // to_numeric then coerces them, which must produce CELLS_COERCED warnings.
+    counts[parsed.kind === 'missing' && preserveNaStrings ? 'invalid' : parsed.kind]++
   }
 
   if (length > 0 && counts.number === 0) {

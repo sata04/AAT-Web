@@ -59,7 +59,9 @@ export function detectColumns(table: CsvTable): DetectedColumns {
   let accelerationColumns: string[] = []
 
   for (const column of table.columnNames) {
-    const lowered = column.toLowerCase().trim()
+    // Python lowercases before re.IGNORECASE supplies its extra equivalences.
+    // U+0130 expands to i + combining dot; Kelvin already lowercases to k.
+    const lowered = column.toLowerCase().replace(/ı/g, 'i').replace(/ſ/g, 's').trim()
     if (TIME_PATTERN.test(lowered)) timeColumns.push(column)
     if (ACCELERATION_PATTERN.test(lowered)) accelerationColumns.push(column)
   }

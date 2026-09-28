@@ -84,6 +84,8 @@ function readNumber(record: Readonly<Record<string, unknown>>, key: string, fall
 function readBoolean(record: Readonly<Record<string, unknown>>, key: string, fallback: boolean): boolean {
   const value = record[key]
   if (typeof value === 'boolean') return value
+  // core/config.py uses bool(value) for numbers; even NaN is true in Python.
+  if (typeof value === 'number') return value !== 0
   if (typeof value === 'string') {
     const normalised = value.trim().toLowerCase()
     if (normalised === 'true') return true
