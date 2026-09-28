@@ -128,7 +128,7 @@ interface Recorded {
 const recorded: Recorded[] = []
 const realFetch = globalThis.fetch
 
-function install(responder: (request: Recorded) => Response): void {
+function install(responder: (request: Recorded) => Response | Promise<Response>): void {
   globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = new URL(String(input), 'https://aat.test')
     const request: Recorded = { method: (init?.method ?? 'GET').toUpperCase(), path: url.pathname }
@@ -302,13 +302,13 @@ describe('retrying', () => {
     ])
   })
 
-  it('resumes observing a still-rendering figure instead of posting a retry it would reject', async () => {
+  it('routes a still-rendering figure through the idempotent endpoint, not the retry it would reject', async () => {
     vi.useFakeTimers()
     let listings = 0
     install((request) => {
-      if (request.method !== 'GET') return json({ poster: figure('ready') }, 200)
+      if (request.method !== 'GET') return json({ poster: figure('rendering') }, 200)
       listings += 1
-      return json({ posters: [figure(listings >= 2 ? 'ready' : 'rendering')] })
+      return json({ posters: [figure(listings >= 3 ? 'ready' : 'rendering')] })
     })
 
     const pending = retryAutoPoster(context(), POSTER_ID, () => {})
@@ -316,10 +316,45 @@ describe('retrying', () => {
     const outcome = await pending
 
     expect(outcome.ok).toBe(true)
-    // The client's polling deadline is not a server failure: a rendering row
-    // rejects POST /retry with POSTER_BUSY, so observation continues via GETs.
-    expect(trace().length).toBeGreaterThanOrEqual(2)
-    expect(trace().every((entry) => entry.startsWith('GET'))).toBe(true)
+    // A `rendering` row rejects POST /retry with POSTER_BUSY. The idempotent
+    // endpoint answers a live render with its own row (created: false — no new
+    // render), and it is the only call that takes over a stale render when the
+    // renderer died in flight, so observing without it could never recover.
+    expect(trace().slice(0, 2)).toEqual([
+      `GET /api/v1/revisions/${REVISION_ID}/posters`,
+      `POST /api/v1/revisions/${REVISION_ID}/poster/auto`,
+    ])
+    expect(trace().every((entry) => !entry.includes('/retry'))).toBe(true)
+  })
+
+  it('publishes nothing and sends no retry when aborted while reading the figure status', async () => {
+    const controller = new AbortController()
+    let release: (() => void) | undefined
+    install((request) => {
+      if (request.method !== 'GET') return json({ poster: figure('ready') }, 200)
+      return new Promise<Response>((resolve) => {
+        release = () => resolve(json({ posters: [figure('failed')] }))
+      })
+    })
+    const statuses: PosterStatus[] = []
+
+    const pending = retryAutoPoster(
+      context(),
+      POSTER_ID,
+      (status) => statuses.push(status),
+      controller.signal,
+    )
+    await vi.waitFor(() => expect(recorded).toHaveLength(1))
+
+    // A newer request owns the lane by now — its own work must not be
+    // overwritten by this one's late `queued` or by a retry POST it asked for.
+    controller.abort()
+    release?.()
+    const outcome = await pending
+
+    expect(outcome).toMatchObject({ ok: false, kind: 'cloud' })
+    expect(statuses).toEqual([])
+    expect(recorded.filter((request) => request.method === 'POST')).toHaveLength(0)
   })
 
   it('falls back to the idempotent endpoint when no figure was ever created', async () => {

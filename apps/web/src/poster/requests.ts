@@ -130,7 +130,7 @@ export async function generateAutoPoster(
   } catch (error) {
     return { ok: false, kind: 'spec', advice: describePosterSpecError(error) }
   }
-  onStatus({ kind: 'queued' })
+  if (!isAborted(signal)) onStatus({ kind: 'queued' })
   return settleRequest(context, requestAutoPoster(context.revisionId, spec), onStatus, signal)
 }
 
@@ -150,30 +150,44 @@ export async function retryAutoPoster(
 ): Promise<PosterRequestOutcome> {
   if (posterId === null) return generateAutoPoster(context, onStatus, signal)
 
-  // A lane can carry an id without a failed server row: the client's polling
-  // deadline is not a server state, so a still-rendering figure would reject a
-  // POST to the retry endpoint with POSTER_BUSY. Read the real status first —
-  // only a genuinely failed/queued figure goes through retry; anything else
-  // resumes observation of the render already in flight.
-  const listed = await listPosters(context.revisionId)
-  if (listed.ok) {
-    const found = listed.value.posters.find((poster) => poster.posterId === posterId)
-    if (found !== undefined && (found.status === 'rendering' || found.status === 'ready')) {
-      const pending: Promise<CloudOutcome<{ poster: PosterFigure }>> = Promise.resolve({
-        ok: true,
-        value: { poster: found },
-      })
-      return settleRequest(context, pending, onStatus, signal)
-    }
-  }
-
   let spec: PosterPlotSpec
   try {
     spec = buildAutoSpec(context)
   } catch (error) {
     return { ok: false, kind: 'spec', advice: describePosterSpecError(error) }
   }
-  onStatus({ kind: 'queued', posterId })
+
+  // A lane can carry an id without a failed server row: the client's polling
+  // deadline is not a server state, so a still-rendering figure would reject a
+  // POST to the retry endpoint with POSTER_BUSY. Read the real status first —
+  // only a genuinely failed/queued figure goes through retry.
+  const listed = await listPosters(context.revisionId)
+  // The listing is the first await since this retry was requested: a newer
+  // request aborting this one already reported `queued` (or better), so
+  // publishing `queued` or POSTing a retry now would overwrite its result.
+  if (isAborted(signal))
+    return { ok: false, kind: 'cloud', message: 'request was superseded', retryable: true }
+  if (listed.ok) {
+    const found = listed.value.posters.find((poster) => poster.posterId === posterId)
+    if (found !== undefined && found.status === 'ready') {
+      const pending: Promise<CloudOutcome<{ poster: PosterFigure }>> = Promise.resolve({
+        ok: true,
+        value: { poster: found },
+      })
+      return settleRequest(context, pending, onStatus, signal)
+    }
+    if (found !== undefined && found.status === 'rendering') {
+      // A live render answers the idempotent endpoint with its own row and
+      // renders nothing — the same outcome as resuming observation. But a
+      // renderer that died in flight leaves the row `rendering` forever, and
+      // this POST is the only call that takes over a stale render; merely
+      // observing it would loop on the deadline with no way to recover.
+      if (!isAborted(signal)) onStatus({ kind: 'queued', posterId })
+      return settleRequest(context, requestAutoPoster(context.revisionId, spec), onStatus, signal)
+    }
+  }
+
+  if (!isAborted(signal)) onStatus({ kind: 'queued', posterId })
   return settleRequest(context, retryPoster(posterId, spec), onStatus, signal)
 }
 
@@ -195,7 +209,7 @@ export async function generateCustomPoster(
   } catch (error) {
     return { ok: false, kind: 'spec', advice: describePosterSpecError(error) }
   }
-  onStatus({ kind: 'queued' })
+  if (!isAborted(signal)) onStatus({ kind: 'queued' })
   return settleRequest(context, createCustomPoster(context.revisionId, spec), onStatus, signal)
 }
 
