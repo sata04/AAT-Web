@@ -21,7 +21,7 @@
  */
 
 import { ApiError, ROLES } from '@aat/shared'
-import { and, desc, eq, isNull, lt, sql } from 'drizzle-orm'
+import { and, desc, eq, isNotNull, isNull, lt, sql } from 'drizzle-orm'
 import { Hono } from 'hono'
 import { z } from 'zod'
 import { toPublicUser } from '../auth/identity.ts'
@@ -33,6 +33,7 @@ import {
   analysisRevisions,
   auditLogs,
   cloudObjects,
+  deletedAccountObjectKeys,
   passkey,
   quotaReservations,
   quotaUsage,
@@ -51,6 +52,7 @@ import {
   ensureQuotaRow,
   releaseObjectAccounting,
   setQuotaLimit,
+  sweepStaleReservations,
 } from '../services/quota.ts'
 import { consumeRateLimit, RATE_LIMITS, rateLimitKey } from '../services/rate-limit.ts'
 
@@ -133,7 +135,20 @@ adminRoutes.patch(
       patch.banned = body.banned
       patch.banReason = body.banned ? (body.banReason ?? null) : null
     }
-    await db.update(userTable).set(patch).where(eq(userTable.id, targetId))
+    const updated = await db
+      .update(userTable)
+      .set(patch)
+      .where(
+        and(
+          eq(userTable.id, targetId),
+          sql`(${userTable.banReason} IS NULL OR ${userTable.banReason} != ${ACCOUNT_DELETION_REASON})`,
+        ),
+      )
+    const [current] = await db.select().from(userTable).where(eq(userTable.id, targetId)).limit(1)
+    if (!current) throw new ApiError('RESOURCE_NOT_FOUND')
+    if (rowsAffected(updated) !== 1 || current.banReason === ACCOUNT_DELETION_REASON) {
+      throw deletionPending()
+    }
 
     /*
      * Banning ends the account's live sessions, here and now.
@@ -217,11 +232,25 @@ adminRoutes.delete('/users/:userId', requireCapability('user:manage'), async (co
       .update(runs)
       .set({ deletedAt: now, updatedAt: now })
       .where(and(eq(runs.ownerUserId, targetId), isNull(runs.deletedAt))),
+    // This snapshot includes previously swept reservations. Admission closes in this same
+    // transaction, and these keys survive the user cascade even if a late PUT's handler dies.
+    db
+      .insert(deletedAccountObjectKeys)
+      .select(
+        db
+          .select({
+            r2Key: sql<string>`${quotaReservations.r2Key}`.as('r2_key'),
+            userId: quotaReservations.userId,
+            lastCheckedAt: sql<Date>`0`.as('last_checked_at'),
+          })
+          .from(quotaReservations)
+          .where(and(eq(quotaReservations.userId, targetId), isNotNull(quotaReservations.r2Key))),
+      )
+      .onConflictDoNothing(),
   ])
-  // An admitted writer may still PUT after an R2 delete. Let it finish/unwind
-  // before removing its recovery records; the quota barrier prevents admitting another writer.
-  // The sweeper respects ACCOUNT_DELETION_REASON, even after expiry. An abandoned pending
-  // request therefore needs explicit operational recovery; expiry cannot prove a PUT has stopped.
+  // Expired holds must not keep a dead writer's account forever. Non-expired writers still
+  // block deletion; the independent key records cover PUTs that land after expiry/cascade.
+  await sweepStaleReservations(db, context.env.AAT_OBJECTS, now, 20, targetId)
   const [uploading] = await db
     .select({ id: quotaReservations.id })
     .from(quotaReservations)

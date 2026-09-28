@@ -4,12 +4,14 @@ import { describe, expect, it } from 'vitest'
 import {
   auditLogs,
   cloudObjects,
+  deletedAccountObjectKeys,
   quotaReservations,
+  quotaUsage,
   runs,
   user as userTable,
 } from '../../worker/db/schema.ts'
 import worker from '../../worker/index.ts'
-import { reserveQuota, sweepStaleReservations } from '../../worker/services/quota.ts'
+import { ensureQuotaRow, reserveQuota, sweepStaleReservations } from '../../worker/services/quota.ts'
 import { apiFetch, createRun, createUser, db, ORIGIN, type TestUser } from './helpers/client.ts'
 
 async function uploadSource(user: TestUser, runId: string, bindings: Env = env) {
@@ -91,11 +93,7 @@ describe('account deletion barrier', () => {
           }),
         ]),
       )
-      // Expiry during the barrier must not erase the only evidence of this in-flight PUT.
-      await db()
-        .update(quotaReservations)
-        .set({ expiresAt: new Date(0) })
-        .where(eq(quotaReservations.userId, user.userId))
+      // An active, non-expired PUT must still block deletion, even when a sweep runs.
       await sweepStaleReservations(db(), env.AAT_OBJECTS, new Date(), 10000)
       const held = await db()
         .select()
@@ -152,6 +150,167 @@ describe('account deletion barrier', () => {
     ).toBe(200)
     expect(await db().select().from(userTable).where(eq(userTable.id, user.userId))).toHaveLength(0)
   })
+
+  it.each([false, true])(
+    'reclaims a permanently abandoned upload under the barrier (object row: %s)',
+    async (hasObjectRow) => {
+      const admin = await createUser({ role: 'Admin' })
+      const user = await createUser()
+      const runId = await createRun(user)
+      await ensureQuotaRow(db(), user.userId, 1048576)
+      const key = `sources/${user.userId}/dead-writer`
+      const reservation = await reserveQuota(db(), user.userId, 4, 'source', key, 900)
+      // Durable crash state: this writer never resumes, finalises, or runs a catch/unwind.
+      if (hasObjectRow) {
+        await db()
+          .insert(cloudObjects)
+          .values({
+            id: `dead-${reservation.id}`,
+            ownerUserId: user.userId,
+            kind: 'source',
+            r2Key: key,
+            byteSize: 4,
+            sha256: 'a'.repeat(64),
+            contentType: 'text/csv',
+            runId,
+            reservationId: reservation.id,
+            createdAt: new Date(),
+            deletedAt: new Date(),
+          })
+        await env.AAT_OBJECTS.put(key, 'data')
+      }
+      const remove = () =>
+        apiFetch(`/api/v1/admin/users/${user.userId}`, { method: 'DELETE', cookie: admin.cookie })
+      expect((await remove()).status).toBe(403)
+      await db()
+        .update(quotaReservations)
+        .set({ expiresAt: new Date(0) })
+        .where(eq(quotaReservations.id, reservation.id))
+      const swept = await sweepStaleReservations(db(), env.AAT_OBJECTS, new Date(), 20, user.userId)
+      expect(swept.reservationsReleased).toBe(1)
+      expect(swept.deadRowsReclaimed).toBe(hasObjectRow ? 1 : 0)
+      const [quota] = await db().select().from(quotaUsage).where(eq(quotaUsage.userId, user.userId))
+      expect(quota?.bytesReserved).toBe(0)
+      expect((await remove()).status).toBe(200)
+      expect(await db().select().from(userTable).where(eq(userTable.id, user.userId))).toHaveLength(0)
+      expect(await env.AAT_OBJECTS.head(key)).toBeNull()
+    },
+  )
+
+  it('lets DELETE itself reclaim an expired abandoned hold', async () => {
+    const admin = await createUser({ role: 'Admin' })
+    const user = await createUser()
+    await ensureQuotaRow(db(), user.userId, 1048576)
+    await reserveQuota(db(), user.userId, 4, 'source', `sources/${user.userId}/dead`, 1, new Date(0))
+    expect(
+      (await apiFetch(`/api/v1/admin/users/${user.userId}`, { method: 'DELETE', cookie: admin.cookie }))
+        .status,
+    ).toBe(200)
+  })
+
+  it('unwinds a resumed PUT after its expired reservation and account have been removed', async () => {
+    const admin = await createUser({ role: 'Admin' })
+    const user = await createUser()
+    const runId = await createRun(user)
+    let entered = () => {}
+    let resume = () => {}
+    const putting = new Promise<void>((resolve) => {
+      entered = resolve
+    })
+    const gate = new Promise<void>((resolve) => {
+      resume = resolve
+    })
+    const upload = uploadSource(
+      user,
+      runId,
+      withBucket({
+        put: async (...args: Parameters<R2Bucket['put']>) => {
+          entered()
+          await gate
+          return env.AAT_OBJECTS.put(...args)
+        },
+        delete: env.AAT_OBJECTS.delete.bind(env.AAT_OBJECTS),
+      }),
+    )
+    await putting
+    try {
+      await db()
+        .update(quotaReservations)
+        .set({ expiresAt: new Date(0) })
+        .where(eq(quotaReservations.userId, user.userId))
+      await sweepStaleReservations(db(), env.AAT_OBJECTS, new Date(), 20, user.userId)
+      expect(
+        (await apiFetch(`/api/v1/admin/users/${user.userId}`, { method: 'DELETE', cookie: admin.cookie }))
+          .status,
+      ).toBe(200)
+    } finally {
+      resume()
+    }
+    expect((await upload).status).toBe(404)
+    expect((await env.AAT_OBJECTS.list({ prefix: `sources/${user.userId}/` })).objects).toHaveLength(0)
+  })
+
+  it.each(['before', 'after'])(
+    'recovers a dead writer whose PUT lands after account deletion (sweep %s barrier)',
+    async (sweepOrder) => {
+      const admin = await createUser({ role: 'Admin' })
+      const user = await createUser()
+      const runId = await createRun(user)
+      await ensureQuotaRow(db(), user.userId, 1048576)
+      const key = `sources/${user.userId}/late-dead-writer`
+      const reservation = await reserveQuota(db(), user.userId, 4, 'source', key, 900)
+      await db()
+        .insert(cloudObjects)
+        .values({
+          id: `late-${reservation.id}`,
+          ownerUserId: user.userId,
+          kind: 'source',
+          r2Key: key,
+          byteSize: 4,
+          sha256: 'a'.repeat(64),
+          contentType: 'text/csv',
+          runId,
+          reservationId: reservation.id,
+          createdAt: new Date(),
+          deletedAt: new Date(),
+        })
+      const remove = () =>
+        apiFetch(`/api/v1/admin/users/${user.userId}`, { method: 'DELETE', cookie: admin.cookie })
+      if (sweepOrder === 'after') expect((await remove()).status).toBe(403)
+      await db()
+        .update(quotaReservations)
+        .set({ expiresAt: new Date(0) })
+        .where(eq(quotaReservations.id, reservation.id))
+      await sweepStaleReservations(db(), env.AAT_OBJECTS, new Date(), 20, user.userId)
+      expect(await db().select().from(cloudObjects).where(eq(cloudObjects.r2Key, key))).toHaveLength(0)
+      expect((await remove()).status).toBe(200)
+      expect(await db().select().from(userTable).where(eq(userTable.id, user.userId))).toHaveLength(0)
+      expect(
+        await db().select().from(quotaReservations).where(eq(quotaReservations.id, reservation.id)),
+      ).toHaveLength(0)
+      const retained = () =>
+        db().select().from(deletedAccountObjectKeys).where(eq(deletedAccountObjectKeys.r2Key, key))
+      expect(await retained()).toHaveLength(1)
+
+      // Even an empty post-cascade sweep must retain the key. Simulate the queued R2 PUT
+      // landing afterwards, followed by isolate death: no handler completion/cleanup runs.
+      await sweepStaleReservations(db(), env.AAT_OBJECTS, new Date(), 10000, admin.userId)
+      expect(await retained()).toHaveLength(1)
+      await env.AAT_OBJECTS.put(key, 'late')
+      const failingBucket = withBucket({
+        put: env.AAT_OBJECTS.put.bind(env.AAT_OBJECTS),
+        delete: async () => {
+          throw new Error('temporary storage failure')
+        },
+      }).AAT_OBJECTS
+      await sweepStaleReservations(db(), failingBucket, new Date(), 10000, admin.userId)
+      expect(await env.AAT_OBJECTS.head(key)).not.toBeNull()
+      expect(await retained()).toHaveLength(1)
+      await sweepStaleReservations(db(), env.AAT_OBJECTS, new Date(), 10000, admin.userId)
+      expect(await env.AAT_OBJECTS.head(key)).toBeNull()
+      expect(await retained()).toHaveLength(1)
+    },
+  )
 
   it('rolls back barrier installation if its audit insert fails', async () => {
     const admin = await createUser({ role: 'Admin' })

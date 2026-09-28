@@ -41,7 +41,15 @@
 import { ApiError } from '@aat/shared'
 import { and, asc, eq, inArray, isNotNull, isNull, lte, or, sql } from 'drizzle-orm'
 import { type Database, rowsAffected } from '../db/client.ts'
-import { analysisRevisions, cloudObjects, quotaReservations, quotaUsage, runs } from '../db/schema.ts'
+import {
+  analysisRevisions,
+  cloudObjects,
+  deletedAccountObjectKeys,
+  quotaReservations,
+  quotaUsage,
+  runs,
+  user,
+} from '../db/schema.ts'
 import { newId } from '../lib/ids.ts'
 
 /*
@@ -61,8 +69,8 @@ const claimedBy = (reservationId: string, token: string) =>
 
 // Existing durable account marker; admin PATCH and quota updates cannot remove this barrier.
 export const ACCOUNT_DELETION_REASON = 'account_deletion_in_progress'
-const outsideDeletionBarrier = sql`NOT EXISTS (SELECT 1 FROM user
-  WHERE user.id = ${quotaReservations.userId} AND user.ban_reason = ${ACCOUNT_DELETION_REASON})`
+const outsideDeletionBarrier = (userId: string) => sql`EXISTS (SELECT 1 FROM user
+  WHERE user.id = ${userId} AND (user.ban_reason IS NULL OR user.ban_reason != ${ACCOUNT_DELETION_REASON}))`
 
 /** The publication CAS must race cleanup's settled_claim in the same D1 statement. */
 export const uploadedObjectIsPublishable = (objectId: string) => sql`EXISTS (
@@ -142,6 +150,7 @@ export async function reserveQuota(
   const id = newId()
   const capacity = and(
     eq(quotaUsage.userId, userId),
+    outsideDeletionBarrier(userId),
     sql`${quotaUsage.bytesUsed} + ${quotaUsage.bytesReserved} + ${bytes} <= ${quotaUsage.bytesLimit}`,
   )
   // Insert and hold commit together. The second statement only charges this batch's admission;
@@ -204,7 +213,13 @@ export async function finaliseReservation(
     db
       .update(quotaReservations)
       .set({ status: 'finalised', claimToken: token })
-      .where(and(eq(quotaReservations.id, reservation.id), eq(quotaReservations.status, 'pending'))),
+      .where(
+        and(
+          eq(quotaReservations.id, reservation.id),
+          eq(quotaReservations.status, 'pending'),
+          outsideDeletionBarrier(userId),
+        ),
+      ),
     // Both ledger writes are correlated to the claim: a sweeper's or deleter's winning claim
     // already released `bytesReserved`, and charging usage for bytes this caller will now roll
     // back would charge for storage that does not exist.
@@ -527,7 +542,6 @@ export async function sweepStaleReservations(
       and(
         eq(quotaReservations.status, 'pending'),
         lte(quotaReservations.expiresAt, now),
-        outsideDeletionBarrier,
         userId ? eq(quotaReservations.userId, userId) : undefined,
       ),
     )
@@ -546,7 +560,7 @@ export async function sweepStaleReservations(
           and(
             eq(quotaReservations.id, row.id),
             eq(quotaReservations.status, 'pending'),
-            outsideDeletionBarrier,
+            lte(quotaReservations.expiresAt, now),
           ),
         ),
       db
@@ -608,9 +622,10 @@ export async function sweepStaleReservations(
     (${cloudObjects.kind} = 'source' AND ${cloudObjects.deletedAt} IS NOT NULL))`
   const reclaimable = and(
     userId ? eq(cloudObjects.ownerUserId, userId) : undefined,
-    // A pending PUT under account deletion must acknowledge completion itself.
+    // Protect non-expired writers under the barrier, including from other cleanup predicates.
     sql`NOT EXISTS (SELECT 1 FROM quota_reservations held JOIN user owner ON owner.id = held.user_id
       WHERE held.id = ${cloudObjects.reservationId} AND held.status = 'pending'
+        AND held.expires_at > ${Math.floor(now.getTime() / 1000)}
         AND owner.ban_reason = ${ACCOUNT_DELETION_REASON})`,
     or(
       isNotNull(cloudObjects.settledClaim),
@@ -647,6 +662,30 @@ export async function sweepStaleReservations(
     deadRowsReclaimed++
   }
 
+  // Account deletion copied every reserved key before cascading the reservation rows. Check
+  // these globally even on a user-scoped sweep: the deleted owner cannot upload to trigger one.
+  // Rotate but never discard an empty/successful check; a still-running PUT can land later.
+  const deletedKeys = await db
+    .select()
+    .from(deletedAccountObjectKeys)
+    .where(sql`NOT EXISTS (SELECT 1 FROM user WHERE id = ${deletedAccountObjectKeys.userId})`)
+    .orderBy(asc(deletedAccountObjectKeys.lastCheckedAt), asc(deletedAccountObjectKeys.r2Key))
+    .limit(limit)
+  for (const row of deletedKeys) {
+    try {
+      if (await bucket.head(row.r2Key)) {
+        await bucket.delete(row.r2Key)
+        orphanedObjectsDeleted++
+      }
+    } catch {
+      // Unrelated uploads need not fail on this account's cleanup. The retained key retries.
+    }
+    await db
+      .update(deletedAccountObjectKeys)
+      .set({ lastCheckedAt: now })
+      .where(eq(deletedAccountObjectKeys.r2Key, row.r2Key))
+  }
+
   return { reservationsReleased, orphanedObjectsDeleted, deadRowsReclaimed }
 }
 
@@ -663,9 +702,19 @@ export async function setQuotaLimit(
     .where(
       and(
         eq(quotaUsage.userId, userId),
+        outsideDeletionBarrier(userId),
         sql`${quotaUsage.bytesUsed} + ${quotaUsage.bytesReserved} <= ${bytesLimit}`,
       ),
     )
+  const [owner] = await db
+    .select({ banReason: user.banReason })
+    .from(user)
+    .where(eq(user.id, userId))
+    .limit(1)
+  if (!owner) throw new ApiError('RESOURCE_NOT_FOUND')
+  if (owner.banReason === ACCOUNT_DELETION_REASON) {
+    throw new ApiError('FORBIDDEN', { details: { reason: ACCOUNT_DELETION_REASON } })
+  }
   const state = await getQuotaState(db, userId)
   if (!state) throw new ApiError('RESOURCE_NOT_FOUND')
   if (rowsAffected(updated) !== 1) {

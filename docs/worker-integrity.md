@@ -12,20 +12,29 @@ can temporarily hold both charges; an upload-triggered sweep after expiry reclai
 one. Cleanup runs opportunistically on uploads, so expiry is eligibility, not a cleanup deadline.
 
 Account deletion uses the existing durable `account_deletion_in_progress` ban reason,
-protected from admin unban/quota updates, rather than introducing another schema
-flag. The sweep rechecks that barrier when claiming a pending reservation. Installation
-and its `user.delete_pending` audit insert share a D1 transaction. Expiry alone never
-proves an admitted PUT has stopped. A writer that resumes cleans its unique R2 key even
-if its object row disappeared, and attempts physical deletion even if accounting fails.
+protected by predicates on the admin and quota UPDATEs, rather than introducing another
+schema flag. Admin mutations re-read the barrier after writing and reject a concurrent
+deletion. Quota admission and finalisation also check the barrier in their SQL statements.
+Installation, its `user.delete_pending` audit insert and copying every reserved R2 key
+(including previously swept reservations) to `deleted_account_object_keys` share a D1
+transaction. This recovery table has no foreign key to the account and survives its cascade.
+Non-expired pending writers block DELETE; expired holds can be released under the barrier
+by a sweep, including the bounded sweep DELETE runs before its pending check. Abandoned
+uploads therefore do not require a writer to resume before account deletion can finish.
+DELETE removes both object and reservation keys after installing the barrier. A writer
+that resumes checks run/reservation liveness before finalising and cleans its unique R2
+key even if its object row disappeared, attempting deletion even if accounting fails.
 
-Residual limits: R2 and D1 are not transactional. A killed writer under the barrier can
-leave DELETE pending indefinitely; recovery must establish that the writer has stopped
-before releasing its hold. A reservation swept *before* barrier installation can already
-be terminal while PUT is in flight. Its resumed handler deletes late bytes, but if the
-account cascade removes its recovery record and the isolate dies after the late PUT,
-an orphan can still remain. Removing that crash window requires a recovery tombstone
-outside the user cascade (or bucket reconciliation). Cleanup failures retain records
-while the account exists; no background sweep or guaranteed cleanup deadline is claimed.
+Residual limits: R2 and D1 are not transactional. A PUT can land after DELETE's final
+physical deletion, even after the account is gone. If that writer dies before cleanup,
+the retained key lets a later sweep find and delete its bytes. Sweeps check deleted-account
+keys globally even when triggered for another user, rotate a bounded batch, and retain
+keys after empty checks, successful deletes and failures: none proves a late PUT cannot
+still arrive. These recovery keys and account identifiers currently have no garbage
+collection deadline. Temporary late bytes and storage failures can persist until another
+sweep succeeds; cleanup runs opportunistically on uploads and account DELETE, with no
+background trigger or guaranteed cleanup deadline. A DELETE facing more expired holds
+than its sweep batch can reclaim may need retries, while non-expired holds still block it.
 
 Gzip uses pinned fflate with synchronous 256-byte input pushes and a decoded-output
 cap, not workerd DecompressionStream. Inflater workspace remains a bounded transient
