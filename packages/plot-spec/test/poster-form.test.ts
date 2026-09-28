@@ -72,6 +72,21 @@ describe('posterDpiOptions', () => {
     const values = options.map((option) => option.dpi)
     expect([...values].sort((left, right) => left - right)).toEqual(values)
   })
+
+  it('drops resolutions whose raster would exceed the renderer budget for the selected size', () => {
+    // Slide (13.33 × 7.5 in) at 600 dpi → 7998×4500 px, over the 2^24 budget.
+    const slide = posterFigureSizeOptions().find((option) => option.id === 'slide')
+    expect(slide).toBeDefined()
+    const options = posterDpiOptions('aat-poster-v1', slide)
+    expect(options.map((option) => option.dpi)).toEqual([150, 300])
+  })
+
+  it('keeps every resolution for a size that fits the budget at 600 dpi', () => {
+    // Compact (6.4 × 4.8 in) at 600 dpi → 3840×2880 px, inside the budget.
+    const compact = posterFigureSizeOptions().find((option) => option.id === 'compact')
+    const options = posterDpiOptions('aat-poster-v1', compact)
+    expect(options.map((option) => option.dpi)).toEqual([150, 300, 600])
+  })
 })
 
 describe('POSTER_SERIES_OPTIONS', () => {

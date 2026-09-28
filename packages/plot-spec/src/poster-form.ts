@@ -23,7 +23,7 @@
 
 import type { PosterSpecLocale } from './errors.ts'
 import { DEFAULT_POSTER_PRESET_VERSION, getPosterPreset, type PosterPresetVersion } from './presets.ts'
-import type { SeriesSelection } from './spec.ts'
+import { MAX_RASTER_PIXELS, type SeriesSelection } from './spec.ts'
 
 type LocalisedLabel = Readonly<Record<PosterSpecLocale, string>>
 
@@ -164,19 +164,33 @@ const BASE_DPI_OPTIONS: readonly PosterDpiOption[] = [
 /**
  * The resolutions a form may offer, ascending, always including the preset's own default so the
  * form can never fail to offer the value the automatic poster uses.
+ *
+ * With `size` given, options whose raster (`width × dpi` by `height × dpi`) would exceed
+ * {@link MAX_RASTER_PIXELS} are dropped — the spec rejects that combination anyway, and offering
+ * it would only hand the user a guaranteed-failing submit. The preset's own DPI is exempt from
+ * the filter: every offered size must fit the budget at the preset DPI (that is a property of
+ * the size list, not something the option can violate).
  */
 export function posterDpiOptions(
   version: PosterPresetVersion = DEFAULT_POSTER_PRESET_VERSION,
+  size?: Pick<PosterFigureSizeOption, 'widthInches' | 'heightInches'>,
 ): readonly PosterDpiOption[] {
   const presetDpi = getPosterPreset(version).defaults.dpi
-  if (BASE_DPI_OPTIONS.some((option) => option.dpi === presetDpi)) return BASE_DPI_OPTIONS
-  return [
-    ...BASE_DPI_OPTIONS,
-    {
-      dpi: presetDpi,
-      label: { ja: '標準 (デスクトップ版と同じ)', en: 'Standard (same as the desktop export)' },
-    },
-  ].sort((left, right) => left.dpi - right.dpi)
+  const base = BASE_DPI_OPTIONS.some((option) => option.dpi === presetDpi)
+    ? BASE_DPI_OPTIONS
+    : [
+        ...BASE_DPI_OPTIONS,
+        {
+          dpi: presetDpi,
+          label: { ja: '標準 (デスクトップ版と同じ)', en: 'Standard (same as the desktop export)' },
+        },
+      ].sort((left, right) => left.dpi - right.dpi)
+  if (size === undefined) return base
+  return base.filter(
+    (option) =>
+      option.dpi === presetDpi ||
+      size.widthInches * option.dpi * (size.heightInches * option.dpi) <= MAX_RASTER_PIXELS,
+  )
 }
 
 // ---------------------------------------------------------------------------------------------

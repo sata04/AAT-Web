@@ -47,6 +47,7 @@ def test_limits_mirror_the_typescript_schema():
     assert limits.FIGURE_DIMENSION_MAX_INCHES == 20
     assert limits.DPI_MIN == 72
     assert limits.DPI_MAX == 600
+    assert limits.MAX_RASTER_PIXELS == 16_777_216
     assert limits.TITLE_MAX_LENGTH == 120
     assert limits.ANALYSIS_REVISION_ID_MAX_LENGTH == 200
     assert limits.POSTER_KINDS == ("auto", "custom")
@@ -222,6 +223,18 @@ def test_dpi_at_the_boundaries_is_accepted(dpi):
 def test_integral_float_dpi_is_accepted():
     """Zod's `z.number().int()` accepts `300.0`, so this mirror must too."""
     assert validate_spec(build_spec(dpi=300.0)).dpi == 300
+
+
+def test_raster_product_outside_the_budget_is_rejected():
+    # Each bound is legitimate alone; their product is a 12000×12000 canvas the
+    # renderer container cannot hold. Attributed to figureWidth, as in spec.ts.
+    expect_rejected(build_spec(figureWidth=20, figureHeight=20, dpi=600), field="figureWidth")
+
+
+def test_maximum_dimension_figure_inside_the_budget_is_accepted():
+    # 20in × 2in at 300 dpi → 6000×600 px, well inside the budget.
+    spec = validate_spec(build_spec(figureWidth=20, figureHeight=2, dpi=300))
+    assert spec.figure_width == 20 and spec.figure_height == 2 and spec.dpi == 300
 
 
 @pytest.mark.parametrize("field", ["figureWidth", "figureHeight"])
