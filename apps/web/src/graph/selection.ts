@@ -188,7 +188,12 @@ export function valuesInRange(
 /** In-progress pointer interaction. */
 export type SelectionDrag =
   | { readonly kind: 'create'; readonly origin: number; readonly current: number }
-  | { readonly kind: 'resize'; readonly handle: 'start' | 'end'; readonly range: SelectionRange }
+  | {
+      readonly kind: 'resize'
+      readonly handle: 'start' | 'end'
+      readonly anchor: number
+      readonly range: SelectionRange
+    }
   | {
       readonly kind: 'move'
       readonly origin: number
@@ -200,7 +205,14 @@ export type SelectionDrag =
 export function beginDrag(existing: SelectionRange | null, x: number, tolerance: number): SelectionDrag {
   if (existing !== null) {
     const handle = hitTestSelection(existing, x, tolerance)
-    if (handle === 'start' || handle === 'end') return { kind: 'resize', handle, range: existing }
+    if (handle === 'start' || handle === 'end') {
+      return {
+        kind: 'resize',
+        handle,
+        anchor: handle === 'start' ? existing.xMax : existing.xMin,
+        range: existing,
+      }
+    }
     if (handle === 'body') return { kind: 'move', origin: x, originalRange: existing, range: existing }
   }
   return { kind: 'create', origin: x, current: x }
@@ -215,7 +227,10 @@ export function updateDrag(drag: SelectionDrag, x: number, bounds: AxisBounds): 
       return {
         kind: 'resize',
         handle: drag.handle,
-        range: resizeSelection(drag.range, drag.handle, x, bounds),
+        // Normalising a crossing swaps the endpoints, so the anchor must come
+        // from the initial press rather than the range from the last update.
+        anchor: drag.anchor,
+        range: clampRange(normaliseRange(drag.anchor, x), bounds),
       }
     case 'move':
       return {

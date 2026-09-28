@@ -16,6 +16,7 @@ import type { NoticeItem } from '../components/NoticeStack.tsx'
 import { ExportClient } from '../exporting/client.ts'
 import { exportPngFor, exportWorkbookFor } from '../exporting/export-actions.ts'
 import type { ChartGeometry } from '../graph/geometry.ts'
+import type { PlotCanvas } from '../graph/plot-legend.ts'
 import type { SelectionRange } from '../graph/selection.ts'
 import type { GraphPalette } from '../graph/theme.ts'
 import type { ChartViewport } from '../graph/UPlotChart.tsx'
@@ -81,7 +82,7 @@ export interface AnalyzerActionsInput {
   active: Dataset | null
   mode: ViewMode
   rangeResult: RangeStatisticsResult | null
-  canvas: HTMLCanvasElement | null
+  canvas: PlotCanvas | null
   palette: GraphPalette
   cloudSubject: string | null
   statuses: CloudStatuses
@@ -95,7 +96,7 @@ export interface AnalyzerActionsInput {
   setSelection: Dispatch<SetStateAction<SelectionRange | null>>
   setViewport: Dispatch<SetStateAction<ChartViewport | null>>
   setGeometry: Dispatch<SetStateAction<ChartGeometry | null>>
-  setCanvas: Dispatch<SetStateAction<HTMLCanvasElement | null>>
+  setCanvas: Dispatch<SetStateAction<PlotCanvas | null>>
   setGestureLayer: Dispatch<SetStateAction<HTMLElement | null>>
   setActiveName: Dispatch<SetStateAction<string | null>>
   setConfig: Dispatch<SetStateAction<AnalysisConfig>>

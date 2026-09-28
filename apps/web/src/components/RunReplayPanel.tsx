@@ -47,6 +47,7 @@ import { exportPngFor, rangeInputFor, runWorkbookExport } from '../exporting/exp
 import { workbookInputFor } from '../exporting/input.ts'
 import { PNG_PARITY_NOTICE } from '../exporting/png.ts'
 import type { ChartGeometry } from '../graph/geometry.ts'
+import type { PlotCanvas } from '../graph/plot-legend.ts'
 import { buildPlotModel, defaultViewportFor, graphBoundsFor, modelDataRange } from '../graph/plot-model.ts'
 import { SelectionOverlay } from '../graph/SelectionOverlay.tsx'
 import type { SelectionRange } from '../graph/selection.ts'
@@ -260,7 +261,7 @@ export function RunReplayPanel(props: RunReplayPanelProps): React.JSX.Element {
   const [selection, setSelection] = useState<SelectionRange | null>(null)
   const [viewport, setViewport] = useState<ChartViewport | null>(null)
   const [geometry, setGeometry] = useState<ChartGeometry | null>(null)
-  const [canvas, setCanvas] = useState<HTMLCanvasElement | null>(null)
+  const [canvas, setCanvas] = useState<PlotCanvas | null>(null)
   const [gestureLayer, setGestureLayer] = useState<HTMLElement | null>(null)
   const [posterOpen, setPosterOpen] = useState(false)
   const [exporting, setExporting] = useState(false)

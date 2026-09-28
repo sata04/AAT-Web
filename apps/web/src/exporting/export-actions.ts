@@ -16,6 +16,7 @@ import type { Dataset } from '../app/dataset.ts'
 import type { RangeStatisticsResult } from '../app/range-statistics.ts'
 import type { NoticeItem } from '../components/NoticeStack.tsx'
 import type { WorkbookInput } from '../export/workbook.ts'
+import type { PlotCanvas } from '../graph/plot-legend.ts'
 import type { GraphPalette } from '../graph/theme.ts'
 import { type ExportClient, ExportTooLargeForWorksheet, saveBlob } from './client.ts'
 import { type RangeStatisticsForExport, workbookInputFor } from './input.ts'
@@ -75,7 +76,7 @@ export async function exportWorkbookFor(
 }
 
 export async function exportPngFor(deps: {
-  canvas: HTMLCanvasElement | null
+  canvas: PlotCanvas | null
   dataset: Dataset | null
   palette: GraphPalette
   notify: (tone: NoticeItem['tone'], text: string) => void
@@ -85,7 +86,13 @@ export async function exportPngFor(deps: {
     return
   }
   try {
-    const blob = await canvasToPng(deps.canvas, { scale: 2, background: deps.palette.background })
+    const blob = await canvasToPng(deps.canvas.canvas, {
+      scale: 2,
+      background: deps.palette.background,
+      foreground: deps.palette.textPrimary,
+      title: deps.canvas.title,
+      legend: deps.canvas.legend,
+    })
     saveBlob(blob, `${deps.dataset?.name ?? 'graph'}_gl.png`)
     deps.notify('info', PNG_PARITY_NOTICE)
   } catch (error) {
