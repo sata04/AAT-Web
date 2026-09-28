@@ -47,6 +47,7 @@ def test_limits_mirror_the_typescript_schema():
     assert limits.FIGURE_DIMENSION_MAX_INCHES == 20
     assert limits.DPI_MIN == 72
     assert limits.DPI_MAX == 600
+    assert limits.MAX_RASTER_PIXELS == 10_000_000
     assert limits.TITLE_MAX_LENGTH == 120
     assert limits.ANALYSIS_REVISION_ID_MAX_LENGTH == 200
     assert limits.POSTER_KINDS == ("auto", "custom")
@@ -216,7 +217,17 @@ def test_dpi_outside_the_allowed_range_is_rejected(dpi):
 
 @pytest.mark.parametrize("dpi", [72, 300, 600])
 def test_dpi_at_the_boundaries_is_accepted(dpi):
-    assert validate_spec(build_spec(dpi=dpi)).dpi == dpi
+    assert validate_spec(build_spec(dpi=dpi, figureWidth=4, figureHeight=4)).dpi == dpi
+
+
+@pytest.mark.parametrize("width, height, dpi", [(20, 20, 600), (10, 4.001, 500)])
+def test_combined_raster_over_budget_is_rejected(width, height, dpi):
+    expect_rejected(build_spec(figureWidth=width, figureHeight=height, dpi=dpi), field="dpi")
+
+
+def test_large_raster_at_the_combined_budget_is_accepted():
+    assert 10 * 4 * 500 * 500 == limits.MAX_RASTER_PIXELS
+    assert validate_spec(build_spec(figureWidth=10, figureHeight=4, dpi=500)).dpi == 500
 
 
 def test_integral_float_dpi_is_accepted():
@@ -329,6 +340,15 @@ def test_mismatched_array_lengths_are_rejected():
     spec = build_spec()
     spec["data"]["inner"]["values"] = encode_series(np.zeros(1449))
     expect_rejected(spec, field="data.inner")
+
+
+@pytest.mark.parametrize("field", ["time", "values"])
+@pytest.mark.parametrize("payload", ["AAAAAAAAAAAA", "AAAAAAAAAA=="])
+def test_wrong_decoded_byte_lengths_are_rejected(field, payload):
+    inner = {"time": encode_series(np.array([0.])), "values": encode_series(np.array([1.]))}
+    inner[field] = {"data": payload, "length": 1}
+    spec = build_spec(series="inner", data={"inner": inner})
+    expect_rejected(spec, field=f"data.inner.{field}.data")
 
 
 def test_declared_length_not_matching_the_payload_is_rejected():

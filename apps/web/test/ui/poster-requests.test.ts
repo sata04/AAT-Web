@@ -155,6 +155,32 @@ afterEach(() => {
 })
 
 describe('the automatic poster', () => {
+  it.each(['queued', 'rendering'] as const)(
+    'publishes a retryable terminal failure when %s exceeds the deadline',
+    async (status) => {
+      vi.useFakeTimers()
+      install((request) =>
+        request.method === 'POST'
+          ? json({ poster: figure(status) }, 200)
+          : json({ posters: [figure(status)] }),
+      )
+      const statuses: PosterStatus[] = []
+      const pending = generateAutoPoster(context(), (next) => statuses.push(next))
+      await vi.advanceTimersByTimeAsync(120_000)
+      const outcome = await pending
+      expect(outcome).toMatchObject({ ok: false, kind: 'cloud', retryable: true })
+      expect(statuses.at(-1)).toEqual({
+        kind: 'failed',
+        posterId: POSTER_ID,
+        retryable: true,
+        message: outcome.ok || outcome.kind !== 'cloud' ? '' : outcome.message,
+      })
+      const calls = recorded.length
+      await vi.advanceTimersByTimeAsync(10_000)
+      expect(recorded).toHaveLength(calls)
+    },
+  )
+
   it('makes exactly one request when the Worker answers with a finished figure', async () => {
     install(() => json({ poster: figure('ready') }, 201))
     const statuses: PosterStatus[] = []
@@ -241,7 +267,7 @@ describe('the automatic poster', () => {
     // rendering: the newer request aborts this one and reports its own state immediately. A late
     // update from here would describe a figure nobody is waiting for any more.
     controller.abort()
-    await vi.advanceTimersByTimeAsync(30_000)
+    await vi.advanceTimersByTimeAsync(120_000)
     await pending
 
     expect(statuses).toHaveLength(beforeAbort)

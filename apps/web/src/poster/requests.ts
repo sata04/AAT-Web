@@ -214,18 +214,20 @@ async function settleRequest(
   }
 
   const figure = await pollUntilSettled(context.revisionId, outcome.value.poster, report, signal)
-  report(statusFor(figure))
+  if (figure.status === 'ready' || figure.status === 'failed') report(statusFor(figure))
 
   if (figure.status === 'ready') return { ok: true, poster: figure }
   if (figure.status === 'failed') {
     return { ok: false, kind: 'cloud', message: failureMessage(figure), retryable: true }
   }
-  return {
-    ok: false,
-    kind: 'cloud',
+  const failure = {
+    ok: false as const,
+    kind: 'cloud' as const,
     message: 'ポスターの生成が時間内に終わりませんでした。しばらくしてから再試行してください。',
     retryable: true,
   }
+  report({ kind: 'failed', message: failure.message, retryable: true, posterId: figure.posterId })
+  return failure
 }
 
 /**

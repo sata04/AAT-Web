@@ -31,6 +31,11 @@ FIGURE_DIMENSION_MAX_INCHES: Final = 20.0
 DPI_MIN: Final = 72
 DPI_MAX: Final = 600
 
+#: spec.ts MAX_RASTER_PIXELS — ~38 MiB per RGBA buffer, ~115 MiB for three
+#: buffers/copies, leaving ~141 MiB of the lite container for Python,
+#: Matplotlib, decoded data and PNG work. Admission policy, not figure style.
+MAX_RASTER_PIXELS: Final = 10_000_000
+
 #: spec.ts TITLE_MAX_LENGTH.
 TITLE_MAX_LENGTH: Final = 120
 

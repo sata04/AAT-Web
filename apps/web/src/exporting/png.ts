@@ -35,6 +35,24 @@ export interface CanvasPngOptions {
   background: string
 }
 
+/** Output geometry depends on CSS size, never the display's backing-store ratio. */
+export function pngTargetDimensions(
+  cssWidth: number,
+  cssHeight: number,
+  scale: number,
+): {
+  width: number
+  height: number
+} {
+  if (![cssWidth, cssHeight, scale].every((value) => Number.isFinite(value) && value > 0)) {
+    throw new Error('PNGのサイズと倍率は正の有限値で指定してください。')
+  }
+  return {
+    width: Math.max(1, Math.round(cssWidth * scale)),
+    height: Math.max(1, Math.round(cssHeight * scale)),
+  }
+}
+
 /**
  * Copy a canvas to a PNG blob.
  *
@@ -43,8 +61,7 @@ export interface CanvasPngOptions {
  * in most viewers and into an invisible plot in a dark-themed one.
  */
 export async function canvasToPng(canvas: HTMLCanvasElement, options: CanvasPngOptions): Promise<Blob> {
-  const width = Math.max(1, Math.round(canvas.width * options.scale))
-  const height = Math.max(1, Math.round(canvas.height * options.scale))
+  const { width, height } = pngTargetDimensions(canvas.clientWidth, canvas.clientHeight, options.scale)
 
   const target = document.createElement('canvas')
   target.width = width
@@ -56,6 +73,8 @@ export async function canvasToPng(canvas: HTMLCanvasElement, options: CanvasPngO
   context.fillRect(0, 0, width, height)
   context.imageSmoothingEnabled = true
   context.imageSmoothingQuality = 'high'
+  // Capture only: no uPlot redraw is wired here. Above the source backing
+  // resolution this upscales existing pixels; at/below it this copies/downscales.
   context.drawImage(canvas, 0, 0, width, height)
 
   return new Promise<Blob>((resolve, reject) => {

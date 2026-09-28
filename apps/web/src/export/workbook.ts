@@ -106,6 +106,7 @@ export type Sheet = { name: string; rows: Cell[][] }
 export function planWorkbook(input: WorkbookInput): {
   unifiedTime: Float64Array
   dataRows: number
+  sheetRows: Array<{ name: string; rows: number }>
   fitsWorksheet: boolean
 } {
   const range = unionTimeRange([
@@ -116,11 +117,29 @@ export function planWorkbook(input: WorkbookInput): {
     throw new ExportTooLargeError('There is no exportable time data.', 0, XLSX_MAX_DATA_ROWS)
   }
   const unifiedTime = buildUnifiedTimeAxis(range.start, range.end, input.samplingRate)
+  const sheetRows = worksheetRowCounts(input, unifiedTime.length)
   return {
     unifiedTime,
     dataRows: unifiedTime.length,
-    fitsWorksheet: unifiedTime.length <= XLSX_MAX_DATA_ROWS,
+    sheetRows,
+    fitsWorksheet: sheetRows.every((sheet) => sheet.rows <= XLSX_MAX_ROWS),
   }
+}
+
+/** Count headers and optional rows before allocating any worksheet cells. */
+function worksheetRowCounts(input: WorkbookInput, dataRows: number): Array<{ name: string; rows: number }> {
+  const sheets = [
+    { name: SHEET_GRAVITY_DATA, rows: dataRows + 1 },
+    {
+      name: SHEET_GRAVITY_STATISTICS,
+      rows: 1 + STATISTICS_ROW_LABELS.length + (input.rangeStatistics === undefined ? 0 : 18),
+    },
+  ]
+  if (input.inner?.acceleration !== undefined || input.drag?.acceleration !== undefined) {
+    sheets.push({ name: SHEET_ACCELERATION_DATA, rows: dataRows + 1 })
+  }
+  if (input.gQuality.length > 0) sheets.push({ name: SHEET_G_QUALITY, rows: input.gQuality.length + 1 })
+  return sheets
 }
 
 /**
@@ -137,12 +156,16 @@ export function buildSheets(
   input: WorkbookInput,
   plan: ReturnType<typeof planWorkbook> = planWorkbook(input),
 ): Sheet[] {
-  if (!plan.fitsWorksheet) {
+  // Recount the input so a supplied plan cannot bypass a changed secondary sheet.
+  const overflow = worksheetRowCounts(input, plan.unifiedTime.length).find(
+    (sheet) => sheet.rows > XLSX_MAX_ROWS,
+  )
+  if (overflow !== undefined) {
     throw new ExportTooLargeError(
-      `This analysis needs ${plan.dataRows.toLocaleString()} data rows, but a single Excel ` +
+      `The "${overflow.name}" sheet needs ${(overflow.rows - 1).toLocaleString()} data rows, but a single Excel ` +
         `worksheet holds at most ${XLSX_MAX_DATA_ROWS.toLocaleString()} (plus the header). ` +
         'Export as CSV instead, which has no row limit, or narrow the analysis range.',
-      plan.dataRows,
+      overflow.rows - 1,
       XLSX_MAX_DATA_ROWS,
     )
   }

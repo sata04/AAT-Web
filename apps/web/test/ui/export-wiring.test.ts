@@ -22,7 +22,7 @@ import {
   XLSX_MAX_DATA_ROWS,
 } from '../../src/export/workbook.ts'
 import { workbookInputFor } from '../../src/exporting/input.ts'
-import { PNG_PARITY_NOTICE } from '../../src/exporting/png.ts'
+import { PNG_PARITY_NOTICE, pngTargetDimensions } from '../../src/exporting/png.ts'
 
 function sensorDataset(options: {
   samples: number
@@ -201,6 +201,18 @@ describe('row-limit failure', () => {
 })
 
 describe('PNG parity', () => {
+  it.each([1, 2, 3])('sizes a 2x CSS capture independently of DPR %s', (dpr) => {
+    const canvas = { width: 800 * dpr, height: 400 * dpr, clientWidth: 800, clientHeight: 400 }
+    expect(pngTargetDimensions(canvas.clientWidth, canvas.clientHeight, 2)).toEqual({
+      width: 1600,
+      height: 800,
+    })
+  })
+
+  it('rounds fractional CSS dimensions cleanly', () => {
+    expect(pngTargetDimensions(800.25, 400.1, 1.5)).toEqual({ width: 1200, height: 600 })
+  })
+
   it('states plainly that the browser PNG is not the desktop figure', () => {
     // The UI shows this at the point of export; a guarantee nobody reads is not
     // a guarantee.

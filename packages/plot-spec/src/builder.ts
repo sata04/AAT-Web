@@ -117,7 +117,7 @@ export interface AutoPosterPlotSpecBuildRequest {
   readonly posterPresetVersion?: PosterPresetVersion
 }
 
-/** One sensor's samples inside the requested window, copied out of the source arrays. */
+/** Samples and gap markers needed to draw one sensor clipped to the requested window. */
 interface SelectedWindow {
   time: Float64Array
   values: Float64Array
@@ -126,19 +126,16 @@ interface SelectedWindow {
 }
 
 /**
- * Copy the samples of `series` whose time lies in `[xMin, xMax]`, inclusive of both bounds.
+ * Copy samples inside the window and endpoints of segments crossing either bound.
  *
- * A linear scan rather than a binary search, because AAT only *warns* about a non-monotonic time
- * axis instead of rejecting it (see `decimate.ts`, which makes the same allowance for drawing). A
- * binary search would silently return the wrong window for such a recording; a scan returns
- * exactly "every sample whose instant falls inside the range", which is the honest answer for any
- * ordering and is what the desktop draws. The cost is one pass over the full series per sensor for
- * a figure a human explicitly asked for — microseconds per million samples.
+ * Scan in source order because AAT permits non-monotonic timestamps. Matplotlib
+ * connects adjacent finite vertices before clipping; an outside vertex may be
+ * needed even when there is no sample inside the window. Only finite adjacent
+ * endpoints carry a line across a bound: NaN values/times must remain breaks.
  *
- * Non-finite instants need no special case: `NaN >= xMin` is false and both infinities fall
- * outside any finite range, so a spoiled time sample is excluded by the comparison itself rather
- * than by a check that could be forgotten. That is also why the resulting `time` array always
- * satisfies the schema's "time must be finite" rule by construction.
+ * Insert a NaN between disjoint retained runs so dropping source vertices never
+ * creates a new segment. Its timestamp is finite to satisfy the wire contract.
+ * Count these markers and outside endpoints before allocating or encoding.
  */
 function selectWindow(
   sensor: SensorKey,
@@ -150,6 +147,7 @@ function selectWindow(
   const length = series.length
 
   let count = 0
+  let previous = -1
   let dataMinTime = Number.POSITIVE_INFINITY
   let dataMaxTime = Number.NEGATIVE_INFINITY
   for (let index = 0; index < length; index++) {
@@ -157,7 +155,11 @@ function selectWindow(
     if (!Number.isFinite(instant)) continue
     if (instant < dataMinTime) dataMinTime = instant
     if (instant > dataMaxTime) dataMaxTime = instant
-    if (instant >= xMin && instant <= xMax) count++
+    if (retainSample(series, index, xMin, xMax)) {
+      if (previous >= 0 && index > previous + 1) count++
+      count++
+      previous = index
+    }
   }
 
   if (count === 0) {
@@ -193,9 +195,10 @@ function selectWindow(
   const selectedValues = new Float64Array(count)
   let cursor = 0
   let finiteCount = 0
+  previous = -1
   for (let index = 0; index < length; index++) {
     const instant = time[index] as number
-    if (!(instant >= xMin && instant <= xMax)) continue
+    if (!retainSample(series, index, xMin, xMax)) continue
     const value = values[index] as number
     // NaN is the documented gap marker and belongs in the poster; an infinite gravity level is
     // never a measurement, and the schema would reject it after the expensive encode step anyway.
@@ -204,6 +207,11 @@ function selectWindow(
         details: { reason: 'non_finite_value', sensor, index },
       })
     }
+    if (previous >= 0 && index > previous + 1) {
+      selectedTime[cursor] = instant
+      selectedValues[cursor++] = Number.NaN
+    }
+    previous = index
     selectedTime[cursor] = instant
     selectedValues[cursor] = value
     if (!Number.isNaN(value)) finiteCount++
@@ -211,6 +219,36 @@ function selectWindow(
   }
 
   return { time: selectedTime, values: selectedValues, finiteCount }
+}
+
+function retainSample(series: FullResolutionSeries, index: number, xMin: number, xMax: number): boolean {
+  const instant = series.time[index] as number
+  if (!Number.isFinite(instant)) return false
+  return (
+    (instant >= xMin && instant <= xMax) ||
+    segmentCrossesWindow(series, index - 1, xMin, xMax) ||
+    segmentCrossesWindow(series, index, xMin, xMax)
+  )
+}
+
+/** A segment touching a bound from outside needs no extra vertex unless it enters the window. */
+function segmentCrossesWindow(
+  series: FullResolutionSeries,
+  index: number,
+  xMin: number,
+  xMax: number,
+): boolean {
+  if (index < 0 || index + 1 >= series.length) return false
+  const start = series.time[index] as number
+  const end = series.time[index + 1] as number
+  return (
+    Number.isFinite(start) &&
+    Number.isFinite(end) &&
+    Number.isFinite(series.values[index]) &&
+    Number.isFinite(series.values[index + 1]) &&
+    Math.min(start, end) < xMax &&
+    Math.max(start, end) > xMin
+  )
 }
 
 /** Which sensors a `series` selection implies, in the order the schema's `data` object lists them. */
@@ -388,7 +426,7 @@ export function buildPosterPlotSpec(request: PosterPlotSpecBuildRequest): Poster
  * path agree on what "the automatic poster" of a revision is.
  *
  * Sensor selection follows the data: a sensor is drawn if a source series was supplied for it
- * *and* that series has at least one sample inside the preset's x-range. A single-sensor run
+ * *and* that series has a sample or crossing segment inside the preset's x-range. A single-sensor run
  * therefore gets a single-sensor poster instead of a refusal, and neither sensor having anything
  * in the window is a `POSTER_RANGE_EMPTY` refusal rather than an empty figure.
  *
@@ -443,17 +481,15 @@ export function buildAutoPosterPlotSpec(request: AutoPosterPlotSpecBuildRequest)
   })
 }
 
-/** Whether a supplied source has at least one sample inside `[xMin, xMax]`. */
+/** Whether a source has a sample or a finite segment crossing `[xMin, xMax]`. */
 function hasSamplesInRange(
   series: FullResolutionSeries | undefined,
   xMin: number,
   xMax: number,
 ): series is FullResolutionSeries {
   if (series === undefined || !isFullResolutionSeries(series)) return false
-  const { time } = series
   for (let index = 0; index < series.length; index++) {
-    const instant = time[index] as number
-    if (instant >= xMin && instant <= xMax) return true
+    if (retainSample(series, index, xMin, xMax)) return true
   }
   return false
 }

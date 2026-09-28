@@ -27,6 +27,7 @@ import {
   SHEET_GRAVITY_STATISTICS,
   type WorkbookInput,
   XLSX_MAX_DATA_ROWS,
+  XLSX_MAX_ROWS,
 } from '../src/export/workbook.ts'
 
 function series(times: number[], values: number[], acceleration?: number[]) {
@@ -83,6 +84,46 @@ describe('unified time axis', () => {
 })
 
 describe('resampling', () => {
+  it('matches the duplicate-timestamp reproducer on the shared axis', () => {
+    expect([
+      ...resampleToAxis(
+        Float64Array.from([0, 1, 2]),
+        Float64Array.from([0, 1, 1, 2]),
+        Float64Array.from([0, 10, 20, 30]),
+      ),
+    ]).toEqual([0, 20, 30])
+  })
+
+  it.each([
+    { times: [0, 1, 1, 2], values: [0, 10, 20, 30], expected: [0, 5, 20, 25, 30] },
+    { times: [0, 0, 1, 2], values: [0, 10, 20, 30], expected: [10, 15, 20, 25, 30] },
+    { times: [0, 1, 2, 2], values: [0, 10, 20, 30], expected: [0, 5, 10, 15, 30] },
+    { times: [0, 1, 1, 1, 2], values: [0, 10, 20, 25, 30], expected: [0, 5, 25, 27.5, 30] },
+  ])(
+    'matches np.interp at duplicate timestamps and on either side: $times',
+    ({ times, values, expected }) => {
+      const result = resampleToAxis(
+        buildUnifiedTimeAxis(0, 2, 2),
+        Float64Array.from(times),
+        Float64Array.from(values),
+      )
+      expect([...result]).toEqual(expected)
+    },
+  )
+
+  it.each([
+    [1, 2, [20, 30]],
+    [0, 1, [0, 20]],
+  ] as const)('uses the last duplicate at the unified-axis boundary %s..%s', (start, end, expected) => {
+    expect([
+      ...resampleToAxis(
+        buildUnifiedTimeAxis(start, end, 1),
+        Float64Array.from([0, 1, 1, 2]),
+        Float64Array.from([0, 10, 20, 30]),
+      ),
+    ]).toEqual(expected)
+  })
+
   it('interpolates linearly inside the measured span', () => {
     const axis = Float64Array.from([0, 0.5, 1])
     const result = resampleToAxis(axis, Float64Array.from([0, 1]), Float64Array.from([0, 10]))
@@ -236,6 +277,40 @@ describe('workbook shape', () => {
 })
 
 describe('worksheet row limit', () => {
+  it('counts every sheet including headers and selected-range statistics', () => {
+    const input = baseInput({
+      rangeStatistics: {
+        xMin: 0,
+        xMax: 1,
+        inner: { mean: 1, absMean: 1, std: 0, min: 1, max: 1, range: 0, count: 3, missing: 0 },
+        drag: { mean: 2, absMean: 2, std: 0, min: 2, max: 2, range: 0, count: 3, missing: 0 },
+      },
+    })
+    expect(planWorkbook(input).sheetRows).toEqual(
+      buildSheets(input).map((sheet) => ({ name: sheet.name, rows: sheet.rows.length })),
+    )
+  })
+
+  it('rejects an overflowing G-quality sheet before reading or allocating its rows', () => {
+    const input = baseInput()
+    // A sparse array proves the guard runs before gQualitySheet reads any cells.
+    input.gQuality = new Array(XLSX_MAX_ROWS)
+    const plan = planWorkbook(input)
+    expect(plan.dataRows).toBe(3)
+    expect(plan.fitsWorksheet).toBe(false)
+    expect(plan.sheetRows).toContainEqual({ name: SHEET_G_QUALITY, rows: XLSX_MAX_ROWS + 1 })
+    expect(() => buildSheets(input, plan)).toThrowError(ExportTooLargeError)
+    expect(() => buildSheets(input, plan)).toThrowError(/G-quality Analysis.*CSV/)
+    expect(Array.from(generateCsvChunks(input)).join('')).toContain('Time (s)')
+  })
+
+  it('accepts G-quality exactly at capacity including the header', () => {
+    const input = baseInput({ gQuality: new Array(XLSX_MAX_DATA_ROWS) })
+    const plan = planWorkbook(input)
+    expect(plan.fitsWorksheet).toBe(true)
+    expect(plan.sheetRows).toContainEqual({ name: SHEET_G_QUALITY, rows: XLSX_MAX_ROWS })
+  })
+
   /**
    * The desktop app guards at 20,000,000 unified samples, which is unrelated to
    * the 1,048,576-row worksheet limit. This is the correction described in

@@ -205,6 +205,68 @@ describe('buildPosterPlotSpec: full resolution is not negotiable', () => {
 })
 
 describe('buildPosterPlotSpec: range boundaries', () => {
+  it.each([
+    { xMin: 0.5, xMax: 2, expected: [0, 1, 2] },
+    { xMin: 0, xMax: 1.5, expected: [0, 1, 2] },
+    { xMin: 0.5, xMax: 1.5, expected: [0, 1, 2] },
+    { xMin: 0.25, xMax: 0.75, expected: [0, 1] },
+  ])('keeps endpoints of segments crossing $xMin..$xMax', ({ xMin, xMax, expected }) => {
+    const spec = buildPosterPlotSpec(
+      request({
+        series: 'inner',
+        source: { inner: fullResolutionSeries([0, 1, 2], [0, 1, 0]) },
+        xMin,
+        xMax,
+      }),
+    )
+    expect([...decoded(spec, 'inner', 'time')]).toEqual(expected)
+    expect([...decoded(spec, 'inner', 'values')]).toEqual(expected.map((time) => (time === 1 ? 1 : 0)))
+    expect(spec.xMin).toBe(xMin)
+    expect(spec.xMax).toBe(xMax)
+  })
+
+  it('preserves a genuine gap between the boundary-crossing segments', () => {
+    const spec = buildPosterPlotSpec(
+      request({
+        series: 'inner',
+        source: { inner: fullResolutionSeries([0, 1, 2, 3, 4], [0, 1, null, 3, 4]) },
+        xMin: 0.5,
+        xMax: 3.5,
+      }),
+    )
+    expect([...decoded(spec, 'inner', 'time')]).toEqual([0, 1, 2, 3, 4])
+    expect([...decoded(spec, 'inner', 'values')]).toEqual([0, 1, Number.NaN, 3, 4])
+  })
+
+  it('keeps disjoint runs separate when a non-monotonic axis exits and re-enters the window', () => {
+    const spec = buildPosterPlotSpec(
+      request({
+        series: 'inner',
+        source: { inner: fullResolutionSeries([0, 2, 3, 4, 0], [0, 2, 3, 4, 0]) },
+        xMin: -0.5,
+        xMax: 0.5,
+      }),
+    )
+    expect([...decoded(spec, 'inner', 'time')]).toEqual([0, 2, 4, 4, 0])
+    expect([...decoded(spec, 'inner', 'values')]).toEqual([0, 2, Number.NaN, 4, 0])
+  })
+
+  it('counts outside vertices against MAX_POINTS', () => {
+    const error = expectRefusal(
+      () =>
+        buildPosterPlotSpec(
+          request({
+            series: 'inner',
+            source: { inner: ramp(MAX_POINTS + 2, 1) },
+            xMin: 0.5,
+            xMax: MAX_POINTS + 0.5,
+          }),
+        ),
+      'POSTER_RANGE_TOO_MANY_POINTS',
+    )
+    expect(error.details?.points).toBe(MAX_POINTS + 2)
+  })
+
   it('refuses a range that selects no samples, and says what the sensor does cover', () => {
     const error = expectRefusal(
       () => buildPosterPlotSpec(request({ xMin: 5, xMax: 6 })),
@@ -234,7 +296,7 @@ describe('buildPosterPlotSpec: range boundaries', () => {
 
   it('accepts a range that selects exactly one sample', () => {
     const spec = buildPosterPlotSpec(request({ series: 'inner', xMin: 0.05, xMax: 0.15 }))
-    expect([...decoded(spec, 'inner', 'time')]).toEqual([0.1])
+    expect([...decoded(spec, 'inner', 'time')]).toEqual([0, 0.1])
     expect(spec.xMin).toBe(0.05)
     expect(spec.xMax).toBe(0.15)
   })
@@ -320,7 +382,7 @@ describe('buildPosterPlotSpec: sensor sources', () => {
     expect(error.details).toMatchObject({ reason: 'not_full_resolution' })
   })
 
-  it('drops non-finite instants instead of putting them on the time axis', () => {
+  it('replaces non-finite instants with finite-time gap markers instead of connecting across them', () => {
     const spec = buildPosterPlotSpec(
       request({
         series: 'inner',
@@ -331,8 +393,8 @@ describe('buildPosterPlotSpec: sensor sources', () => {
         xMax: 0.4,
       }),
     )
-    expect([...decoded(spec, 'inner', 'time')]).toEqual([0, 0.2, 0.4])
-    expect([...decoded(spec, 'inner', 'values')]).toEqual([1, 3, 5])
+    expect([...decoded(spec, 'inner', 'time')]).toEqual([0, 0.2, 0.2, 0.4, 0.4])
+    expect([...decoded(spec, 'inner', 'values')]).toEqual([1, Number.NaN, 3, Number.NaN, 5])
   })
 
   it('refuses an infinite gravity level inside the window, naming its index', () => {
@@ -371,7 +433,7 @@ describe('buildPosterPlotSpec: sensor sources', () => {
         xMax: 0.35,
       }),
     )
-    expect([...decoded(spec, 'inner', 'time')]).toEqual([0, 0.3, 0.1, 0.2])
+    expect([...decoded(spec, 'inner', 'time')]).toEqual([0, 0.3, 0.1, 0.9, 0.2])
   })
 })
 
@@ -408,6 +470,15 @@ describe('buildAutoPosterPlotSpec', () => {
     runCode: '260811a',
     source: { inner: fullResolutionSeries(TIME, INNER), drag: fullResolutionSeries(TIME, DRAG) },
   }
+
+  it('includes a sensor whose segment crosses the preset window without an interior sample', () => {
+    const spec = buildAutoPosterPlotSpec({
+      ...auto,
+      source: { inner: fullResolutionSeries([-1, 2], [0, 1]) },
+    })
+    expect(spec.series).toBe('inner')
+    expect([...decoded(spec, 'inner', 'time')]).toEqual([-1, 2])
+  })
 
   it('draws the frozen preset’s figure: its range, geometry, DPI and legend', () => {
     const spec = buildAutoPosterPlotSpec(auto)

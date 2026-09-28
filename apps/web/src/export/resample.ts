@@ -161,8 +161,13 @@ function interpolateAt(
   const valueLow = sortedValues[low] as number
   const valueHigh = sortedValues[low + 1] as number
 
-  if (target === timeLow) return valueLow
-  if (target === timeHigh) return valueHigh
+  if (target === timeLow || target === timeHigh) {
+    // np.interp takes the last exact match, even when the equal-time run
+    // extends beyond the current bracket or ends at the sensor's boundary.
+    let exact = target === timeLow ? low : low + 1
+    while (exact + 1 < sortedTimes.length && sortedTimes[exact + 1] === target) exact++
+    return sortedValues[exact] as number
+  }
   // Duplicate timestamps: np.interp takes the later sample's value.
   if (timeHigh === timeLow) return valueHigh
 
