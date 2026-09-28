@@ -5,8 +5,9 @@
  */
 
 import { ApiError, capabilitiesForRole } from '@aat/shared'
-import { and, eq, sql } from 'drizzle-orm'
+import { and, eq } from 'drizzle-orm'
 import { Hono } from 'hono'
+import { deletePasskeyKeepingOne } from '../auth/passkey-plugin.ts'
 import { resolveConfig } from '../config.ts'
 import { passkey } from '../db/schema.ts'
 import type { AppEnv } from '../middleware/authorize.ts'
@@ -79,15 +80,10 @@ meRoutes.delete('/passkeys/:passkeyId', async (context) => {
     .limit(1)
   if (!target) throw new ApiError('RESOURCE_NOT_FOUND')
 
-  const [counted] = await db
-    .select({ count: sql<number>`count(*)` })
-    .from(passkey)
-    .where(eq(passkey.userId, actor.userId))
-  if ((counted?.count ?? 0) <= 1) {
+  if (!(await deletePasskeyKeepingOne(db, passkeyId, actor.userId))) {
     throw new ApiError('FORBIDDEN', { details: { reason: 'cannot_delete_last_passkey' } })
   }
 
-  await db.delete(passkey).where(eq(passkey.id, passkeyId))
   await writeAuditLog(db, {
     actorUserId: actor.userId,
     action: 'passkey.delete',

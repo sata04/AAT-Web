@@ -12,12 +12,12 @@
  *
  *   POST /api/auth/aat/invitation/redeem            { token }
  *        → claims the invitation (race-safe, see ./invitations.ts) and returns a short-lived
- *          opaque registration context. This is the only place that context exists in plaintext.
+ *          opaque registration context. Only its hash is stored on the invitation.
  *   GET  /api/auth/passkey/generate-register-options?context=<registrationContext>
  *        → the plugin's endpoint. `registration.requireSession: false` removes its session
  *          middleware, so `registration.resolveUser` below is asked who is registering; it
- *          validates the context and answers. The plugin stores the challenge and the context in
- *          a verification row named by a signed cookie.
+ *          validates the context and answers. A verification-create hook encrypts the context
+ *          before the plugin stores the ceremony in a row named by a signed cookie.
  *   POST /api/auth/passkey/verify-registration      { response }
  *        → the plugin verifies the attestation, then calls `registration.afterVerification`,
  *          which is where the invitation is spent, the user created and the session opened.
@@ -61,11 +61,11 @@
  *    `user.banned`; the authentication seam refuses first, so a banned user never gets a cookie.
  *  - **The last-passkey rule.** `POST /passkey/delete-passkey` will happily delete the only
  *    credential a user has. With no password and no email that is not a reversible mistake, so a
- *    `before` hook refuses it.
+ *    `before` hook performs the conditional deletion and bypasses the upstream delete.
  */
 
 import { ApiError, buildApiErrorPayload, ERROR_CODES, type ErrorCode } from '@aat/shared'
-import { getAuthenticatorName, passkey } from '@better-auth/passkey'
+import { getAuthenticatorName, PASSKEY_ERROR_CODES, passkey } from '@better-auth/passkey'
 import type { BetterAuthPlugin } from 'better-auth'
 import {
   APIError,
@@ -75,10 +75,11 @@ import {
   isAPIError,
 } from 'better-auth/api'
 import { setSessionCookie } from 'better-auth/cookies'
-import { eq, sql } from 'drizzle-orm'
+import { symmetricDecrypt, symmetricEncrypt } from 'better-auth/crypto'
+import { and, eq, sql } from 'drizzle-orm'
 import * as z from 'zod'
 import type { WorkerConfig } from '../config.ts'
-import type { Database } from '../db/client.ts'
+import { type Database, rowsAffected } from '../db/client.ts'
 import { passkey as passkeyTable, user as userTable } from '../db/schema.ts'
 import { newId } from '../lib/ids.ts'
 import { writeAuditLog } from '../services/audit.ts'
@@ -133,6 +134,42 @@ const PATHS = {
 /** A device label, not a document. Matches the bound on every other client string in this API. */
 const MAX_PASSKEY_NAME_LENGTH = 120
 
+const REGISTRATION_CONTEXT_PREFIX = 'aat-registration-v1:'
+
+/** The public database hook changes storage only; ciphertext is never accepted at option generation. */
+export async function protectRegistrationVerification(value: string, secret: string): Promise<string> {
+  const ceremony = JSON.parse(value) as { type?: string; context?: unknown; userData?: { id: string } }
+  if (ceremony.type !== 'registration' || typeof ceremony.context !== 'string' || !ceremony.context)
+    return value
+  ceremony.context =
+    REGISTRATION_CONTEXT_PREFIX +
+    (await symmetricEncrypt({
+      key: `${secret}:aat-registration-context-v1`,
+      data: JSON.stringify({ context: ceremony.context, userId: ceremony.userData?.id }),
+    }))
+  return JSON.stringify(ceremony)
+}
+
+async function openRegistrationContext(value: string, userId: string, secret: string): Promise<string> {
+  try {
+    // Fail closed for ceremonies issued before encryption was deployed; restarting options is
+    // safe because option generation does not spend the invitation.
+    if (!value.startsWith(REGISTRATION_CONTEXT_PREFIX)) throw new Error('invalid context format')
+    const opened = JSON.parse(
+      await symmetricDecrypt({
+        key: `${secret}:aat-registration-context-v1`,
+        data: value.slice(REGISTRATION_CONTEXT_PREFIX.length),
+      }),
+    ) as { context?: unknown; userId?: unknown }
+    if (opened.userId !== userId || typeof opened.context !== 'string') {
+      throw new Error('invalid context binding')
+    }
+    return opened.context
+  } catch {
+    throw toApiError('INVITE_INVALID')
+  }
+}
+
 /* ------------------------------------------------------------------------------------------- */
 /* The official plugin, configured for AAT                                                      */
 /* ------------------------------------------------------------------------------------------- */
@@ -181,7 +218,7 @@ export function aatPasskey({ db, config }: AatPasskeyOptions) {
         }
       },
 
-      afterVerification: async ({ ctx, verification, user, context }) => {
+      afterVerification: async ({ ctx, verification, user, context: protectedContext }) => {
         const headers = ctx.headers ?? new Headers()
         const now = new Date()
 
@@ -215,7 +252,7 @@ export function aatPasskey({ db, config }: AatPasskeyOptions) {
         const label = getAuthenticatorName(info.aaguid)
         const named = (userId: string) => (label === undefined ? { userId } : { userId, name: label })
 
-        if (!context) {
+        if (!protectedContext) {
           /*
            * No registration context: a signed-in user adding another credential to their own
            * account. The plugin reached `resolveUser`'s alternative — a live session — so there is
@@ -245,6 +282,7 @@ export function aatPasskey({ db, config }: AatPasskeyOptions) {
           return named(session.user.id)
         }
 
+        const context = await openRegistrationContext(protectedContext, user.id, config.authSecret)
         const resolved = await resolveRegistrationContext(db, context, now).catch(rethrow)
 
         /*
@@ -531,22 +569,22 @@ function singleSessionRegistrationHook() {
   }
 }
 
-/** Refuse the delete when `passkeyId` is the session user's last credential. */
-async function refuseLastPasskeyDelete(db: Database, passkeyId: string, userId: string) {
-  const [target] = await db
-    .select({ userId: passkeyTable.userId })
-    .from(passkeyTable)
-    .where(eq(passkeyTable.id, passkeyId))
-    .limit(1)
-  if (!target || target.userId !== userId) return
-
-  const [counted] = await db
-    .select({ count: sql<number>`count(*)` })
-    .from(passkeyTable)
-    .where(eq(passkeyTable.userId, target.userId))
-  if ((counted?.count ?? 0) <= 1) {
-    throw toApiError('FORBIDDEN', { reason: 'cannot_delete_last_passkey' })
-  }
+/** One SQLite statement preserves a credential even when different deletion routes race. */
+export async function deletePasskeyKeepingOne(
+  db: Database,
+  passkeyId: string,
+  userId: string,
+): Promise<boolean> {
+  const deleted = await db
+    .delete(passkeyTable)
+    .where(
+      and(
+        eq(passkeyTable.id, passkeyId),
+        eq(passkeyTable.userId, userId),
+        sql`EXISTS (SELECT 1 FROM passkey p2 WHERE p2.user_id = ${userId} AND p2.id <> ${passkeyId})`,
+      ),
+    )
+  return rowsAffected(deleted) === 1
 }
 
 /**
@@ -564,14 +602,33 @@ function lastPasskeyGuardHook(db: Database) {
     handler: createAuthMiddleware(async (ctx) => {
       const body = ctx.body as { id?: unknown } | undefined
       const passkeyId = typeof body?.id === 'string' ? body.id : null
-      if (!passkeyId) return
+      if (!passkeyId) throw new APIError('BAD_REQUEST', { message: 'Missing required parameter: id' })
 
       const session = await getSessionFromCtx(ctx)
-      // No session, or somebody else's credential: the plugin's own middleware answers those
-      // cases, and answering them differently here would be a second authorization model.
-      if (!session) return
+      // Preserve the upstream ownership errors, but never enter its unconditional delete path.
+      if (!session) throw new APIError('UNAUTHORIZED')
 
-      await refuseLastPasskeyDelete(db, passkeyId, session.user.id)
+      const [target] = await db
+        .select({ userId: passkeyTable.userId })
+        .from(passkeyTable)
+        .where(eq(passkeyTable.id, passkeyId))
+        .limit(1)
+      if (!target) throw APIError.from('NOT_FOUND', PASSKEY_ERROR_CODES.PASSKEY_NOT_FOUND)
+      if (target.userId !== session.user.id) throw new APIError('UNAUTHORIZED')
+      if ((session.user as { banned?: boolean | null }).banned) throw toApiError('FORBIDDEN')
+      if (!(await deletePasskeyKeepingOne(db, passkeyId, session.user.id))) {
+        throw toApiError('FORBIDDEN', { reason: 'cannot_delete_last_passkey' })
+      }
+      await writeAuditLog(db, {
+        actorUserId: session.user.id,
+        action: 'passkey.delete',
+        targetType: 'passkey',
+        targetId: passkeyId,
+        headers: ctx.headers ?? new Headers(),
+      })
+      // A before-hook response bypasses the upstream unconditional delete and its after hooks.
+      // The deletion above is the only write, and returns the plugin's existing success shape.
+      return ctx.json({ status: true })
     }),
   }
 }
@@ -621,25 +678,6 @@ function failedAuthenticationAuditHook(db: Database) {
       const response = (ctx.body as { response?: { id?: unknown } } | undefined)?.response
       const credentialId = typeof response?.id === 'string' ? response.id : null
       await auditFailedAuthentication(db, credentialId, ctx.headers ?? new Headers())
-    }),
-  }
-}
-
-function passkeyDeleteAuditHook(db: Database) {
-  return {
-    matcher: (ctx: { path?: string }) => ctx.path === PATHS.deletePasskey,
-    handler: createAuthMiddleware(async (ctx) => {
-      if (isAPIError(ctx.context.returned)) return
-      const session = await getSessionFromCtx(ctx)
-      const passkeyId = (ctx.body as { id?: unknown } | undefined)?.id
-      if (!session || typeof passkeyId !== 'string') return
-      await writeAuditLog(db, {
-        actorUserId: session.user.id,
-        action: 'passkey.delete',
-        targetType: 'passkey',
-        targetId: passkeyId,
-        headers: ctx.headers ?? new Headers(),
-      })
     }),
   }
 }
@@ -705,7 +743,7 @@ export function aatPasskeyPolicy({ db }: AatPasskeyOptions) {
         lastPasskeyGuardHook(db),
       ],
 
-      after: [failedAuthenticationAuditHook(db), passkeyDeleteAuditHook(db)],
+      after: [failedAuthenticationAuditHook(db)],
     },
 
     onResponse: demoteRejectedVerification,

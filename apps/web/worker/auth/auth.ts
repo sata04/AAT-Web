@@ -19,18 +19,25 @@
 
 import { betterAuth } from 'better-auth'
 import { drizzleAdapter } from 'better-auth/adapters/drizzle'
+import { APIError, isAPIError } from 'better-auth/api'
 import { admin } from 'better-auth/plugins/admin'
 import { resolveConfig } from '../config.ts'
 import { getDatabase } from '../db/client.ts'
 import * as schema from '../db/schema.ts'
 import { newId } from '../lib/ids.ts'
-import { aatPasskey, aatPasskeyPolicy } from './passkey-plugin.ts'
+import { aatPasskey, aatPasskeyPolicy, protectRegistrationVerification } from './passkey-plugin.ts'
 
 /** Sessions last two weeks and slide forward a day at a time while in use. */
 const SESSION_EXPIRES_IN_SECONDS = 60 * 60 * 24 * 14
 const SESSION_UPDATE_AGE_SECONDS = 60 * 60 * 24
 
 export type Auth = ReturnType<typeof buildAuth>
+
+function logAuthDiagnostic(category: 'auth_error' | 'auth_warning' | 'auth_api_error'): void {
+  // Never forward library messages or Error objects: Drizzle includes bound values in both
+  // messages and nested causes. The identifier lets operators correlate a safe diagnostic.
+  console.error(JSON.stringify({ diagnosticId: newId(), category }))
+}
 
 function buildAuth(env: Env) {
   const config = resolveConfig(env)
@@ -49,6 +56,40 @@ function buildAuth(env: Env) {
     socialProviders: {},
     // No outbound telemetry from a Worker that holds research data.
     telemetry: { enabled: false },
+    logger: {
+      level: 'warn',
+      log: (level) => logAuthDiagnostic(level === 'warn' ? 'auth_warning' : 'auth_error'),
+    },
+    onAPIError: {
+      onError: (error) => {
+        if (isAPIError(error)) {
+          if (error.statusCode >= 500) logAuthDiagnostic('auth_api_error')
+          return
+        }
+        logAuthDiagnostic('auth_api_error')
+        // Better Call logs non-API errors directly after this callback returns. Throw a fresh
+        // APIError synchronously so its fallback never receives the original error or causes.
+        throw new APIError('INTERNAL_SERVER_ERROR', {
+          code: 'INTERNAL',
+          message: 'Authentication request failed',
+        })
+      },
+    },
+    databaseHooks: {
+      verification: {
+        create: {
+          before: async (verification, context) => {
+            if (context?.path !== '/passkey/generate-register-options') return
+            return {
+              data: {
+                ...verification,
+                value: await protectRegistrationVerification(verification.value, config.authSecret),
+              },
+            }
+          },
+        },
+      },
+    },
     session: {
       expiresIn: SESSION_EXPIRES_IN_SECONDS,
       updateAge: SESSION_UPDATE_AGE_SECONDS,

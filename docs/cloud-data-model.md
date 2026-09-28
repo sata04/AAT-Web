@@ -407,7 +407,8 @@ that shares a drop tower could not share the analyses of the drops.
 | Read run metadata, revisions, metrics, posters | yes | **yes** | **yes** | no |
 | Read/download the snapshot (replay, statistics, Excel, custom poster) | yes | **yes** | **yes** | no |
 | Read/download the original CSV backup | yes | **yes** | **yes** | no |
-| Generate a poster figure, automatic or custom | yes | **yes** | **yes** | no |
+| Generate or retry a custom poster | yes | **yes** | **yes** | no |
+| Publish or retry the canonical automatic poster | yes | no | no | no |
 | Edit memo and tags | yes | **yes** | **yes** | no |
 | Delete a run; upload or delete an original CSV | yes | no | **yes** | no |
 | Create a revision; upload a snapshot | yes | no | no | no |
@@ -430,9 +431,10 @@ Four consequences worth stating, because each is a decision rather than a fallou
   revision on somebody else's run, or filing a snapshot under one, writes into their provenance
   chain — "who analysed this, with what settings" would stop having one answer. Reusing a
   colleague's data means reading their snapshot, not appending to their history.
-- **Generating a poster needs `read`, not a write level.** A poster is derived from a revision and
-  leaves it untouched. What separates a Viewer from a Researcher there is the `poster:generate`
-  capability, not the resolver.
+- **Generating a custom poster needs `read`.** A custom figure leaves the canonical figure
+  untouched. Publishing or retrying the single automatic poster requires the revision owner,
+  because an arbitrary reader-supplied spec must not claim that slot. Shared readers can list and
+  download the canonical figure. All rendering also requires `poster:generate`.
 - **There are two listings, and they mean two different things.** `GET /api/v1/runs` is scoped to
   `owner_user_id = caller` in its WHERE clause and keeps meaning "mine"; `GET
   /api/v1/workspace/runs` is the team gallery. Folding every colleague's runs into "my runs" would

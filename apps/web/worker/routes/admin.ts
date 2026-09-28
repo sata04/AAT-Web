@@ -26,12 +26,15 @@ import { Hono } from 'hono'
 import { z } from 'zod'
 import { toPublicUser } from '../auth/identity.ts'
 import { createInvitation, revokeInvitation } from '../auth/invitations.ts'
+import { deletePasskeyKeepingOne } from '../auth/passkey-plugin.ts'
 import { resolveConfig } from '../config.ts'
+import { rowsAffected } from '../db/client.ts'
 import {
   analysisRevisions,
   auditLogs,
   cloudObjects,
   passkey,
+  quotaReservations,
   quotaUsage,
   registrationInvites,
   runs,
@@ -41,9 +44,14 @@ import {
 import type { AppEnv } from '../middleware/authorize.ts'
 import { requireCapability, requireSession, withDatabase } from '../middleware/authorize.ts'
 import { validate } from '../middleware/validate.ts'
-import { writeAuditLog } from '../services/audit.ts'
+import { auditLogInsert, writeAuditLog } from '../services/audit.ts'
 import { getCircuitBreaker, setCircuitBreaker } from '../services/flags.ts'
-import { ensureQuotaRow, setQuotaLimit } from '../services/quota.ts'
+import {
+  ACCOUNT_DELETION_REASON,
+  ensureQuotaRow,
+  releaseObjectAccounting,
+  setQuotaLimit,
+} from '../services/quota.ts'
 import { consumeRateLimit, RATE_LIMITS, rateLimitKey } from '../services/rate-limit.ts'
 
 export const adminRoutes = new Hono<AppEnv>()
@@ -51,6 +59,10 @@ export const adminRoutes = new Hono<AppEnv>()
 adminRoutes.use('*', withDatabase, requireSession)
 
 const PAGE_SIZE = 50
+
+function deletionPending(): ApiError {
+  return new ApiError('FORBIDDEN', { details: { reason: ACCOUNT_DELETION_REASON } })
+}
 
 const paginationSchema = z.object({
   limit: z.coerce.number().int().min(1).max(200).optional(),
@@ -107,6 +119,7 @@ adminRoutes.patch(
 
     const [target] = await db.select().from(userTable).where(eq(userTable.id, targetId)).limit(1)
     if (!target) throw new ApiError('RESOURCE_NOT_FOUND')
+    if (target.banReason === ACCOUNT_DELETION_REASON) throw deletionPending()
 
     if (targetId === actor.userId && (body.role !== undefined || body.banned === true)) {
       // An administrator who demotes or bans themselves can leave a deployment with no
@@ -180,13 +193,70 @@ adminRoutes.delete('/users/:userId', requireCapability('user:manage'), async (co
   const [target] = await db.select().from(userTable).where(eq(userTable.id, targetId)).limit(1)
   if (!target) throw new ApiError('RESOURCE_NOT_FOUND')
 
+  const now = new Date()
+  await ensureQuotaRow(db, targetId, resolveConfig(context.env).defaultQuotaBytes, now)
+  // Ban/revoke new sessions and close quota admission for requests already authorised. The
+  // run tombstone is the durable barrier that commitUploadedObject actually checks after PUT.
+  // Keep these markers on a failed cleanup so DELETE can safely be retried.
+  await db.batch([
+    auditLogInsert(db, {
+      actorUserId: actor.userId,
+      action: 'user.delete_pending',
+      targetType: 'user',
+      targetId,
+      targetOwnerUserId: targetId,
+      headers: context.req.raw.headers,
+    }),
+    db
+      .update(userTable)
+      .set({ banned: true, banReason: ACCOUNT_DELETION_REASON, banExpires: null, updatedAt: now })
+      .where(eq(userTable.id, targetId)),
+    db.delete(sessionTable).where(eq(sessionTable.userId, targetId)),
+    db.update(quotaUsage).set({ bytesLimit: 0, updatedAt: now }).where(eq(quotaUsage.userId, targetId)),
+    db
+      .update(runs)
+      .set({ deletedAt: now, updatedAt: now })
+      .where(and(eq(runs.ownerUserId, targetId), isNull(runs.deletedAt))),
+  ])
+  // An admitted writer may still PUT after an R2 delete. Let it finish/unwind
+  // before removing its recovery records; the quota barrier prevents admitting another writer.
+  // The sweeper respects ACCOUNT_DELETION_REASON, even after expiry. An abandoned pending
+  // request therefore needs explicit operational recovery; expiry cannot prove a PUT has stopped.
+  const [uploading] = await db
+    .select({ id: quotaReservations.id })
+    .from(quotaReservations)
+    .where(and(eq(quotaReservations.userId, targetId), eq(quotaReservations.status, 'pending')))
+    .limit(1)
+  if (uploading) throw deletionPending()
+
   // Delete the bytes before the row: the cascade would otherwise remove every record of which
   // objects existed, leaving them in R2 with nothing pointing at them and no way to find them.
   const objects = await db.select().from(cloudObjects).where(eq(cloudObjects.ownerUserId, targetId))
   for (const object of objects) {
     await context.env.AAT_OBJECTS.delete(object.r2Key)
+    await releaseObjectAccounting(db, object, now)
+    await db.delete(cloudObjects).where(eq(cloudObjects.id, object.id))
   }
-  await db.delete(userTable).where(eq(userTable.id, targetId))
+  // Failed uploads can retain a reservation key without an object row. Those retry records
+  // also cascade with the user, so their bytes must be deleted before removing the account.
+  const reservations = await db
+    .select({ r2Key: quotaReservations.r2Key })
+    .from(quotaReservations)
+    .where(eq(quotaReservations.userId, targetId))
+  for (const reservation of reservations) {
+    if (reservation.r2Key) await context.env.AAT_OBJECTS.delete(reservation.r2Key)
+  }
+  // No cascade may erase an object that appeared outside the enumeration. A retry will find it.
+  const deleted = await db
+    .delete(userTable)
+    .where(
+      and(
+        eq(userTable.id, targetId),
+        sql`NOT EXISTS (SELECT 1 FROM cloud_objects WHERE owner_user_id = ${targetId})`,
+        sql`NOT EXISTS (SELECT 1 FROM quota_reservations WHERE user_id = ${targetId} AND status = 'pending')`,
+      ),
+    )
+  if (rowsAffected(deleted) !== 1) throw deletionPending()
 
   await writeAuditLog(db, {
     actorUserId: actor.userId,
@@ -242,15 +312,10 @@ adminRoutes.delete('/passkeys/:passkeyId', requireCapability('user:manage'), asy
   const [target] = await db.select().from(passkey).where(eq(passkey.id, passkeyId)).limit(1)
   if (!target) throw new ApiError('RESOURCE_NOT_FOUND')
 
-  const [counted] = await db
-    .select({ count: sql<number>`count(*)` })
-    .from(passkey)
-    .where(eq(passkey.userId, target.userId))
-  if ((counted?.count ?? 0) <= 1) {
+  if (!(await deletePasskeyKeepingOne(db, passkeyId, target.userId))) {
     throw new ApiError('FORBIDDEN', { details: { reason: 'cannot_delete_last_passkey' } })
   }
 
-  await db.delete(passkey).where(eq(passkey.id, passkeyId))
   await writeAuditLog(db, {
     actorUserId: actor.userId,
     action: 'passkey.delete',
@@ -512,12 +577,13 @@ adminRoutes.put(
     const body = context.req.valid('json')
 
     const [target] = await db
-      .select({ id: userTable.id })
+      .select({ id: userTable.id, banReason: userTable.banReason })
       .from(userTable)
       .where(eq(userTable.id, targetId))
       .limit(1)
     if (!target) throw new ApiError('RESOURCE_NOT_FOUND')
 
+    if (target.banReason === ACCOUNT_DELETION_REASON) throw deletionPending()
     await ensureQuotaRow(db, targetId, config.defaultQuotaBytes)
     const state = await setQuotaLimit(db, targetId, body.bytesLimit)
 

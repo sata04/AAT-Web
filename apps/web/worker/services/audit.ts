@@ -34,6 +34,7 @@ export type AuditAction =
   | 'user.ban'
   | 'user.unban'
   | 'user.delete'
+  | 'user.delete_pending'
   | 'passkey.register'
   | 'passkey.authenticate'
   | 'passkey.authenticate_failed'
@@ -94,12 +95,13 @@ export interface AuditEntry {
   headers?: Headers
 }
 
-export async function writeAuditLog(db: Database, entry: AuditEntry): Promise<void> {
+/** Build the ordinary redacted audit insert for inclusion in a mutation batch. */
+export function auditLogInsert(db: Database, entry: AuditEntry) {
   const targetOwnerUserId = entry.targetOwnerUserId ?? null
   const crossUser = targetOwnerUserId !== null && targetOwnerUserId !== entry.actorUserId
   const rawDetails = crossUser ? { ...entry.details, crossUser: true } : entry.details
   const details = rawDetails ? JSON.stringify(redactDetails(rawDetails)) : null
-  await db.insert(auditLogs).values({
+  return db.insert(auditLogs).values({
     id: newId(),
     actorUserId: entry.actorUserId,
     action: entry.action,
@@ -113,4 +115,8 @@ export async function writeAuditLog(db: Database, entry: AuditEntry): Promise<vo
     details,
     createdAt: new Date(),
   })
+}
+
+export async function writeAuditLog(db: Database, entry: AuditEntry): Promise<void> {
+  await auditLogInsert(db, entry)
 }

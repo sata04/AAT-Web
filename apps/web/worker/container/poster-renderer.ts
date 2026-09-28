@@ -77,28 +77,32 @@ export class PosterRendererContainer extends DurableObject<Env> {
       })
     }
 
-    if (!container.running) {
-      // enableInternet: false — the renderer takes its input in the request body and needs no
-      // outbound network. Denying it one removes exfiltration as a possibility rather than as a
-      // policy.
-      container.start({ enableInternet: false })
-    }
+    // Persist a fallback before starting anything billable. It also bounds startup or request
+    // eviction when the normal idle reschedule below never gets a chance to run.
+    await this.ctx.storage.setAlarm(
+      Date.now() + STARTUP_TIMEOUT_MS + RENDER_TIMEOUT_MS + POSTER_RENDERER_SLEEP_AFTER_MS,
+    )
 
-    const ready = await this.waitForHealth(container)
-    if (!ready) {
-      return new Response(JSON.stringify({ code: 'POSTER_BUSY' }), {
-        status: 429,
-        headers: { 'content-type': 'application/json' },
-      })
-    }
-
-    // Reschedule the teardown alarm on every request, so a burst of renders keeps the container
-    // alive and an idle one goes away.
-    await this.ctx.storage.setAlarm(Date.now() + POSTER_RENDERER_SLEEP_AFTER_MS)
-
-    const port = container.getTcpPort(CONTAINER_PORT)
-    const timeout = AbortSignal.timeout(RENDER_TIMEOUT_MS)
     try {
+      if (!container.running) {
+        // enableInternet: false — the renderer takes its input in the request body and needs no
+        // outbound network. Denying it one removes exfiltration as a possibility rather than as a
+        // policy.
+        container.start({ enableInternet: false })
+      }
+
+      const ready = await this.waitForHealth(container)
+      if (!ready) {
+        // If destruction fails, the durable alarm remains responsible for teardown.
+        await container.destroy().catch(() => {})
+        return new Response(JSON.stringify({ code: 'POSTER_BUSY' }), {
+          status: 429,
+          headers: { 'content-type': 'application/json' },
+        })
+      }
+
+      const port = container.getTcpPort(CONTAINER_PORT)
+      const timeout = AbortSignal.timeout(RENDER_TIMEOUT_MS)
       return await port.fetch(
         new Request(`http://container${url.pathname}`, {
           method: request.method,
@@ -107,11 +111,14 @@ export class PosterRendererContainer extends DurableObject<Env> {
           signal: timeout,
         }),
       )
-    } catch (error) {
-      return new Response(JSON.stringify({ code: 'POSTER_RENDER_FAILED', reason: (error as Error).name }), {
+    } catch {
+      return new Response(JSON.stringify({ code: 'POSTER_RENDER_FAILED' }), {
         status: 502,
         headers: { 'content-type': 'application/json' },
       })
+    } finally {
+      // Idle time starts after work, including failed startup and render attempts.
+      await this.ctx.storage.setAlarm(Date.now() + POSTER_RENDERER_SLEEP_AFTER_MS)
     }
   }
 
@@ -128,6 +135,7 @@ export class PosterRendererContainer extends DurableObject<Env> {
           await response.arrayBuffer()
           return true
         }
+        await response.body?.cancel()
       } catch {
         // Not up yet. A connection refused during startup is the normal case, not an error.
       }

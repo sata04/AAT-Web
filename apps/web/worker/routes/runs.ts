@@ -352,18 +352,23 @@ runRoutes.patch(
     // under the shared-workspace policy. See the module doc.
     const patch: Record<string, unknown> = { updatedAt: now }
     if (body.memo !== undefined) patch.memo = body.memo
-    await db.update(runs).set(patch).where(eq(runs.id, run.id))
-
+    const update = db.update(runs).set(patch).where(eq(runs.id, run.id))
     if (body.tags) {
-      // Replace wholesale: the client sends the set it wants, not a diff, so there is no
-      // ordering question between an add and a remove that arrive together.
-      await db.delete(runTags).where(eq(runTags.runId, run.id))
-      if (body.tags.length > 0) {
-        await db
-          .insert(runTags)
-          .values(body.tags.map((tag) => ({ runId: run.id, tag, createdAt: now })))
-          .onConflictDoNothing()
-      }
+      // A replacement is one write: concurrent sets cannot interleave their deletes and inserts.
+      await db.batch([
+        update,
+        db.delete(runTags).where(eq(runTags.runId, run.id)),
+        ...(body.tags.length > 0
+          ? [
+              db
+                .insert(runTags)
+                .values(body.tags.map((tag) => ({ runId: run.id, tag, createdAt: now })))
+                .onConflictDoNothing(),
+            ]
+          : []),
+      ])
+    } else {
+      await update
     }
 
     await writeAuditLog(db, {

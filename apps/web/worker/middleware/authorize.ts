@@ -19,7 +19,8 @@
  *
  * A resource that exists but the caller may not reach answers `RESOURCE_NOT_FOUND`, not
  * `FORBIDDEN`. `FORBIDDEN` on another user's id confirms that the id exists, which turns an id
- * space into an enumeration oracle. That matters *more* under the policy below, not less: a Viewer
+ * space into an enumeration oracle. Canonical poster writes first establish read access, then
+ * return FORBIDDEN to shared readers who already know the revision exists. That matters *more* under the policy below, not less: a Viewer
  * is the one role still confined to its own runs, and a 403 would tell them precisely which run
  * ids the rest of the team holds.
  *
@@ -41,7 +42,8 @@
  * | --------------------------------------------- | ----- | ---------- | ----- | ------ |
  * | Read runs, revisions, metrics, posters         | yes   | yes        | yes   | no     |
  * | Read/download snapshots and original CSVs      | yes   | yes        | yes   | no     |
- * | Generate a poster from a revision              | yes   | yes        | yes   | no     |
+ * | Generate/retry a custom poster                 | yes   | yes        | yes   | no     |
+ * | Publish/retry the canonical automatic poster   | yes   | no         | no    | no     |
  * | Edit memo, tags, project                       | yes   | yes        | yes   | no     |
  * | Delete a run, upload/delete an original CSV    | yes   | no         | yes   | no     |
  * | Create a revision, upload a snapshot           | yes   | no         | no    | no     |

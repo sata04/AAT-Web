@@ -40,11 +40,11 @@ import {
   gzipDecompress,
   SNAPSHOT_FORMAT_VERSION,
 } from '@aat/shared'
-import { and, asc, eq, isNull, sql } from 'drizzle-orm'
+import { and, asc, desc, eq, isNull, ne, sql } from 'drizzle-orm'
 import { Hono } from 'hono'
 import { z } from 'zod'
 import { APP_VERSION, resolveConfig } from '../config.ts'
-import { rowsAffected } from '../db/client.ts'
+import { type Database, rowsAffected } from '../db/client.ts'
 import { analysisMetrics, analysisRevisions, cloudObjects } from '../db/schema.ts'
 import { newId } from '../lib/ids.ts'
 import type { AppEnv } from '../middleware/authorize.ts'
@@ -67,6 +67,7 @@ import {
   reserveQuota,
   sweepStaleReservations,
   unwindUploadedObject,
+  uploadedObjectIsPublishable,
 } from '../services/quota.ts'
 import { readBoundedBody, snapshotKey, sourceKey, streamObject } from '../services/storage.ts'
 
@@ -210,25 +211,44 @@ revisionRoutes.post(
       const revisionNumber = (aggregate?.maximum ?? 0) + 1
 
       try {
-        const rows = await db
-          .insert(analysisRevisions)
-          .values({
-            id,
-            runId: run.id,
-            ownerUserId: actor.userId,
-            revisionNumber,
-            sourceSha256: body.sourceSha256,
-            configHash: body.configHash,
-            mappingHash: body.mappingHash,
-            configJson: JSON.stringify(body.config),
-            engineVersion: body.engineVersion,
-            appVersion: body.appVersion ?? APP_VERSION,
-            snapshotFormatVersion: body.snapshotFormatVersion,
-            notes: body.notes ?? null,
+        // Metrics are part of the immutable record: neither insert may survive alone.
+        const [rows] = await db.batch([
+          db
+            .insert(analysisRevisions)
+            .values({
+              id,
+              runId: run.id,
+              ownerUserId: actor.userId,
+              revisionNumber,
+              sourceSha256: body.sourceSha256,
+              configHash: body.configHash,
+              mappingHash: body.mappingHash,
+              configJson: JSON.stringify(body.config),
+              engineVersion: body.engineVersion,
+              appVersion: body.appVersion ?? APP_VERSION,
+              snapshotFormatVersion: body.snapshotFormatVersion,
+              notes: body.notes ?? null,
+              createdAt: now,
+              createdByUserId: actor.userId,
+            })
+            .returning(),
+          db.insert(analysisMetrics).values({
+            id: newId(),
+            analysisRevisionId: id,
+            innerMean: storeScalar(body.metrics.inner.mean),
+            innerStd: storeScalar(body.metrics.inner.std),
+            innerStartTime: storeScalar(body.metrics.inner.startTime),
+            dragMean: storeScalar(body.metrics.drag.mean),
+            dragStd: storeScalar(body.metrics.drag.std),
+            dragStartTime: storeScalar(body.metrics.drag.startTime),
+            windowSize: JSON.stringify(body.metrics.windowSize),
+            innerSampleCount: body.metrics.innerSampleCount,
+            dragSampleCount: body.metrics.dragSampleCount,
+            warningCount: body.metrics.warningCount,
+            gQualityJson: body.metrics.gQuality ? JSON.stringify(body.metrics.gQuality) : null,
             createdAt: now,
-            createdByUserId: actor.userId,
-          })
-          .returning()
+          }),
+        ])
         inserted = rows[0]
       } catch (error) {
         // Either another request took this revision number, or another request created the same
@@ -253,23 +273,6 @@ revisionRoutes.post(
     }
 
     if (!inserted) throw new ApiError('INTERNAL')
-
-    await db.insert(analysisMetrics).values({
-      id: newId(),
-      analysisRevisionId: inserted.id,
-      innerMean: storeScalar(body.metrics.inner.mean),
-      innerStd: storeScalar(body.metrics.inner.std),
-      innerStartTime: storeScalar(body.metrics.inner.startTime),
-      dragMean: storeScalar(body.metrics.drag.mean),
-      dragStd: storeScalar(body.metrics.drag.std),
-      dragStartTime: storeScalar(body.metrics.drag.startTime),
-      windowSize: JSON.stringify(body.metrics.windowSize),
-      innerSampleCount: body.metrics.innerSampleCount,
-      dragSampleCount: body.metrics.dragSampleCount,
-      warningCount: body.metrics.warningCount,
-      gQualityJson: body.metrics.gQuality ? JSON.stringify(body.metrics.gQuality) : null,
-      createdAt: now,
-    })
 
     await writeAuditLog(db, {
       actorUserId: actor.userId,
@@ -385,7 +388,10 @@ revisionRoutes.put(
     // accounting rule is stated identically on all three upload paths rather than inferred.
     const ownerUserId = revision.ownerUserId
     await ensureQuotaRow(db, ownerUserId, config.defaultQuotaBytes, now)
-    const key = snapshotKey(ownerUserId, revision.runId, revision.id, query.format)
+    const objectId = newId()
+    // Readers use the stored key, so adding a generation requires no migration of old objects.
+    // A late PUT or cleanup can only touch this attempt's bytes; D1 retains the revision identity.
+    const key = snapshotKey(ownerUserId, revision.runId, `${revision.id}_${objectId}`, query.format)
     const reservation = await reserveQuota(
       db,
       ownerUserId,
@@ -409,11 +415,20 @@ revisionRoutes.put(
       // Decode it. A snapshot that cannot be parsed, or that belongs to a different analysis, is
       // rejected before it is stored — the alternative is discovering it at the moment a
       // researcher tries to reopen a two-year-old measurement.
-      const rawJson = query.format === 'json.gz' ? await gzipDecompress(body.bytes) : body.bytes
+      // Leave room for compressed input, JSON strings, validation and decoded arrays in the
+      // Worker's memory. Small deployments scale down; raising the compressed cap cannot remove
+      // the independent 16 MiB decoded ceiling.
+      const maxDecodedBytes = Math.min(config.maxSnapshotBytes * 4, 16 * 1024 * 1024)
       let snapshot: ReturnType<typeof decodeSnapshot>
       try {
+        if (body.bytes.length > maxDecodedBytes) throw new RangeError('Snapshot exceeds decoded limit')
+        const rawJson =
+          query.format === 'json.gz' ? await gzipDecompress(body.bytes, maxDecodedBytes) : body.bytes
         snapshot = decodeSnapshot(rawJson)
       } catch (error) {
+        if (error instanceof RangeError) {
+          throw new ApiError('EXPORT_TOO_LARGE', { details: { maxDecodedBytes }, cause: error })
+        }
         throw new ApiError('SNAPSHOT_INVALID', {
           details: { reason: 'malformed' },
           cause: error,
@@ -443,10 +458,7 @@ revisionRoutes.put(
           customMetadata: { revisionId: revision.id, runId: revision.runId, ownerUserId },
         })
 
-      // The row claims the deterministic key BEFORE the bytes are written: a second upload for
-      // the same revision now fails its insert before its put ever runs, so a losing contender
-      // cannot leave its bytes under the winner's checksum.
-      const objectId = newId()
+      // Track this attempt before writing bytes, so interrupted uploads remain reclaimable.
       const objectValues = {
         id: objectId,
         ownerUserId,
@@ -486,10 +498,42 @@ revisionRoutes.put(
         revision.runId,
         now,
       )
-      await db
+      const published = await db
         .update(analysisRevisions)
         .set({ snapshotObjectId: objectId })
-        .where(eq(analysisRevisions.id, revision.id))
+        .where(
+          and(
+            eq(analysisRevisions.id, revision.id),
+            isNull(analysisRevisions.snapshotObjectId),
+            uploadedObjectIsPublishable(objectId),
+          ),
+        )
+      if (rowsAffected(published) !== 1) {
+        const [winner] = await db
+          .select({ object: cloudObjects })
+          .from(analysisRevisions)
+          .innerJoin(cloudObjects, eq(cloudObjects.id, analysisRevisions.snapshotObjectId))
+          .where(and(eq(analysisRevisions.id, revision.id), isNull(cloudObjects.deletedAt)))
+          .limit(1)
+        await unwindUploadedObject(
+          db,
+          context.env.AAT_OBJECTS,
+          { ...uploaded, r2Key: key, ownerUserId, reservationId: reservation.id },
+          now,
+        )
+        uploaded = null
+        if (winner?.object.sha256 === body.sha256) {
+          return context.json({
+            object: { id: winner.object.id, byteSize: winner.object.byteSize },
+            created: false,
+          })
+        }
+        throw new ApiError('SNAPSHOT_INVALID', {
+          details: { reason: 'revision_already_has_a_different_snapshot' },
+        })
+      }
+      // Publication transferred ownership to the revision. An audit failure must not erase it.
+      uploaded = null
 
       await writeAuditLog(db, {
         actorUserId: actor.userId,
@@ -505,9 +549,9 @@ revisionRoutes.put(
     } catch (error) {
       // Every failure path gives the reservation back — to the account it was taken from. Leaking
       // one would slowly consume a user's quota with bytes that were never stored. Once the object
-      // row exists the charge may already be settled, so the whole upload is unwound instead —
-      // otherwise the row's unique r2_key would refuse the retry. Cleanup failure must not replace
-      // the real error: a remnant is reclaimable by the next contender for the key or the sweeper.
+      // row exists the charge may already be settled, so an unpublished upload is unwound instead.
+      // Publication clears `uploaded`: an audit failure must leave the winning snapshot intact.
+      // Cleanup failure must not replace the real error; the sweeper can retry the retained row.
       if (uploaded === null) {
         await releaseReservation(db, reservation, ownerUserId, now).catch(() => {})
       } else {
@@ -516,7 +560,7 @@ revisionRoutes.put(
           context.env.AAT_OBJECTS,
           { ...uploaded, r2Key: key, ownerUserId, reservationId: reservation.id },
           now,
-        ).catch(() => {})
+        ).catch(() => context.env.AAT_OBJECTS.delete(key).catch(() => {}))
       }
       throw error
     }
@@ -558,6 +602,18 @@ revisionRoutes.get('/revisions/:revisionId/snapshot', requireCapability('cloud:r
 /* Original CSV backup — opt-in, per request                                                    */
 /* ------------------------------------------------------------------------------------------- */
 
+/** The only downloadable source; ordering also gives legacy duplicate rows a stable answer. */
+function currentSource(db: Database, runId: string) {
+  return db
+    .select()
+    .from(cloudObjects)
+    .where(
+      and(eq(cloudObjects.runId, runId), eq(cloudObjects.kind, 'source'), isNull(cloudObjects.deletedAt)),
+    )
+    .orderBy(desc(cloudObjects.createdAt), desc(cloudObjects.id))
+    .limit(1)
+}
+
 const sourceQuerySchema = z.object({
   declaredBytes: z.coerce.number().int().positive(),
   sha256: z.string().regex(/^[0-9a-f]{64}$/),
@@ -596,6 +652,29 @@ revisionRoutes.put(
     }
     if (query.declaredBytes > config.maxSourceBytes) {
       throw new ApiError('SOURCE_TOO_LARGE', { details: { maxBytes: config.maxSourceBytes } })
+    }
+
+    const [existing] = await currentSource(db, run.id)
+    if (existing?.sha256 === query.sha256) {
+      // Older deployments allowed duplicates. A retry also retires those surplus rows, but only
+      // while this source still owns the slot; it must not remove a racing replacement.
+      const retired = await db
+        .update(cloudObjects)
+        .set({ deletedAt: now })
+        .where(
+          and(
+            eq(cloudObjects.runId, run.id),
+            eq(cloudObjects.kind, 'source'),
+            isNull(cloudObjects.deletedAt),
+            ne(cloudObjects.id, existing.id),
+            sql`EXISTS (SELECT 1 FROM cloud_objects current WHERE current.id = ${existing.id} AND current.deleted_at IS NULL)`,
+          ),
+        )
+        .returning()
+      for (const old of retired) {
+        await unwindUploadedObject(db, context.env.AAT_OBJECTS, old, now).catch(() => {})
+      }
+      return context.json({ object: { id: existing.id, byteSize: existing.byteSize } })
     }
 
     await sweepStaleReservations(db, context.env.AAT_OBJECTS, now)
@@ -638,6 +717,9 @@ revisionRoutes.put(
         runId: run.id,
         reservationId: reservation.id,
         createdAt: now,
+        // An unpublished replacement must not become downloadable before its R2 PUT commits.
+        // Expired tombstones are swept if this request dies before publication.
+        deletedAt: now,
       }
       // The row claims the key BEFORE the bytes exist — the ordering the snapshot and poster
       // paths use — so a failed insert cannot strand untracked bytes, and a failed put unwinds
@@ -664,6 +746,73 @@ revisionRoutes.put(
         now,
       )
 
+      // PUT replaces the singleton source. Both old and new bytes must fit until publication;
+      // losing the old backup to make room before the new PUT succeeds would not be a safe replace.
+      const ready = sql`EXISTS (SELECT 1 FROM cloud_objects candidate
+        JOIN quota_reservations reservation ON reservation.id = candidate.reservation_id
+        JOIN runs live_run ON live_run.id = candidate.run_id
+        WHERE candidate.id = ${objectId} AND candidate.settled_claim IS NULL AND reservation.status = 'finalised'
+          AND live_run.deleted_at IS NULL)`
+      const liveSource = and(
+        eq(cloudObjects.runId, run.id),
+        eq(cloudObjects.kind, 'source'),
+        isNull(cloudObjects.deletedAt),
+      )
+      const [retired, published, winners] = await db.batch([
+        db
+          .update(cloudObjects)
+          .set({ deletedAt: now })
+          .where(
+            and(
+              liveSource,
+              ready,
+              // Keep at most one byte-identical predecessor, including legacy duplicate rows.
+              sql`${cloudObjects.id} != COALESCE((SELECT id FROM cloud_objects current
+                WHERE current.run_id = ${run.id} AND current.kind = 'source'
+                  AND current.deleted_at IS NULL AND current.sha256 = ${body.sha256}
+                ORDER BY current.created_at DESC, current.id DESC LIMIT 1), ${objectId})`,
+            ),
+          )
+          .returning(),
+        db
+          .update(cloudObjects)
+          .set({ deletedAt: null })
+          .where(
+            and(
+              eq(cloudObjects.id, objectId),
+              ready,
+              sql`NOT EXISTS (SELECT 1 FROM cloud_objects current WHERE current.run_id = ${run.id}
+            AND current.kind = 'source' AND current.deleted_at IS NULL)`,
+            ),
+          ),
+        currentSource(db, run.id),
+      ])
+      if (rowsAffected(published) === 1) uploaded = null
+      // Tombstones preserve every retired key if R2 fails. A later sweep completes the cleanup.
+      for (const old of retired) {
+        await unwindUploadedObject(db, context.env.AAT_OBJECTS, old, now).catch(() => {})
+      }
+      if (rowsAffected(published) !== 1) {
+        await unwindUploadedObject(
+          db,
+          context.env.AAT_OBJECTS,
+          {
+            id: objectId,
+            byteSize: actualBytes,
+            sha256: body.sha256,
+            r2Key: key,
+            ownerUserId,
+            reservationId: reservation.id,
+          },
+          now,
+        )
+        uploaded = null
+        const winner = winners[0]
+        if (winner?.sha256 === body.sha256) {
+          return context.json({ object: { id: winner.id, byteSize: winner.byteSize } })
+        }
+        throw new ApiError('RESOURCE_NOT_FOUND', { details: { reason: 'run_deleted_mid_upload' } })
+      }
       await writeAuditLog(db, {
         actorUserId: actor.userId,
         action: 'source.upload',
@@ -677,9 +826,9 @@ revisionRoutes.put(
       return context.json({ object: { id: objectId, byteSize: actualBytes } }, 201)
     } catch (error) {
       // Once the object row exists the charge may already be settled — releaseReservation is a
-      // no-op there — so the whole upload is unwound: accounting, row and bytes all go, and the
-      // deterministic key is free for the retry. Cleanup failure must not replace the real
-      // error: a remnant is reclaimable by the next contender for the key or the sweeper.
+      // no-op there — so an unpublished upload is unwound. Publication clears `uploaded` so a
+      // later audit failure cannot erase the replacement. Cleanup failure must not replace the
+      // real error: the retained row lets the sweeper finish reclaiming the bytes.
       if (uploaded === null) {
         await releaseReservation(db, reservation, ownerUserId, now).catch(() => {})
       } else {
@@ -688,7 +837,7 @@ revisionRoutes.put(
           context.env.AAT_OBJECTS,
           { ...uploaded, r2Key: key, ownerUserId, reservationId: reservation.id },
           now,
-        ).catch(() => {})
+        ).catch(() => context.env.AAT_OBJECTS.delete(key).catch(() => {}))
       }
       throw error
     }
@@ -700,13 +849,7 @@ revisionRoutes.get('/runs/:runId/source', requireCapability('raw:download'), asy
   const actor = context.get('actor')
   const run = await requireRun(context, context.req.param('runId'), 'read')
 
-  const [record] = await db
-    .select()
-    .from(cloudObjects)
-    .where(
-      and(eq(cloudObjects.runId, run.id), eq(cloudObjects.kind, 'source'), isNull(cloudObjects.deletedAt)),
-    )
-    .limit(1)
+  const [record] = await currentSource(db, run.id)
   if (!record) throw new ApiError('RESOURCE_NOT_FOUND')
   requireObjectAccess(context, record.ownerUserId, 'read')
 
