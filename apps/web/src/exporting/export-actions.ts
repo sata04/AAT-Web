@@ -45,13 +45,16 @@ export async function runWorkbookExport(deps: {
     deps.notify('info', `${deps.name} を書き出しました。`)
   } catch (error) {
     if (error instanceof ExportTooLargeForWorksheet) {
-      // The CSV fallback carries only the time series: when the workbook would
-      // have had statistics or G-quality sheets, the recommendation must say so
-      // rather than silently trade the overflow for a silent data loss.
-      const omission =
-        deps.input.gQuality.length > 0
-          ? 'なお、CSVには時刻と重力加速度のみ含まれ、統計・G 品質シートは出力されません。G 品質データが必要な場合は解析範囲を狭めて Excel で書き出してください。'
-          : ''
+      // The CSV fallback carries only the time series. Enumerate the sheets the
+      // workbook would have had — statistics always, acceleration when the input
+      // carries it, G quality when non-empty — so the fallback never trades the
+      // overflow for a silent data loss.
+      const omitted = ['統計']
+      if (deps.input.inner?.acceleration !== undefined || deps.input.drag?.acceleration !== undefined) {
+        omitted.push('加速度')
+      }
+      if (deps.input.gQuality.length > 0) omitted.push('G 品質')
+      const omission = `なお、CSVには時刻と重力レベルのみ含まれ、${omitted.join('・')}シートは出力されません。これらのデータが必要な場合は解析範囲を狭めて Excel で書き出してください。`
       deps.notify(
         'warning',
         `${error.message}\n「CSVで書き出す」を選ぶと、行数制限なしで保存できます。${omission}`,

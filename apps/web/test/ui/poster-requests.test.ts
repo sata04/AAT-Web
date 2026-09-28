@@ -288,11 +288,38 @@ describe('the automatic poster', () => {
 
 describe('retrying', () => {
   it('uses the retry endpoint when the failed figure has an id', async () => {
-    install(() => json({ poster: figure('ready') }, 201))
+    install((request) =>
+      request.method === 'GET'
+        ? json({ posters: [figure('failed')] })
+        : json({ poster: figure('ready') }, 201),
+    )
     const outcome = await retryAutoPoster(context(), POSTER_ID, () => {})
 
     expect(outcome.ok).toBe(true)
-    expect(trace()).toEqual([`POST /api/v1/posters/${POSTER_ID}/retry`])
+    expect(trace()).toEqual([
+      `GET /api/v1/revisions/${REVISION_ID}/posters`,
+      `POST /api/v1/posters/${POSTER_ID}/retry`,
+    ])
+  })
+
+  it('resumes observing a still-rendering figure instead of posting a retry it would reject', async () => {
+    vi.useFakeTimers()
+    let listings = 0
+    install((request) => {
+      if (request.method !== 'GET') return json({ poster: figure('ready') }, 200)
+      listings += 1
+      return json({ posters: [figure(listings >= 2 ? 'ready' : 'rendering')] })
+    })
+
+    const pending = retryAutoPoster(context(), POSTER_ID, () => {})
+    await vi.advanceTimersByTimeAsync(10_000)
+    const outcome = await pending
+
+    expect(outcome.ok).toBe(true)
+    // The client's polling deadline is not a server failure: a rendering row
+    // rejects POST /retry with POSTER_BUSY, so observation continues via GETs.
+    expect(trace().length).toBeGreaterThanOrEqual(2)
+    expect(trace().every((entry) => entry.startsWith('GET'))).toBe(true)
   })
 
   it('falls back to the idempotent endpoint when no figure was ever created', async () => {

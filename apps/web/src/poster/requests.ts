@@ -150,6 +150,23 @@ export async function retryAutoPoster(
 ): Promise<PosterRequestOutcome> {
   if (posterId === null) return generateAutoPoster(context, onStatus, signal)
 
+  // A lane can carry an id without a failed server row: the client's polling
+  // deadline is not a server state, so a still-rendering figure would reject a
+  // POST to the retry endpoint with POSTER_BUSY. Read the real status first —
+  // only a genuinely failed/queued figure goes through retry; anything else
+  // resumes observation of the render already in flight.
+  const listed = await listPosters(context.revisionId)
+  if (listed.ok) {
+    const found = listed.value.posters.find((poster) => poster.posterId === posterId)
+    if (found !== undefined && (found.status === 'rendering' || found.status === 'ready')) {
+      const pending: Promise<CloudOutcome<{ poster: PosterFigure }>> = Promise.resolve({
+        ok: true,
+        value: { poster: found },
+      })
+      return settleRequest(context, pending, onStatus, signal)
+    }
+  }
+
   let spec: PosterPlotSpec
   try {
     spec = buildAutoSpec(context)
