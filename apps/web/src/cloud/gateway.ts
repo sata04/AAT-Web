@@ -397,8 +397,13 @@ export interface RunRevisionSummary {
   createdAt: string
 }
 
+/** The run block of GET /runs/:runId — the list response omits `ownerUserId`; the detail adds it. */
+export interface RunDetailSummary extends RunSummary {
+  ownerUserId: string
+}
+
 export interface RunDetail {
-  run: RunSummary
+  run: RunDetailSummary
   revisions: RunRevisionSummary[]
 }
 

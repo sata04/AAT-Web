@@ -40,7 +40,7 @@ import {
   gzipDecompress,
   SNAPSHOT_FORMAT_VERSION,
 } from '@aat/shared'
-import { and, asc, desc, eq, isNull, ne, sql } from 'drizzle-orm'
+import { and, asc, desc, eq, isNull, ne, or, sql } from 'drizzle-orm'
 import { Hono } from 'hono'
 import { z } from 'zod'
 import { APP_VERSION, resolveConfig } from '../config.ts'
@@ -874,11 +874,20 @@ revisionRoutes.delete('/runs/:runId/source', requireCapability('raw:delete'), as
   const run = await requireRun(context, context.req.param('runId'), 'destroy')
   const now = new Date()
 
+  // Live rows are not the whole set that must die: a staged source uploaded but not yet
+  // published already carries a tombstone, so `deleted_at IS NULL` would miss it — and its
+  // in-flight PUT would then publish a "deleted" source afterwards. Walk anything still live
+  // or still unclaimed (`settled_claim` is the once-only dead marker; a claimed row's
+  // reservation is terminal, which also fails the publisher's `ready` check).
   const records = await db
     .select()
     .from(cloudObjects)
     .where(
-      and(eq(cloudObjects.runId, run.id), eq(cloudObjects.kind, 'source'), isNull(cloudObjects.deletedAt)),
+      and(
+        eq(cloudObjects.runId, run.id),
+        eq(cloudObjects.kind, 'source'),
+        or(isNull(cloudObjects.deletedAt), isNull(cloudObjects.settledClaim)),
+      ),
     )
 
   // Every object under a run belongs to the run's owner, and the caller has already been resolved
@@ -895,12 +904,17 @@ revisionRoutes.delete('/runs/:runId/source', requireCapability('raw:delete'), as
   let objectsDeleted = 0
   for (const record of records) {
     await context.env.AAT_OBJECTS.delete(record.r2Key)
-    await releaseObjectAccounting(db, record, now)
+    const released = await releaseObjectAccounting(db, record, now)
+    // Conditional: a concurrent delete must not stamp its own timestamp over the first, and a
+    // staged row keeps the tombstone it was inserted with.
     const claimed = await db
       .update(cloudObjects)
       .set({ deletedAt: now })
       .where(and(eq(cloudObjects.id, record.id), isNull(cloudObjects.deletedAt)))
-    if (rowsAffected(claimed) === 1) {
+    // A live row counts when this request won its tombstone; a staged row — tombstoned at
+    // insert — when this request won its accounting claim. Racing deletes split the count the
+    // same way, so the total never exceeds the rows that actually died.
+    if (rowsAffected(claimed) === 1 || (record.deletedAt !== null && released)) {
       objectsDeleted += 1
     }
   }

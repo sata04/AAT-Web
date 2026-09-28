@@ -346,10 +346,19 @@ the point of the shared workspace.
 ## R2 keys are built from server-generated identifiers, never accepted
 
 ```
-snapshots/<ownerUserId>/<runId>/<revisionId>.<json|json.gz>
-posters/<ownerUserId>/<runId>/<revisionId>/<posterId>.png
+snapshots/<ownerUserId>/<runId>/<revisionId>_<objectId>.<json|json.gz>
+posters/<ownerUserId>/<runId>/<revisionId>/<figureId>-<attempt>.png
 sources/<ownerUserId>/<runId>/<objectId>.csv
 ```
+
+Every final segment carries a generation: the per-upload object id on snapshots and sources,
+and the render attempt on posters (a retried or superseded render writes to a fresh key rather
+than overwriting the winner's bytes). Bytes at a committed key are therefore never replaced in
+place — a late writer can only land at a key nothing references, and `cloud_objects` ownership,
+not R2 state, decides what publishes. That is what makes the delete-then-late-PUT races
+survivable: the deleter's row walk and the writer's publication check meet in D1, and the
+loser's bytes stay reachable from a row (or a recovery record, for deleted accounts) until a
+sweep confirms them gone.
 
 **`<ownerUserId>` is the owner of the run, never the user who made the request.** Since the shared
 workspace policy a colleague can render a poster from your revision, and an administrator can

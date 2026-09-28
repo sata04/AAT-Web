@@ -282,6 +282,10 @@ export async function releaseReservation(
  * previous order (tombstone, then release) made a release failure permanent, because a retried
  * delete could no longer see the tombstoned object.
  */
+/**
+ * Returns whether this call performed the once-only claim, so a deleter can count the object it
+ * actually retired rather than every row it happened to walk past.
+ */
 export async function releaseObjectAccounting(
   db: Database,
   object: {
@@ -292,14 +296,14 @@ export async function releaseObjectAccounting(
     reservationId: string | null
   },
   now: Date = new Date(),
-): Promise<void> {
+): Promise<boolean> {
   const token = newId()
 
   // Rows committed before `reservation_id` existed have NULL — those bytes were always charged,
   // and there is no reservation row to carry the claim, so the object itself carries it: the
   // `settled_claim` write is the once-only marker a retry or a racing delete consults.
   if (object.reservationId === null) {
-    await db.batch([
+    const [claim] = await db.batch([
       db
         .update(cloudObjects)
         .set({ settledClaim: token })
@@ -318,7 +322,7 @@ export async function releaseObjectAccounting(
           ),
         ),
     ])
-    return
+    return rowsAffected(claim) === 1
   }
 
   // The reservation's bytes are fixed at insert, so the amount the pending-path release owes is
@@ -328,10 +332,10 @@ export async function releaseObjectAccounting(
     .from(quotaReservations)
     .where(eq(quotaReservations.id, object.reservationId))
     .limit(1)
-  if (reservation === undefined) return
+  if (reservation === undefined) return false
 
   const rid = object.reservationId
-  await db.batch([
+  const [released, settled] = await db.batch([
     // A reservation still open belongs to an upload that never charged usage — its release comes
     // out of `bytesReserved`.
     db
@@ -371,6 +375,7 @@ export async function releaseObjectAccounting(
         ),
       ),
   ])
+  return rowsAffected(released) === 1 || rowsAffected(settled) === 1
 }
 
 /**

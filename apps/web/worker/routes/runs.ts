@@ -407,10 +407,19 @@ runRoutes.delete('/:runId', requireCapability('analysis:delete'), async (context
 
   // Delete the bytes first and correct the quota as each object goes, so a failure partway through
   // leaves the account charged for objects that still exist rather than for objects that do not.
+  // Live rows are not the whole set that must die: a staged object inserted mid-upload already
+  // carries a tombstone, so `deleted_at IS NULL` would skip it and its bytes — and quota — would
+  // outlive the run until a sweep. Walk anything still live or still unclaimed; a claimed row is
+  // fully dead (the sweep owns its physical cleanup).
   const objects = await db
     .select()
     .from(cloudObjects)
-    .where(and(eq(cloudObjects.runId, run.id), isNull(cloudObjects.deletedAt)))
+    .where(
+      and(
+        eq(cloudObjects.runId, run.id),
+        or(isNull(cloudObjects.deletedAt), isNull(cloudObjects.settledClaim)),
+      ),
+    )
 
   /*
    * The quota settlement runs *before* the tombstone, which inverts an earlier version of this
