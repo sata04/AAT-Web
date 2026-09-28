@@ -274,14 +274,19 @@ async function installAnalysisResult(deps: AnalyzerLoopDeps, installed: Installe
 
 /** Reconcile completed imports after authentication or an analysis commit, once per result. */
 export function reconcileCloudFor(deps: AnalyzerLoopDeps): void {
-  if (!deps.mounted.current || !deps.signedIn) return
+  if (!deps.mounted.current) return
   // The analyzer stays mounted across sign-out/sign-in; a different account
   // must not inherit the previous user's markers, or its open datasets would
-  // never reach the new account's revisions.
+  // never reach the new account's revisions. The check runs before the
+  // sign-in gate on purpose: a sync interrupted by sign-out fails under the
+  // previous identity, and without recording that transition the marker
+  // would still match when the same account signs back in — skipping the
+  // dataset forever.
   if (deps.syncRequestedUser.current !== deps.sessionUserId) {
     deps.syncRequestedUser.current = deps.sessionUserId
     deps.syncRequested.current = new WeakSet()
   }
+  if (!deps.signedIn) return
   for (const dataset of deps.datasetsRef.current) {
     const request = deps.imports.current.get(dataset)
     if (request === undefined || request.localOnly || deps.syncRequested.current.has(dataset)) continue

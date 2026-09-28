@@ -575,6 +575,27 @@ describe('import ownership and cloud reconciliation', () => {
     reconcileCloudFor(deps)
     expect(deps.syncToCloud).toHaveBeenCalledTimes(2)
   })
+  it('re-attempts a sync interrupted by sign-out when the same account signs back in', async () => {
+    // A sync that dies mid-flight at sign-out fails under the old identity.
+    // Signing back into that account must not inherit the marker — the dataset
+    // would otherwise never reach the cloud until reopened.
+    const { deps, datasetsBox } = loopDeps(successfulClient())
+    await openFilesFor(deps, [new File(['real'], '260811_data.csv')])
+    commit(deps, datasetsBox)
+    deps.signedIn = true
+    deps.sessionUserId = 'alice'
+    reconcileCloudFor(deps)
+    expect(deps.syncToCloud).toHaveBeenCalledTimes(1)
+    deps.signedIn = false
+    deps.sessionUserId = null
+    reconcileCloudFor(deps)
+    deps.signedIn = true
+    deps.sessionUserId = 'alice'
+    reconcileCloudFor(deps)
+    expect(deps.syncToCloud).toHaveBeenCalledTimes(2)
+    reconcileCloudFor(deps)
+    expect(deps.syncToCloud).toHaveBeenCalledTimes(2)
+  })
   it('preserves local-only ownership across a column dialog', async () => {
     const client = stubClient({ analyse: vi.fn(async () => result()) })
     const { deps, datasetsBox } = loopDeps(client, { signedIn: true })
