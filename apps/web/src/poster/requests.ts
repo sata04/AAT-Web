@@ -207,6 +207,7 @@ export async function retryAutoPoster(
         const reclaimAt = Date.now() + TAKEOVER_RETRY_DELAY_MS
         while (!isAborted(signal) && Date.now() < reclaimAt) {
           await delay(POLL_INTERVAL_MS, signal)
+          if (isAborted(signal)) break
           const listedAgain = await listPosters(context.revisionId)
           if (!listedAgain.ok) continue
           const seen = listedAgain.value.posters.find((poster) => poster.posterId === posterId)
