@@ -214,6 +214,15 @@ describe('parseCsvText', () => {
     },
   )
 
+  it('keeps comma when no data row carries the alternative delimiter', () => {
+    // A sparse comma table whose one header cell happens to hold semicolons:
+    // header width alone cannot prove a semicolon layout — some record has to.
+    const table = parseCsvText('Time,Acceleration;raw;unit\n0\n1\n')
+    expect(table.columnNames).toEqual(['Time', 'Acceleration;raw;unit'])
+    expect(table.column('Time')?.cells).toEqual(['0', '1'])
+    expect(table.column('Acceleration;raw;unit')?.cells).toEqual(['', ''])
+  })
+
   it('keeps comma when delimiter-free records can be omitted comma fields', () => {
     // A valid comma CSV whose values happen to carry a semicolon: `1` has no
     // semicolon, so nothing proves the file is semicolon-separated — the row

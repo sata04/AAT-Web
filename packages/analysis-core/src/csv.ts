@@ -251,12 +251,17 @@ export function parseCsvText(text: string): CsvTable {
     // With an unquoted header comma, a two-field alternative header is itself
     // ambiguous with a comma table whose second column carries the delimiter —
     // comma precedence wins there (the desktop's default). Three or more
-    // alternative fields can only arise from real delimiters.
+    // alternative fields can only arise from real delimiters, and at least one
+    // data row must actually carry the delimiter — header width alone cannot
+    // prove a sparse table is not comma-separated. Delimiter-free rows still
+    // count: pandas pads them as short records.
     if (
       (comma.data[0]?.length ?? 0) < 2 ||
       (hasCleanLayout(alternative) &&
         (!hasUnquotedHeaderComma(records, delimiter) ||
-          (hasOnlySingleFieldBody(comma) && (alternative.data[0]?.length ?? 0) > 2)))
+          (hasOnlySingleFieldBody(comma) &&
+            (alternative.data[0]?.length ?? 0) > 2 &&
+            alternative.data.slice(1).some((row) => row.length > 1))))
     ) {
       parsed = alternative
     }
