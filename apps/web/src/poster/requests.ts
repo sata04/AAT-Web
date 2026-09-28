@@ -183,12 +183,19 @@ export async function retryAutoPoster(
       // this POST is the only call that takes over a stale render; merely
       // observing it would loop on the deadline with no way to recover.
       if (!isAborted(signal)) onStatus({ kind: 'queued', posterId })
-      return settleRequest(context, requestAutoPoster(context.revisionId, spec), onStatus, signal)
+      const pending = requestAutoPoster(context.revisionId, spec).then((outcome) => {
+        // The gateway deadline is far shorter than an inline takeover render:
+        // a POST that timed out does not mean nothing is rendering — keep
+        // observing the row the claim may still be settling.
+        if (outcome.ok || outcome.kind !== 'unavailable') return outcome
+        return { ok: true as const, value: { poster: found } }
+      })
+      return settleRequest(context, pending, onStatus, signal, posterId)
     }
   }
 
   if (!isAborted(signal)) onStatus({ kind: 'queued', posterId })
-  return settleRequest(context, retryPoster(posterId, spec), onStatus, signal)
+  return settleRequest(context, retryPoster(posterId, spec), onStatus, signal, posterId)
 }
 
 /**
@@ -222,6 +229,7 @@ async function settleRequest(
   pending: Promise<CloudOutcome<{ poster: PosterFigure }>>,
   onStatus: (status: PosterStatus) => void,
   signal: AbortSignal | undefined,
+  knownPosterId?: string,
 ): Promise<PosterRequestOutcome> {
   // An abandoned request must not keep writing to the lane. A newer request aborts the older one
   // and immediately reports `queued`; without this guard the older one's next update would land
@@ -240,7 +248,15 @@ async function settleRequest(
       // everything else, and `POSTER_BUSY` is backpressure rather than a fault.
       retryable: outcome.kind === 'unavailable' || outcome.retryable,
     }
-    report({ kind: 'failed', message: failure.message, retryable: failure.retryable })
+    // The lane keeps whichever id it was tracking: losing it would send the
+    // next retry to the idempotent endpoint, which answers a `failed` row
+    // without re-rendering it.
+    report({
+      kind: 'failed',
+      message: failure.message,
+      retryable: failure.retryable,
+      ...(knownPosterId !== undefined ? { posterId: knownPosterId } : {}),
+    })
     return failure
   }
 

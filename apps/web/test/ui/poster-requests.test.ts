@@ -327,6 +327,46 @@ describe('retrying', () => {
     expect(trace().every((entry) => !entry.includes('/retry'))).toBe(true)
   })
 
+  it('keeps observing the row when the takeover POST outlives the gateway deadline', async () => {
+    vi.useFakeTimers()
+    let listings = 0
+    install((request) => {
+      if (request.method === 'POST') return Promise.reject(new TypeError('network'))
+      listings += 1
+      return json({ posters: [figure(listings >= 3 ? 'ready' : 'rendering')] })
+    })
+
+    const pending = retryAutoPoster(context(), POSTER_ID, () => {})
+    await vi.advanceTimersByTimeAsync(30_000)
+    const outcome = await pending
+
+    expect(outcome.ok).toBe(true)
+    // A takeover render runs inline on the Worker for far longer than the
+    // gateway's deadline: the timed-out POST still had the row claimed, so the
+    // only honest move is to keep polling it rather than reporting a failure
+    // the renderer never had.
+    expect(trace().filter((entry) => entry.startsWith('POST'))).toEqual([
+      `POST /api/v1/revisions/${REVISION_ID}/poster/auto`,
+    ])
+  })
+
+  it('keeps the poster id on a failed takeover so the next retry uses the retry endpoint', async () => {
+    install((request) =>
+      request.method === 'GET'
+        ? json({ posters: [figure('rendering')] })
+        : json({ error: { code: 'INTERNAL', message: 'renderer failed' } }, 500),
+    )
+    const statuses: PosterStatus[] = []
+
+    const outcome = await retryAutoPoster(context(), POSTER_ID, (status) => statuses.push(status))
+
+    expect(outcome.ok).toBe(false)
+    const last = statuses.at(-1)
+    // Without the id the next retry would hit the idempotent endpoint, which
+    // answers a `failed` row without re-rendering it.
+    expect(last?.kind === 'failed' && last.posterId).toBe(POSTER_ID)
+  })
+
   it('publishes nothing and sends no retry when aborted while reading the figure status', async () => {
     const controller = new AbortController()
     let release: (() => void) | undefined
