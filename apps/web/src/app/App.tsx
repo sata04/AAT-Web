@@ -16,9 +16,8 @@
  *  - `SessionProvider` second, so the answer to "who is signed in" is fetched
  *    once for the whole application rather than per screen. A negative answer is
  *    the normal local-only mode; see that file.
- *  - `RouteErrorBoundary` innermost and **keyed by route**, so a screen that
- *    throws can be escaped by navigating away rather than by reloading. A
- *    boundary outside the switch would stay broken for the whole session.
+ *  - Each host has its own `RouteErrorBoundary`. Cloud screens reset on route
+ *    changes; the analyzer stays mounted so navigation preserves local work.
  *
  * The analyzer is the fallback for nothing: it is the `/` route and it is
  * reached with no session, no network and no Worker. Every other route is a
@@ -26,8 +25,9 @@
  * would make a bookmarked URL silently do something else.
  */
 
+import { useEffect, useRef, useState } from 'react'
 import { RouteErrorBoundary } from '../components/RouteErrorBoundary.tsx'
-import { RouterProvider, useRoute } from '../router/Router.tsx'
+import { RouterProvider, useRoute, useRouteFocus } from '../router/Router.tsx'
 import { AdminAuditScreen } from '../screens/AdminAuditScreen.tsx'
 import { AdminInvitationsScreen } from '../screens/AdminInvitationsScreen.tsx'
 import { AdminOverviewScreen } from '../screens/AdminOverviewScreen.tsx'
@@ -47,12 +47,12 @@ import { SecurityScreen } from '../screens/SecurityScreen.tsx'
 import { SignInScreen } from '../screens/SignInScreen.tsx'
 import { SessionProvider } from '../session/SessionProvider.tsx'
 
-function CurrentScreen(): React.JSX.Element {
+function CurrentScreen(): React.JSX.Element | null {
   const route = useRoute()
 
   switch (route.name) {
     case 'analyzer':
-      return <AnalyzerScreen />
+      return null
     case 'sign-in':
       return <SignInScreen />
     case 'register':
@@ -86,13 +86,35 @@ function CurrentScreen(): React.JSX.Element {
 
 function RoutedScreen(): React.JSX.Element {
   const route = useRoute()
-  // Keyed by pathname: a screen that threw is escapable by navigating, and a
-  // screen that stays mounted across a parameter change (`/runs/a` → `/runs/b`)
-  // still resets its boundary.
+  const analyzerVisible = route.name === 'analyzer'
+  const [analyzerVisited, setAnalyzerVisited] = useState(analyzerVisible)
+  const analyzerHost = useRef<HTMLDivElement>(null)
+  const screenHost = useRef<HTMLDivElement>(null)
+  useRouteFocus(analyzerVisible ? analyzerHost : screenHost)
+
+  useEffect(() => {
+    if (analyzerVisible) setAnalyzerVisited(true)
+  }, [analyzerVisible])
+
   return (
-    <RouteErrorBoundary key={route.pathname}>
-      <CurrentScreen />
-    </RouteErrorBoundary>
+    <>
+      {/* A stable host owns the in-memory workspace and its workers. Hiding it
+          also removes its controls and landmarks from keyboard/AT navigation. */}
+      <div ref={analyzerHost} hidden={!analyzerVisible} inert={!analyzerVisible}>
+        {analyzerVisited || analyzerVisible ? (
+          <RouteErrorBoundary>
+            <AnalyzerScreen />
+          </RouteErrorBoundary>
+        ) : null}
+      </div>
+      <div ref={screenHost} hidden={analyzerVisible}>
+        {analyzerVisible ? null : (
+          <RouteErrorBoundary key={route.pathname}>
+            <CurrentScreen />
+          </RouteErrorBoundary>
+        )}
+      </div>
+    </>
   )
 }
 

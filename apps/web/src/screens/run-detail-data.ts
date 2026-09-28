@@ -5,8 +5,9 @@
  * JSX; the bodies live here so the screen reads as wiring.
  */
 
-import { type Dispatch, type SetStateAction, useEffect, useState } from 'react'
+import { type Dispatch, type SetStateAction, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
+  type CloudOutcome,
   deleteRun,
   fetchRevision,
   fetchRun,
@@ -41,8 +42,8 @@ export type LoadState<T> =
 
 export type ReplayState =
   | { kind: 'idle' }
-  | { kind: 'loading' }
-  | { kind: 'ready'; revisionId: string; replay: ReplayedAnalysis }
+  | { kind: 'loading'; requestId: symbol }
+  | { kind: 'ready'; revisionId: string; replay: ReplayedAnalysis; scope?: RevisionScope }
   | { kind: 'error'; message: string }
 
 /**
@@ -75,92 +76,100 @@ function runLoadOutcome(outcome: Awaited<ReturnType<typeof fetchRun>>): LoadStat
   }
 }
 
-function loadRun(
-  mounted: { current: boolean },
-  sessionStatus: SessionStatus,
-  runId: string,
-  setRun: Dispatch<SetStateAction<LoadState<RunSummary>>>,
-): void {
-  if (sessionStatus !== 'signed-in' || runId === '') return
-  setRun({ kind: 'loading' })
-  void fetchRun(runId).then((outcome) => {
-    if (!mounted.current) return
-    setRun(runLoadOutcome(outcome))
-  })
+/** Child failures retain the last successful value, but can never masquerade as empty history. */
+export type ChildResource<T> =
+  | { kind: 'loading' | 'ready'; value: T }
+  | { kind: 'error'; value: T; message: string }
+
+export interface RevisionScope {
+  revisionId: string | null
+  current: boolean
+  onInvalidate?: () => void
 }
 
-function loadRevisions(
-  mounted: { current: boolean },
-  sessionStatus: SessionStatus,
-  runId: string,
-  sinks: {
-    setRevisions: Dispatch<SetStateAction<readonly RevisionSummary[]>>
-    setSelectedRevisionId: Dispatch<SetStateAction<string | null>>
-  },
-): void {
-  if (sessionStatus !== 'signed-in' || runId === '') return
-  void listRevisions(runId).then((outcome) => {
-    if (!mounted.current || !outcome.ok) return
-    sinks.setRevisions(outcome.value.revisions)
-    // Keep an existing selection only when it belongs to this run — the screen is reused across
-    // run navigation, and a previous run's id resolves to nothing here. Otherwise take the current
-    // analysis, which is the highest revision number — see `latestRevision` for why not the newest
-    // timestamp.
-    sinks.setSelectedRevisionId((current) =>
-      current !== null && outcome.value.revisions.some((revision) => revision.id === current)
-        ? current
-        : (latestRevision(outcome.value.revisions)?.id ?? null),
-    )
-  })
+const NO_REVISIONS: readonly RevisionSummary[] = []
+const NO_POSTERS: readonly PosterFigure[] = []
+
+async function fetchRevisions(runId: string): Promise<CloudOutcome<readonly RevisionSummary[]>> {
+  const outcome = await listRevisions(runId)
+  return outcome.ok ? { ok: true, value: outcome.value.revisions } : outcome
+}
+async function fetchMetrics(revisionId: string): Promise<CloudOutcome<RunMetrics | null>> {
+  const outcome = await fetchRevision(revisionId)
+  return outcome.ok ? { ok: true, value: decodeRunMetrics(outcome.value.metrics) } : outcome
+}
+async function fetchPosters(revisionId: string): Promise<CloudOutcome<readonly PosterFigure[]>> {
+  const outcome = await listPosters(revisionId)
+  return outcome.ok ? { ok: true, value: outcome.value.posters } : outcome
 }
 
-function loadRevisionDetails(
-  mounted: { current: boolean },
-  selectedRevisionId: string | null,
-  setMetrics: Dispatch<SetStateAction<RunMetrics | null>>,
-  setPosters: Dispatch<SetStateAction<readonly PosterFigure[]>>,
-): (() => void) | undefined {
-  if (selectedRevisionId === null) return undefined
-  // Two fetches race whenever the user switches revision quickly: without
-  // this flag the slower, older response would overwrite the newer metrics
-  // and posters and nothing would ever correct it.
-  let superseded = false
-  setMetrics(null)
-  setPosters([])
-  void fetchRevision(selectedRevisionId).then((outcome) => {
-    if (!mounted.current || superseded || !outcome.ok) return
-    setMetrics(decodeRunMetrics(outcome.value.metrics))
-  })
-  void listPosters(selectedRevisionId).then((outcome) => {
-    if (!mounted.current || superseded || !outcome.ok) return
-    setPosters(outcome.value.posters)
-  })
-  return () => {
-    superseded = true
-  }
-}
-
-// A revision change invalidates a replay: the samples on screen belong to the analysis that was
-// open, and silently leaving them under a different revision's heading would attribute one
-// measurement's numbers to another.
-function invalidateStaleReplay(
-  selectedRevisionId: string | null,
-  setReplay: Dispatch<SetStateAction<ReplayState>>,
-): void {
-  setReplay((current) =>
-    current.kind === 'ready' && current.revisionId !== selectedRevisionId ? { kind: 'idle' } : current,
+function useChildResource<T>(
+  key: string | null,
+  empty: T,
+  fetchValue: (id: string) => Promise<CloudOutcome<T>>,
+) {
+  const [stored, setStored] = useState<{ key: string | null; resource: ChildResource<T> }>(() => ({
+    key,
+    resource: { kind: 'loading', value: empty },
+  }))
+  const [attempt, setAttempt] = useState(0)
+  // biome-ignore lint/correctness/useExhaustiveDependencies: A retry must refetch the same resource key.
+  useEffect(() => {
+    if (key === null) return
+    let current = true
+    setStored((previous) => ({
+      key,
+      resource: { kind: 'loading', value: previous.key === key ? previous.resource.value : empty },
+    }))
+    void fetchValue(key).then((outcome) => {
+      if (!current) return
+      setStored((previous) => ({
+        key,
+        resource: outcome.ok
+          ? { kind: 'ready', value: outcome.value }
+          : {
+              kind: 'error',
+              value: previous.key === key ? previous.resource.value : empty,
+              message: outcome.message,
+            },
+      }))
+    })
+    return () => {
+      current = false
+    }
+  }, [key, empty, fetchValue, attempt])
+  const resource: ChildResource<T> = stored.key === key ? stored.resource : { kind: 'loading', value: empty }
+  const retry = useCallback(() => setAttempt((value) => value + 1), [])
+  const setValue: Dispatch<SetStateAction<T>> = useCallback(
+    (update) => {
+      setStored((previous) => {
+        if (previous.key !== key) return previous
+        const value =
+          typeof update === 'function' ? (update as (value: T) => T)(previous.resource.value) : update
+        return { key, resource: { ...previous.resource, value } }
+      })
+    },
+    [key],
   )
+  return { resource, retry, setValue }
 }
 
 export interface RunDetailData {
   mounted: { current: boolean }
+  revisionScope: RevisionScope
   run: LoadState<RunSummary>
   setRun: Dispatch<SetStateAction<LoadState<RunSummary>>>
   revisions: readonly RevisionSummary[]
+  revisionsState: ChildResource<readonly RevisionSummary[]>
+  retryRevisions: () => void
   selectedRevisionId: string | null
   setSelectedRevisionId: Dispatch<SetStateAction<string | null>>
   metrics: RunMetrics | null
+  metricsState: ChildResource<RunMetrics | null>
+  retryMetrics: () => void
   posters: readonly PosterFigure[]
+  postersState: ChildResource<readonly PosterFigure[]>
+  retryPosters: () => void
   setPosters: Dispatch<SetStateAction<readonly PosterFigure[]>>
   replay: ReplayState
   setReplay: Dispatch<SetStateAction<ReplayState>>
@@ -172,35 +181,107 @@ export interface RunDetailData {
 export function useRunDetailData(sessionStatus: SessionStatus, runId: string): RunDetailData {
   const mounted = useMountedRef()
   const [run, setRun] = useState<LoadState<RunSummary>>({ kind: 'loading' })
-  const [revisions, setRevisions] = useState<readonly RevisionSummary[]>([])
-  const [selectedRevisionId, setSelectedRevisionId] = useState<string | null>(null)
-  const [metrics, setMetrics] = useState<RunMetrics | null>(null)
-  const [posters, setPosters] = useState<readonly PosterFigure[]>([])
-  const [replay, setReplay] = useState<ReplayState>({ kind: 'idle' })
+  const [selection, setSelection] = useState<{ runId: string; id: string | null }>({ runId, id: null })
+  const selectedRevisionId = selection.runId === runId ? selection.id : null
+  const setSelectedRevisionId: Dispatch<SetStateAction<string | null>> = useCallback(
+    (update) => {
+      setSelection((previous) => ({
+        runId,
+        id: typeof update === 'function' ? update(previous.runId === runId ? previous.id : null) : update,
+      }))
+    },
+    [runId],
+  )
+  const [replay, storeReplay] = useState<ReplayState>({ kind: 'idle' })
   const [source, setSource] = useState<SourceState>({ kind: 'unknown' })
+  const scope = useMemo<RevisionScope>(
+    () => ({ revisionId: selectedRevisionId, current: true, runId, sessionStatus }),
+    [selectedRevisionId, runId, sessionStatus],
+  )
+  const liveScope = useRef(scope)
+  useEffect(() => {
+    liveScope.current = scope
+    scope.current = true
+    storeReplay({ kind: 'idle' })
+    return () => {
+      scope.current = false
+      scope.onInvalidate?.()
+    }
+  }, [scope])
+  // Dispatches are tied to the selection that created them, including custom poster callbacks.
+  const setReplay: Dispatch<SetStateAction<ReplayState>> = useCallback(
+    (update) => {
+      if (mounted.current && scope.current) storeReplay(update)
+    },
+    [mounted, scope],
+  )
 
-  useEffect(() => loadRun(mounted, sessionStatus, runId, setRun), [mounted, sessionStatus, runId])
-  useEffect(
-    () => loadRevisions(mounted, sessionStatus, runId, { setRevisions, setSelectedRevisionId }),
-    [mounted, sessionStatus, runId],
+  const revisions = useChildResource(
+    sessionStatus === 'signed-in' && runId !== '' ? runId : null,
+    NO_REVISIONS,
+    fetchRevisions,
   )
-  useEffect(
-    () => loadRevisionDetails(mounted, selectedRevisionId, setMetrics, setPosters),
-    [mounted, selectedRevisionId],
+  const metrics = useChildResource(
+    sessionStatus === 'signed-in' ? selectedRevisionId : null,
+    null,
+    fetchMetrics,
   )
-  useEffect(() => invalidateStaleReplay(selectedRevisionId, setReplay), [selectedRevisionId])
+  const posters = useChildResource(
+    sessionStatus === 'signed-in' ? selectedRevisionId : null,
+    NO_POSTERS,
+    fetchPosters,
+  )
+  const writePosters = posters.setValue
+  const setPosters: Dispatch<SetStateAction<readonly PosterFigure[]>> = useCallback(
+    (update) => {
+      if (mounted.current && scope.current) writePosters(update)
+    },
+    [mounted, scope, writePosters],
+  )
+
+  useEffect(() => {
+    if (sessionStatus !== 'signed-in' || runId === '') return
+    let current = true
+    setRun({ kind: 'loading' })
+    setSource({ kind: 'unknown' })
+    void fetchRun(runId).then((outcome) => {
+      if (current) setRun(runLoadOutcome(outcome))
+    })
+    return () => {
+      current = false
+    }
+  }, [sessionStatus, runId])
+  useEffect(() => {
+    if (revisions.resource.kind !== 'ready') return
+    const rows = revisions.resource.value
+    setSelectedRevisionId((id) =>
+      rows.some((row) => row.id === id) ? id : (latestRevision(rows)?.id ?? null),
+    )
+  }, [revisions.resource, setSelectedRevisionId])
 
   return {
     mounted,
+    revisionScope: scope,
     run,
     setRun,
-    revisions,
+    revisions: revisions.resource.value,
+    revisionsState: revisions.resource,
+    retryRevisions: revisions.retry,
     selectedRevisionId,
     setSelectedRevisionId,
-    metrics,
-    posters,
+    metrics: metrics.resource.value,
+    metricsState: metrics.resource,
+    retryMetrics: metrics.retry,
+    posters: posters.resource.value,
+    postersState: posters.resource,
+    retryPosters: posters.retry,
     setPosters,
-    replay,
+    replay:
+      liveScope.current !== scope
+        ? { kind: 'idle' }
+        : replay.kind === 'ready'
+          ? { ...replay, scope }
+          : replay,
     setReplay,
     source,
     setSource,
@@ -241,21 +322,29 @@ export async function openSnapshotFor(
   mounted: { current: boolean },
   revision: RevisionSummary,
   setReplay: Dispatch<SetStateAction<ReplayState>>,
+  scope?: RevisionScope,
 ): Promise<void> {
-  setReplay({ kind: 'loading' })
+  if (!mounted.current || (scope !== undefined && (!scope.current || scope.revisionId !== revision.id)))
+    return
+  const requestId = Symbol(revision.id)
+  setReplay({ kind: 'loading', requestId })
+  const publish = (next: ReplayState) => {
+    if (!mounted.current || scope?.current === false) return
+    setReplay((current) => (current.kind === 'loading' && current.requestId === requestId ? next : current))
+  }
   const outcome = await fetchSnapshotBytes(revision.id)
   if (!mounted.current) return
   if (!outcome.ok) {
-    setReplay({ kind: 'error', message: snapshotErrorMessage(outcome) })
+    publish({ kind: 'error', message: snapshotErrorMessage(outcome) })
     return
   }
   try {
     const snapshot = await decodeSnapshotBytes(outcome.value)
     if (!mounted.current) return
-    setReplay({ kind: 'ready', revisionId: revision.id, replay: replayFromSnapshot(snapshot) })
+    publish({ kind: 'ready', revisionId: revision.id, replay: replayFromSnapshot(snapshot) })
   } catch (error) {
     if (!mounted.current) return
-    setReplay({ kind: 'error', message: error instanceof Error ? error.message : String(error) })
+    publish({ kind: 'error', message: error instanceof Error ? error.message : String(error) })
   }
 }
 
@@ -285,6 +374,7 @@ export async function runAutoPosterFor(
   deps: {
     mounted: { current: boolean }
     replay: ReplayState
+    revisionScope?: RevisionScope
     run: LoadState<RunSummary>
     notify: Notify
     setBusy: Dispatch<SetStateAction<boolean>>
@@ -294,17 +384,37 @@ export async function runAutoPosterFor(
   posterId: string | null,
 ): Promise<void> {
   if (deps.replay.kind !== 'ready' || deps.run.kind !== 'ready') return
+  const scope = deps.revisionScope ?? deps.replay.scope
+  if (
+    !deps.mounted.current ||
+    (scope !== undefined && (!scope.current || scope.revisionId !== deps.replay.revisionId))
+  )
+    return
   const context: PosterContext = {
     revisionId: deps.replay.revisionId,
     runCode: deps.run.value.runCode,
     dataset: deps.replay.replay.dataset,
   }
   deps.setBusy(true)
+  const controller = new AbortController()
+  if (scope !== undefined)
+    scope.onInvalidate = () => {
+      controller.abort()
+      if (deps.mounted.current) {
+        deps.setBusy(false)
+        deps.setAutoPosterStatus({ kind: 'unavailable' })
+      }
+    }
+  const publishStatus: Dispatch<SetStateAction<PosterStatus>> = (status) => {
+    if (deps.mounted.current && scope?.current !== false) deps.setAutoPosterStatus(status)
+  }
   const outcome =
     posterId === null
-      ? await generateAutoPoster(context, deps.setAutoPosterStatus)
-      : await retryAutoPoster(context, posterId, deps.setAutoPosterStatus)
+      ? await generateAutoPoster(context, publishStatus, controller.signal)
+      : await retryAutoPoster(context, posterId, publishStatus, controller.signal)
   if (!deps.mounted.current) return
+  if (scope?.current === false) return
+  if (scope !== undefined) delete scope.onInvalidate
   deps.setBusy(false)
 
   if (!outcome.ok) {

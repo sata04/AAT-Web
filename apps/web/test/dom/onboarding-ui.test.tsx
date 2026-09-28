@@ -73,7 +73,7 @@ describe('tour stage — intro', () => {
     expect(screen.getByRole('button', { name: 'デモを見る' })).toBe(document.activeElement)
 
     await user.click(screen.getByRole('button', { name: 'サンプルデータで試す' }))
-    expect(onFinish).toHaveBeenCalledWith('keep', false)
+    expect(onFinish).toHaveBeenCalledWith('keep', false, false)
   })
 
   it('opens the generated CSV through the tracked demo verb', async () => {
@@ -93,7 +93,7 @@ describe('tour stage — intro', () => {
 
     await user.click(screen.getByRole('button', { name: 'CSVを開く' }))
     expect(driver.openFilePicker).toHaveBeenCalledOnce()
-    expect(onFinish).toHaveBeenCalledWith('keep', false)
+    expect(onFinish).toHaveBeenCalledWith('keep', false, false)
   })
 
   it('そのまま始める and Escape are both skips that drove nothing', async () => {
@@ -102,13 +102,13 @@ describe('tour stage — intro', () => {
     const view = renderComponent(<OnboardingStage driver={fakeDriver()} onFinish={onFinish} />)
 
     await user.click(screen.getByRole('button', { name: 'そのまま始める' }))
-    expect(onFinish).toHaveBeenLastCalledWith('skip', false)
+    expect(onFinish).toHaveBeenLastCalledWith('skip', false, false)
 
     view.unmount()
     onFinish.mockClear()
     renderComponent(<OnboardingStage driver={fakeDriver()} onFinish={onFinish} />)
     await user.keyboard('{Escape}')
-    expect(onFinish).toHaveBeenCalledWith('skip', false)
+    expect(onFinish).toHaveBeenCalledWith('skip', false, false)
   })
 })
 
@@ -145,7 +145,7 @@ describe('tour stage — driving', () => {
 
     await user.click(screen.getByRole('button', { name: 'デモを見る' }))
     await user.keyboard('{Escape}')
-    expect(onFinish).toHaveBeenCalledWith('skip', true)
+    expect(onFinish).toHaveBeenCalledWith('skip', true, false)
   })
 })
 
@@ -162,7 +162,7 @@ describe('stage file-drag guard', () => {
     expect(fireEvent.dragOver(stage as Element, { dataTransfer })).toBe(false)
     expect(fireEvent.drop(stage as Element, { dataTransfer })).toBe(false)
     expect(driver.openFiles).toHaveBeenCalledWith([file])
-    expect(onFinish).toHaveBeenCalledWith('keep', false)
+    expect(onFinish).toHaveBeenCalledWith('keep', false, false)
   })
 
   it('leaves a non-file drag alone', () => {

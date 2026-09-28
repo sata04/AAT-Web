@@ -346,50 +346,33 @@ export function AnalyzerScreen(): React.JSX.Element {
     // continuation: `loop.openFiles` resolves before this commit lands, so a
     // same-tick read would miss the install entirely.
     const tracker = tourOwnedRef.current
-    for (const [filename, pending] of tracker.pending) {
-      const installed = datasets.find((dataset) => dataset.filename === filename)
+    for (const [importId, pending] of tracker.pending) {
+      const installed = datasets.find((dataset) => loop.importIdFor(dataset) === importId)
       if (installed !== undefined && !tracker.reconciled.has(installed)) {
-        // Whatever object is visible for this name belongs to the newest
-        // request: a restart mid-open re-picks the filename, and React may
-        // batch two installs into one commit — per-object bookkeeping would
-        // either misattribute or orphan the survivor.
         tracker.reconciled.add(installed)
-        tracker.owned.set(pending.latest.which, installed)
-        if (pending.latest.epoch !== tracker.epoch || !tracker.keep.has(pending.latest.which)) {
+        if (
+          pending.epoch !== tracker.epoch ||
+          !tracker.keep.has(pending.which) ||
+          tracker.latest.get(pending.which) !== importId
+        ) {
           tracker.closing.add(installed)
           loop.closeDataset(installed)
+        } else {
+          tracker.owned.set(pending.which, installed)
         }
       }
-      if (pending.inFlight === 0) {
-        // Settle runs after the install dispatched, so once every open has
-        // resolved whatever is committed now is all that is ever coming —
-        // an open dropped into `closedSources` produced nothing to wait for.
-        tracker.pending.delete(filename)
-      }
+      if (pending.settled) tracker.pending.delete(importId)
     }
   })
 
-  // Which datasets this run installed, role → filename it landed under; which
-  // opens are still in flight; and the epoch a stale open checks before it
-  // stays. In a ref because `loop` is recreated every commit — `useMemo`
-  // state tied to it would reset each render.
+  // Only an import started by this tour can be adopted, including when a real
+  // file with the same name finishes before the demo. Filenames are presentation, not ownership.
   const tourOwnedRef = useRef({
-    // The installed Dataset objects — identity, not filename: a researcher who
-    // closes a kept demo and reopens their own file under the same name gets a
-    // different object, which cleanup therefore never matches.
     owned: new Map<DemoDataset, Dataset>(),
+    latest: new Map<DemoDataset, symbol>(),
     keep: new Set<DemoDataset>(),
-    // In-flight opens per chosen filename: how many are still resolving, and
-    // the newest request — whose epoch and role the visible install obeys.
-    pending: new Map<string, { inFlight: number; latest: { which: DemoDataset; epoch: number } }>(),
-    // Installs already matched to a request — the same dataset object still
-    // visible on the next commit must not consume another open.
+    pending: new Map<symbol, { which: DemoDataset; epoch: number; settled: boolean }>(),
     reconciled: new WeakSet<Dataset>(),
-    // Demo datasets the tour has closed but whose removal has not committed
-    // yet. `snapshot` is a commit-boundary read, so a scene that closes and
-    // re-opens in one tick — stepping back into `compare` does exactly that —
-    // would otherwise read its own outgoing dataset as a name collision and
-    // install the sample under the fallback name meant for a researcher's file.
     closing: new WeakSet<Dataset>(),
     epoch: 0,
   })
@@ -418,43 +401,31 @@ export function AnalyzerScreen(): React.JSX.Element {
       snapshot: () => snapshot.current,
       openFiles: (files) => loop.openFiles(files),
       openDemo: async (which) => {
-        // Only a still-present owned object exempts its name — a stale entry
-        // (user closed the demo, reused the filename) must not hide the
-        // researcher's current dataset from `taken`.
-        const mine = new Set(
-          [...tracker.owned.values()]
-            .filter((dataset) => snapshot.current.datasets.includes(dataset))
-            .map((dataset) => dataset.name),
-        )
-        const taken = new Set(
-          snapshot.current.datasets
-            .filter((dataset) => !mine.has(dataset.name) && !tracker.closing.has(dataset))
-            .map((dataset) => dataset.name),
-        )
+        // Every displayed source still reserves its name, including an older
+        // demo. Match the loop's reservation so this promise returns the exact
+        // filename that the tour will wait for while a replacement opens.
+        const taken = new Set(snapshot.current.datasets.map((dataset) => dataset.name))
+        for (const name of loop.pendingNames()) taken.add(name)
         const filename = demoFilename(which, taken)
         tracker.keep.add(which)
-        // Adoption happens in the snapshot-sync effect — the commit boundary —
-        // because `openFiles` resolves before the install commits.
-        const record = tracker.pending.get(filename) ?? {
-          inFlight: 0,
-          latest: { which, epoch: tracker.epoch },
-        }
-        record.inFlight += 1
-        record.latest = { which, epoch: tracker.epoch }
-        tracker.pending.set(filename, record)
+        const importId = Symbol(filename)
+        tracker.latest.set(which, importId)
+        const record = { which, epoch: tracker.epoch, settled: false }
+        tracker.pending.set(importId, record)
         try {
-          // Local-only: the tour's own copy promises nothing leaves the
-          // browser, and a skipped tour must never leave cloud revisions or
-          // poster jobs behind for a signed-in researcher.
-          await loop.openFiles([demoCsvFile(which, filename)], { localOnly: true })
+          // Keep the import's local-only intent through re-analysis and authentication recovery.
+          await loop.openFiles([demoCsvFile(which, filename)], { localOnly: true, importId })
         } finally {
-          record.inFlight -= 1
+          record.settled = true
         }
         return filename
       },
       closeTourDatasets: (except = []) => {
         tracker.keep.clear()
         for (const which of except) tracker.keep.add(which)
+        for (const which of tracker.latest.keys()) {
+          if (!tracker.keep.has(which)) tracker.latest.delete(which)
+        }
         for (const [which, dataset] of tracker.owned) {
           if (tracker.keep.has(which)) continue
           if (snapshot.current.datasets.includes(dataset)) {
@@ -508,7 +479,7 @@ export function AnalyzerScreen(): React.JSX.Element {
   }, [loop])
 
   const finishTour = useCallback(
-    (kind: 'keep' | 'skip', drove: boolean) => {
+    (kind: 'keep' | 'skip', drove: boolean, completed = false) => {
       if (kind === 'skip' && drove) {
         // Mid-tour exits leave the workspace pristine: kill pending demo
         // opens, close what the scenes installed, and hand the view back as
@@ -517,8 +488,8 @@ export function AnalyzerScreen(): React.JSX.Element {
         tourDriver.closeTourDatasets()
         tourDriver.restoreBaseline()
       }
-      if (kind === 'keep' && drove) {
-        // The tour already demonstrated selection, gestures and compare live;
+      if (kind === 'keep' && completed) {
+        // Only reaching the outro demonstrates every hint; a real CSV can take over during ingest.
         // replaying those as hint bars the moment it ends would be noise.
         markOnboarding('graphHintSeen')
         markOnboarding('rangeHintSeen')
@@ -532,6 +503,7 @@ export function AnalyzerScreen(): React.JSX.Element {
       // exactly what the user asked for.
       const tracker = tourOwnedRef.current
       tracker.owned.clear()
+      tracker.latest.clear()
       tracker.keep.clear()
       if (kind === 'keep') tracker.pending.clear()
       markOnboarding('welcomeSeen')

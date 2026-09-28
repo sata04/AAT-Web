@@ -1,10 +1,16 @@
+// @vitest-environment jsdom
 /**
  * Onboarding persistence — the flags exist so a returning researcher is never
  * re-taught, and so every hint works fully offline.
  */
 
-import { describe, expect, it } from 'vitest'
+import { cleanup, fireEvent, render, screen } from '@testing-library/react'
+import { createElement } from 'react'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { loadOnboarding, ONBOARDING_DEFAULTS, saveOnboarding } from '../../src/app/onboarding.ts'
+import OnboardingStage from '../../src/onboarding/OnboardingStage.tsx'
+import type { TourDriver } from '../../src/onboarding/tour-driver.ts'
+import { SCENES } from '../../src/onboarding/tour-scenes.ts'
 
 function fakeStorage(initial: Record<string, string> = {}) {
   const store = new Map(Object.entries(initial))
@@ -79,5 +85,50 @@ describe('saveOnboarding', () => {
     }
     expect(() => saveOnboarding(ONBOARDING_DEFAULTS, throwing)).not.toThrow()
     expect(() => saveOnboarding(ONBOARDING_DEFAULTS, null)).not.toThrow()
+  })
+})
+
+const stage = vi.hoisted(() => ({ index: 1 }))
+vi.mock('../../src/onboarding/use-tour.ts', () => ({
+  useTour: () => ({
+    index: stage.index,
+    count: SCENES.length,
+    scene: SCENES[stage.index],
+    playing: false,
+    paused: false,
+    cursor: { visible: false, x: 0, y: 0 },
+    start: vi.fn(),
+    next: vi.fn(),
+    back: vi.fn(),
+    restart: vi.fn(),
+    togglePause: vi.fn(),
+  }),
+}))
+afterEach(cleanup)
+
+describe('tour hint completion', () => {
+  it('does not claim later hints were demonstrated when a CSV takes over during ingest', () => {
+    stage.index = 1
+    const onFinish = vi.fn()
+    const openFiles = vi.fn(async () => {})
+    render(createElement(OnboardingStage, { driver: { openFiles } as unknown as TourDriver, onFinish }))
+    const real = new File(['t,a'], 'real.csv', { type: 'text/csv' })
+    fireEvent.drop(screen.getByRole('dialog'), { dataTransfer: { types: ['Files'], files: [real] } })
+    expect(openFiles).toHaveBeenCalledWith([real])
+    expect(onFinish).toHaveBeenCalledWith('keep', true, false)
+  })
+  it('reports completion after reaching the outro', () => {
+    stage.index = SCENES.length - 1
+    const onFinish = vi.fn()
+    render(
+      createElement(OnboardingStage, {
+        driver: { openFiles: vi.fn(async () => {}) } as unknown as TourDriver,
+        onFinish,
+      }),
+    )
+    fireEvent.drop(screen.getByRole('dialog'), {
+      dataTransfer: { types: ['Files'], files: [new File(['t,a'], 'real.csv')] },
+    })
+    expect(onFinish).toHaveBeenCalledWith('keep', true, true)
   })
 })

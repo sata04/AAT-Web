@@ -11,9 +11,15 @@ import { type Dispatch, type SetStateAction, useCallback, useEffect, useMemo, us
 import { type AnalysisClient, type AnalysisProgress, AnalysisWorkerError } from '../analysis/client.ts'
 import { defaultDialogMapping } from '../analysis/mapping.ts'
 import type { ColumnMapping, OpenedSource } from '../analysis/protocol.ts'
-import { type Dataset, datasetFromPayload, openedSourceForDataset } from '../app/dataset.ts'
+import {
+  type Dataset,
+  datasetFromPayload,
+  datasetNameFromFilename,
+  openedSourceForDataset,
+} from '../app/dataset.ts'
 import { saveConfig } from '../app/settings.ts'
 import type { CloudStatuses } from '../cloud/status.ts'
+import { useMountedRef } from '../components/hooks.ts'
 import type { NoticeItem } from '../components/NoticeStack.tsx'
 import type { SelectionRange } from '../graph/selection.ts'
 import type { ChartViewport } from '../graph/UPlotChart.tsx'
@@ -24,6 +30,11 @@ import type { PendingColumnChoice } from './AnalyzerView.tsx'
  * callables below read like the component body they were lifted from.
  */
 export interface AnalyzerLoopDeps {
+  mounted: { current: boolean }
+  requests: { current: Map<symbol, AnalysisRequest> }
+  imports: { current: WeakMap<Dataset, AnalysisRequest> }
+  releaseCandidates: { current: Set<string> }
+  syncRequested: { current: WeakSet<Dataset> }
   /** Builds the worker client on first use; page load alone must not start one. */
   getAnalysisClient: () => AnalysisClient
   /** The live client ref — read by paths that only cancel, which must not construct one. */
@@ -65,15 +76,125 @@ export interface AnalyzerLoopDeps {
    * here and resumes on resolve — including on cancel, which skips the
    * ambiguous file, not the batch.
    */
-  pendingFileQueue: { current: File[] }
+  pendingFileQueue: { current: PendingImport[] }
   /** Bumped on every cancel; an open/analyse loop reads it to stop cleanly. */
   cancelEpoch: { current: number }
   /** The dataset list as of the last commit — re-analysis loops read it mid-flight. */
   datasetsRef: { current: readonly Dataset[] }
 }
 
+/** An open owns a source token; re-analysis replaces the request, retaining its ownership. */
+interface AnalysisRequest {
+  sourceId: symbol
+  filename: string
+  sourceSha256?: string
+  importId: symbol
+  localOnly: boolean
+  pending: boolean
+  installing: boolean
+}
+
+interface PendingImport {
+  file: File
+  request: AnalysisRequest
+}
+
+export interface ImportOptions {
+  localOnly?: boolean
+  importId?: symbol
+}
+
+/**
+ * Tables share a content hash, but an open owns its own filename and token.
+ * Reserve names before reading: even two unknown sources with the same basename
+ * must have distinct dataset keys. The File itself remains the recovery bytes.
+ */
+function reserveFilename(deps: AnalyzerLoopDeps, filename: string): string {
+  const taken = new Set(deps.datasetsRef.current.map((dataset) => dataset.name))
+  for (const request of deps.requests.current.values()) {
+    if (request.pending || request.installing) taken.add(datasetNameFromFilename(request.filename))
+  }
+  const name = datasetNameFromFilename(filename)
+  const extension = filename.slice(
+    filename.lastIndexOf('.') > 0 ? filename.lastIndexOf('.') : filename.length,
+  )
+  let candidate = filename
+  for (let suffix = 2; taken.has(datasetNameFromFilename(candidate)); suffix++) {
+    candidate = `${name} (${suffix})${extension}`
+  }
+  return candidate
+}
+
+/** Reconstructed sources retain the open's ownership by reserved filename + hash. */
+function requestForSource(
+  deps: AnalyzerLoopDeps,
+  source: Pick<OpenedSource, 'filename' | 'sourceSha256'>,
+): AnalysisRequest | undefined {
+  const dataset = deps.datasetsRef.current.find(
+    (dataset) => dataset.filename === source.filename && dataset.sourceSha256 === source.sourceSha256,
+  )
+  const owner = dataset === undefined ? undefined : deps.imports.current.get(dataset)
+  return (
+    owner ??
+    [...deps.requests.current.values()].find(
+      (request) =>
+        (request.pending || request.installing) &&
+        request.filename === source.filename &&
+        request.sourceSha256 === source.sourceSha256,
+    )
+  )
+}
+
+function releaseUnusedSources(deps: AnalyzerLoopDeps): void {
+  if (!deps.mounted.current) return
+  const requests = [...deps.requests.current.values()]
+  for (const hash of deps.releaseCandidates.current) {
+    const owned =
+      deps.datasetsRef.current.some((dataset) => {
+        if (dataset.sourceSha256 !== hash) return false
+        const owner = deps.imports.current.get(dataset)
+        return owner === undefined
+          ? !deps.closedSources.current.has(dataset.filename)
+          : deps.requests.current.has(owner.sourceId)
+      }) ||
+      requests.some((request) => request.sourceSha256 === hash && (request.pending || request.installing))
+    if (owned) {
+      deps.releaseCandidates.current.delete(hash)
+      continue
+    }
+    // An open still reading/parsing may return this same hash. Defer eviction
+    // until its hash is known (or it is cancelled), then reconsider the candidate.
+    if (requests.some((request) => request.pending && request.sourceSha256 === undefined)) continue
+    deps.releaseCandidates.current.delete(hash)
+    deps.sourceFiles.current.delete(hash)
+    // Cleanup never creates a worker; a disposed worker may reject the advisory release.
+    void deps.analysisClient.current?.release(hash).catch(() => {})
+  }
+}
+
+function releaseSourceIfUnused(deps: AnalyzerLoopDeps, hash: string): void {
+  deps.releaseCandidates.current.add(hash)
+  releaseUnusedSources(deps)
+}
+
+function isCurrent(
+  deps: AnalyzerLoopDeps,
+  filename: string,
+  epoch: number,
+  request?: AnalysisRequest,
+): boolean {
+  return (
+    deps.mounted.current &&
+    epoch === deps.cancelEpoch.current &&
+    (request === undefined
+      ? !deps.closedSources.current.has(filename)
+      : deps.requests.current.get(request.sourceId) === request)
+  )
+}
+
 /** Everything `runAnalysisFor` needs to describe one request. */
 interface AnalysisJob {
+  request?: AnalysisRequest
   source: OpenedSource
   mapping: ColumnMapping
   configOverride?: AnalysisConfig | undefined
@@ -98,39 +219,33 @@ interface InstalledAnalysis {
   result: Awaited<ReturnType<AnalysisClient['analyse']>>
   effectiveConfig: AnalysisConfig
   epoch: number
-  localOnly: boolean
+  request: AnalysisRequest
 }
 
 /**
  * A result the workspace no longer wants — the user closed the file while
  * the worker computed it, or the epoch went stale (cancel, or a newer
- * settings application whose own re-analysis supersedes it). Either way the
- * retained table is released so it cannot linger.
+ * settings application whose own re-analysis supersedes it). Shared retained
+ * tables stay available to the request or sibling dataset that still needs them.
  */
-function dropUnwantedInstall(
-  deps: AnalyzerLoopDeps,
-  client: AnalysisClient,
-  source: OpenedSource,
-  epoch: number,
-): boolean {
-  if (!deps.closedSources.current.delete(source.filename) && epoch === deps.cancelEpoch.current) {
-    return false
-  }
-  void client.release(source.sourceSha256).catch(() => {})
+function dropUnwantedInstall(deps: AnalyzerLoopDeps, installed: InstalledAnalysis): boolean {
+  const { source, epoch, request } = installed
+  if (isCurrent(deps, source.filename, epoch, request)) return false
+  request.pending = false
+  releaseSourceIfUnused(deps, source.sourceSha256)
   return true
 }
 
 /**
  * Install a finished analysis — unless `dropUnwantedInstall` claims it.
  */
-async function installAnalysisResult(
-  deps: AnalyzerLoopDeps,
-  client: AnalysisClient,
-  installed: InstalledAnalysis,
-): Promise<void> {
-  const { source, result, effectiveConfig, epoch } = installed
-  if (dropUnwantedInstall(deps, client, source, epoch)) return
+async function installAnalysisResult(deps: AnalyzerLoopDeps, installed: InstalledAnalysis): Promise<void> {
+  const { result, effectiveConfig, request } = installed
+  if (dropUnwantedInstall(deps, installed)) return
   const dataset = datasetFromPayload(result.payload, effectiveConfig, result.fromCache)
+  request.pending = false
+  request.installing = true
+  deps.imports.current.set(dataset, request)
   deps.setDatasets((current) => {
     // Re-analysing or re-opening a file must not move it to the end of the
     // list — the comparison graph draws in list order.
@@ -151,10 +266,20 @@ async function installAnalysisResult(
   for (const warning of dataset.warnings) {
     deps.notify('warning', `${dataset.name}: ${warning.message}`)
   }
+}
 
-  // The local analysis is finished and usable at this point. Everything below
-  // is optional and must never gate it.
-  if (deps.signedIn && !installed.localOnly) void deps.syncToCloud(dataset)
+/** Reconcile completed imports after authentication or an analysis commit, once per result. */
+export function reconcileCloudFor(deps: AnalyzerLoopDeps): void {
+  if (!deps.mounted.current || !deps.signedIn) return
+  for (const dataset of deps.datasetsRef.current) {
+    const request = deps.imports.current.get(dataset)
+    if (request === undefined || request.localOnly || deps.syncRequested.current.has(dataset)) continue
+    const latest = deps.requests.current.get(request.sourceId)
+    if (latest !== request && latest?.pending) continue
+    // A failed attempt belongs to the existing retry control, not every subsequent render.
+    deps.syncRequested.current.add(dataset)
+    void deps.syncToCloud(dataset)
+  }
 }
 
 /**
@@ -175,7 +300,14 @@ async function reopenFromFile(
     // so which file occupies the slot is immaterial. The name is not: two
     // datasets can share one hash entry, and the job's filename is the dataset
     // identity this analysis is for.
-    const reopened = await client.open(job.source.filename, await file.arrayBuffer())
+    const bytes = await file.arrayBuffer()
+    if (!isCurrent(deps, job.source.filename, job.epoch ?? deps.cancelEpoch.current, job.request)) return true
+    const reopened = await client.open(job.source.filename, bytes)
+    if (!isCurrent(deps, job.source.filename, job.epoch ?? deps.cancelEpoch.current, job.request)) {
+      if (job.request !== undefined) job.request.pending = false
+      releaseSourceIfUnused(deps, reopened.sourceSha256)
+      return true
+    }
     await runAnalysisFor(deps, { ...job, source: reopened, reopenedOnce: true })
     return true
   } catch {
@@ -227,7 +359,9 @@ async function reportAnalysisError(
   }
   const canReopen = code === 'SOURCE_NOT_RETAINED' && !job.reopenedOnce
   if (canReopen && (await reopenFromFile(deps, client, job))) return
+  if (!isCurrent(deps, job.source.filename, job.epoch ?? deps.cancelEpoch.current, job.request)) return
   if (reportMissingColumns(deps, error, job)) return
+  if (job.request !== undefined) job.request.pending = false
   reportFailure(deps, job.source.filename, code, error)
 }
 
@@ -241,10 +375,22 @@ async function reportAnalysisError(
  */
 export async function runAnalysisFor(deps: AnalyzerLoopDeps, job: AnalysisJob): Promise<void> {
   const { source, mapping, configOverride, epoch = deps.cancelEpoch.current } = job
+  if (!isCurrent(deps, source.filename, epoch, job.request)) return
+  const owner = requestForSource(deps, source)
+  const request = job.request ?? {
+    sourceId: owner?.sourceId ?? Symbol(source.filename),
+    filename: source.filename,
+    sourceSha256: source.sourceSha256,
+    importId: owner?.importId ?? Symbol(source.filename),
+    localOnly: owner?.localOnly ?? job.localOnly ?? false,
+    pending: true,
+    installing: false,
+  }
+  deps.requests.current.set(request.sourceId, request)
   const client = deps.getAnalysisClient()
   const effectiveConfig = configOverride ?? deps.config
   const onProgress = (progress: AnalysisProgress) => {
-    if (epoch !== deps.cancelEpoch.current) return
+    if (!isCurrent(deps, source.filename, epoch, request)) return
     deps.setStatuses((current) => ({
       ...current,
       analysis: { kind: 'running', stage: progress.stage, percent: progress.percent },
@@ -263,15 +409,20 @@ export async function runAnalysisFor(deps: AnalyzerLoopDeps, job: AnalysisJob): 
       },
       onProgress,
     )
-    await installAnalysisResult(deps, client, {
+    await installAnalysisResult(deps, {
       source,
       result,
       effectiveConfig,
       epoch,
-      localOnly: job.localOnly === true,
+      request,
     })
   } catch (error) {
-    await reportAnalysisError(deps, client, error, { ...job, epoch })
+    if (!isCurrent(deps, source.filename, epoch, request)) {
+      request.pending = false
+      releaseSourceIfUnused(deps, source.sourceSha256)
+      return
+    }
+    await reportAnalysisError(deps, client, error, { ...job, epoch, request })
   }
 }
 
@@ -307,28 +458,28 @@ async function openSingleFile(
   deps: AnalyzerLoopDeps,
   client: AnalysisClient,
   file: File,
-  batch: { epoch: number; localOnly: boolean },
+  batch: { epoch: number; request: AnalysisRequest },
 ): Promise<'done' | 'columns' | 'stop'> {
-  const { epoch, localOnly } = batch
+  const { epoch, request } = batch
+  const filename = request.filename
   try {
     const bytes = await file.arrayBuffer()
-    if (deps.cancelEpoch.current !== epoch) return 'stop'
-    const source = await client.open(file.name, bytes, (progress) => {
-      if (deps.cancelEpoch.current !== epoch) return
+    if (!isCurrent(deps, filename, epoch, request)) return 'stop'
+    const source = await client.open(filename, bytes, (progress) => {
+      if (!isCurrent(deps, filename, epoch, request)) return
       deps.setStatuses((current) => ({
         ...current,
         analysis: { kind: 'running', stage: progress.stage, percent: progress.percent },
       }))
     })
-    if (deps.cancelEpoch.current !== epoch) {
-      // The open still landed — release the retained table rather than leave
-      // it for a file the batch will never analyse.
-      void client.release(source.sourceSha256).catch(() => {})
+    request.sourceSha256 = source.sourceSha256
+    if (!isCurrent(deps, filename, epoch, request)) {
+      request.pending = false
+      releaseSourceIfUnused(deps, source.sourceSha256)
       return 'stop'
     }
     deps.sourceFiles.current.set(source.sourceSha256, file)
-    // A re-open supersedes any close-while-in-flight marker.
-    deps.closedSources.current.delete(source.filename)
+    releaseUnusedSources(deps)
     if (source.suggestedMapping === null) {
       // Ambiguous or missing candidates: ask, rather than guess. A wrong
       // guess does not fail — it produces a believable graph of the wrong
@@ -341,39 +492,69 @@ async function openSingleFile(
       deps.setStatuses((current) => ({ ...current, analysis: { kind: 'idle' } }))
       return 'columns'
     }
-    await runAnalysisFor(deps, { source, mapping: source.suggestedMapping, epoch, localOnly })
+    await runAnalysisFor(deps, { source, mapping: source.suggestedMapping, epoch, request })
     return 'done'
   } catch (error) {
-    return reportOpenError(deps, file.name, error) === 'cancelled' ? 'stop' : 'done'
+    if (!isCurrent(deps, filename, epoch, request)) return 'stop'
+    request.pending = false
+    return reportOpenError(deps, filename, error) === 'cancelled' ? 'stop' : 'done'
   }
 }
 
-export async function openFilesFor(deps: AnalyzerLoopDeps, files: File[], localOnly = false): Promise<void> {
-  const client = deps.getAnalysisClient()
+export async function openFilesFor(
+  deps: AnalyzerLoopDeps,
+  files: File[],
+  options: ImportOptions = {},
+): Promise<void> {
+  if (!deps.mounted.current) return
+  // Reserve the entire batch before reading any bytes, including files waiting for a column dialog.
+  const pending = files.map((file) => {
+    const filename = reserveFilename(deps, file.name)
+    const request: AnalysisRequest = {
+      sourceId: Symbol(filename),
+      filename,
+      importId: options.importId ?? Symbol(file.name),
+      localOnly: options.localOnly === true,
+      pending: true,
+      installing: false,
+    }
+    deps.requests.current.set(request.sourceId, request)
+    deps.closedSources.current.delete(filename)
+    return { file, request }
+  })
+  await openReservedFilesFor(deps, pending)
+}
+
+async function openReservedFilesFor(deps: AnalyzerLoopDeps, files: PendingImport[]): Promise<void> {
+  if (!deps.mounted.current) return
   const epoch = deps.cancelEpoch.current
   for (let index = 0; index < files.length; index++) {
-    if (deps.cancelEpoch.current !== epoch) break
-    const file = files[index] as File
+    if (!deps.mounted.current || deps.cancelEpoch.current !== epoch) break
+    const { file, request } = files[index] as PendingImport
+    if (!isCurrent(deps, request.filename, epoch, request)) continue
     deps.setStatuses((current) => ({
       ...current,
       analysis: { kind: 'running', stage: 'decoding', percent: 0 },
     }))
-    const outcome = await openSingleFile(deps, client, file, { epoch, localOnly })
-    if (outcome === 'stop') return
+    const outcome = await openSingleFile(deps, deps.getAnalysisClient(), file, { epoch, request })
+    if (outcome === 'stop') {
+      if (!deps.mounted.current || deps.cancelEpoch.current !== epoch) break
+      continue
+    }
     if (outcome === 'columns') {
-      // The dialog is modal; the rest of the batch resumes when it
-      // resolves rather than requiring a second drop.
       deps.pendingFileQueue.current = files.slice(index + 1)
       return
     }
   }
+  for (const { request } of files) request.pending = false
+  releaseUnusedSources(deps)
 }
 
 /** What remains of a batch once the column dialog has spoken for this file. */
 export function drainPendingFilesFor(deps: AnalyzerLoopDeps): void {
   const rest = deps.pendingFileQueue.current
   deps.pendingFileQueue.current = []
-  if (rest.length > 0) void openFilesFor(deps, rest)
+  if (rest.length > 0) void openReservedFilesFor(deps, rest)
 }
 
 /**
@@ -389,13 +570,18 @@ export function confirmPendingColumnsFor(deps: AnalyzerLoopDeps, mapping: Column
   if (choice === null) return
   const epoch = deps.cancelEpoch.current
   void runAnalysisFor(deps, { source: choice.source, mapping, epoch }).finally(() => {
-    if (deps.cancelEpoch.current === epoch) drainPendingFilesFor(deps)
+    if (deps.mounted.current && deps.cancelEpoch.current === epoch) drainPendingFilesFor(deps)
   })
 }
 
 /** Cancel skips this file; the rest of the batch still deserves its answer. */
 export function cancelPendingColumnsFor(deps: AnalyzerLoopDeps): void {
+  if (deps.pendingColumns !== null) {
+    const request = requestForSource(deps, deps.pendingColumns.source)
+    if (request !== undefined) request.pending = false
+  }
   deps.setPendingColumns(null)
+  releaseUnusedSources(deps)
   drainPendingFilesFor(deps)
 }
 
@@ -406,7 +592,10 @@ export function cancelPendingColumnsFor(deps: AnalyzerLoopDeps): void {
  */
 export function cancelAnalysisFor(deps: AnalyzerLoopDeps): void {
   deps.cancelEpoch.current += 1
+  for (const request of deps.requests.current.values()) request.pending = false
+  deps.pendingFileQueue.current = []
   deps.analysisClient.current?.cancelPending()
+  releaseUnusedSources(deps)
   deps.setStatuses((current) =>
     current.analysis.kind === 'running' ? { ...current, analysis: { kind: 'cancelled' } } : current,
   )
@@ -429,12 +618,15 @@ async function reanalyseForConfig(
   next: AnalysisConfig,
 ): Promise<void> {
   const resultChanged = (await configHash(previous)) !== (await configHash(next))
-  if (!resultChanged) return
+  if (!resultChanged || !deps.mounted.current) return
   deps.cancelEpoch.current += 1
+  for (const request of deps.requests.current.values()) request.pending = false
+  deps.pendingFileQueue.current = []
   deps.analysisClient.current?.cancelPending()
+  releaseUnusedSources(deps)
   const epoch = deps.cancelEpoch.current
   for (const dataset of deps.datasets) {
-    if (deps.cancelEpoch.current !== epoch) return
+    if (!deps.mounted.current || deps.cancelEpoch.current !== epoch) return
     if (!deps.datasetsRef.current.some((current) => current.name === dataset.name)) continue
     await runAnalysisFor(deps, {
       source: openedSourceForDataset(dataset),
@@ -444,6 +636,7 @@ async function reanalyseForConfig(
     })
   }
   if (
+    deps.mounted.current &&
     deps.activeName !== null &&
     deps.datasetsRef.current.some((current) => current.name === deps.activeName)
   ) {
@@ -476,34 +669,29 @@ export function applyConfigFor(deps: AnalyzerLoopDeps, next: AnalysisConfig): vo
  * `sourceFiles` and the worker's retained tables are keyed by content hash,
  * so a second dataset opened from identical bytes shares them — deleting or
  * releasing them here would break that sibling's next re-analysis. Only the
- * last dataset using a hash lets them go.
+ * last dataset or pending open using a hash lets them go.
  */
 export function closeDatasetFor(deps: AnalyzerLoopDeps, dataset: Dataset): void {
-  deps.setDatasets((current) => current.filter((existing) => existing.name !== dataset.name))
+  const owningImport = deps.imports.current.get(dataset)
+  const belongsToClosedImport = (existing: Dataset) =>
+    existing.name === dataset.name &&
+    (existing === dataset ||
+      (owningImport !== undefined && deps.imports.current.get(existing)?.sourceId === owningImport.sourceId))
+  const current = deps.datasetsRef.current.find((existing) => existing.name === dataset.name)
+  if (current !== undefined && !belongsToClosedImport(current)) return
+  // Include re-analyses of this import that React has queued but has not committed yet.
+  deps.setDatasets((current) => current.filter((existing) => !belongsToClosedImport(existing)))
   if (dataset.name === deps.activeName) {
-    // Closing the on-screen dataset must not leave a selection and a
-    // viewport aimed at data that is gone; activate the first remaining
-    // file so the graph has something to frame.
-    const next = deps.datasets.find((existing) => existing.name !== dataset.name)
+    const next = deps.datasetsRef.current.find((existing) => !belongsToClosedImport(existing))
     deps.setActiveName(next?.name ?? null)
     deps.setSelection(null)
     deps.setViewport(null)
   }
-  const siblingOpen = deps.datasets.some(
-    (other) => other.name !== dataset.name && other.sourceSha256 === dataset.sourceSha256,
-  )
-  if (!siblingOpen) {
-    deps.sourceFiles.current.delete(dataset.sourceSha256)
-    // A dead worker rejects here; the release is advisory cleanup, so the
-    // rejection is expected noise rather than an error the user can act on.
-    void deps
-      .getAnalysisClient()
-      .release(dataset.sourceSha256)
-      .catch(() => {})
-  }
-  // If an analysis for this dataset is still in flight, its result must be
-  // dropped when it lands rather than re-adding a dataset the user closed.
+  // Invalidate this open's request, never another source that shares its bytes.
+  const request = owningImport ?? requestForSource(deps, dataset)
+  if (request !== undefined) deps.requests.current.delete(request.sourceId)
   deps.closedSources.current.add(dataset.filename)
+  releaseSourceIfUnused(deps, dataset.sourceSha256)
   if (dataset.name === deps.cloudSubject) {
     // The sync lane's subject no longer exists: a failure naming it is stale,
     // and a retry that synced whatever is on screen would be worse.
@@ -523,7 +711,9 @@ export interface AnalyzerLoop {
     reopenedOnce?: boolean,
     epoch?: number,
   ) => Promise<void>
-  openFiles: (files: File[], options?: { localOnly?: boolean }) => Promise<void>
+  openFiles: (files: File[], options?: ImportOptions) => Promise<void>
+  pendingNames: () => ReadonlySet<string>
+  importIdFor: (dataset: Dataset) => symbol | undefined
   confirmPendingColumns: (mapping: ColumnMapping) => void
   cancelPendingColumns: () => void
   cancelAnalysis: () => void
@@ -556,7 +746,16 @@ export interface AnalyzerLoopInput {
  */
 function useLoopRefs(): Pick<
   AnalyzerLoopDeps,
-  'sourceFiles' | 'closedSources' | 'pendingFileQueue' | 'cancelEpoch' | 'datasetsRef'
+  | 'sourceFiles'
+  | 'closedSources'
+  | 'pendingFileQueue'
+  | 'cancelEpoch'
+  | 'datasetsRef'
+  | 'mounted'
+  | 'requests'
+  | 'imports'
+  | 'releaseCandidates'
+  | 'syncRequested'
 > & {
   pendingColumns: PendingColumnChoice | null
   setPendingColumns: Dispatch<SetStateAction<PendingColumnChoice | null>>
@@ -564,10 +763,29 @@ function useLoopRefs(): Pick<
   const [pendingColumns, setPendingColumns] = useState<PendingColumnChoice | null>(null)
   const sourceFiles = useRef(new Map<string, File>())
   const closedSources = useRef(new Set<string>())
-  const pendingFileQueue = useRef<File[]>([])
+  const pendingFileQueue = useRef<PendingImport[]>([])
+  const mounted = useMountedRef()
+  const requests = useRef(new Map<symbol, AnalysisRequest>())
+  const imports = useRef(new WeakMap<Dataset, AnalysisRequest>())
+  const releaseCandidates = useRef(new Set<string>())
+  const syncRequested = useRef(new WeakSet<Dataset>())
   const cancelEpoch = useRef(0)
   const datasetsRef = useRef<readonly Dataset[]>([])
+  useEffect(
+    () => () => {
+      // StrictMode may restore mounted=true; the old lifetime's reads must still stay invalid.
+      cancelEpoch.current += 1
+      pendingFileQueue.current = []
+      requests.current.clear()
+    },
+    [],
+  )
   return {
+    mounted,
+    requests,
+    imports,
+    releaseCandidates,
+    syncRequested,
     pendingColumns,
     setPendingColumns,
     sourceFiles,
@@ -600,8 +818,7 @@ function useLoopCallbacks(
     [deps],
   )
   const openFiles = useCallback(
-    (files: File[], options?: { localOnly?: boolean }) =>
-      openFilesFor(deps, files, options?.localOnly === true),
+    (files: File[], options?: ImportOptions) => openFilesFor(deps, files, options),
     [deps],
   )
   const confirmPendingColumns = useCallback(
@@ -613,6 +830,13 @@ function useLoopCallbacks(
   const applyConfig = useCallback((next: AnalysisConfig) => applyConfigFor(deps, next), [deps])
   const closeDataset = useCallback((dataset: Dataset) => closeDatasetFor(deps, dataset), [deps])
   return {
+    pendingNames: () =>
+      new Set(
+        [...deps.requests.current.values()]
+          .filter((request) => request.pending || request.installing)
+          .map((request) => datasetNameFromFilename(request.filename)),
+      ),
+    importIdFor: (dataset) => deps.imports.current.get(dataset)?.importId,
     runAnalysis,
     openFiles,
     confirmPendingColumns,
@@ -650,6 +874,11 @@ export function useAnalyzerLoop(input: AnalyzerLoopInput): AnalyzerLoop {
 
   useEffect(() => {
     owned.datasetsRef.current = datasets
+    // A finished import still reserves its name until React commits its dataset.
+    for (const dataset of datasets) {
+      const request = owned.imports.current.get(dataset)
+      if (request !== undefined) request.installing = false
+    }
   }, [owned, datasets])
 
   // Field-level deps keep `deps` stable across renders that change none of
@@ -694,6 +923,8 @@ export function useAnalyzerLoop(input: AnalyzerLoopInput): AnalyzerLoop {
       owned,
     ],
   )
+
+  useEffect(() => reconcileCloudFor(deps), [deps])
 
   return {
     pendingColumns: owned.pendingColumns,

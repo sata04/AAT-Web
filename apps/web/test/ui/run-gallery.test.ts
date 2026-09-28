@@ -1,3 +1,4 @@
+// @vitest-environment jsdom
 /**
  * Gallery ordering and filtering.
  *
@@ -8,8 +9,11 @@
  * is experiment order regardless.
  */
 
-import { describe, expect, it } from 'vitest'
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { createElement, StrictMode } from 'react'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { RunSummary } from '../../src/cloud/gateway.ts'
+import { listRevisions, listRuns, listWorkspaceRuns } from '../../src/cloud/gateway.ts'
 import {
   compareRuns,
   followsFilenameConvention,
@@ -23,6 +27,7 @@ import {
   sortKeyFor,
   sortRuns,
 } from '../../src/runs/gallery.ts'
+import { RunsScreen } from '../../src/screens/RunsScreen.tsx'
 
 /** A run row as the listing route returns it. `id` is a ULID; later id means later upload. */
 function run(overrides: Partial<RunSummary> & { id: string; runCode: string }): RunSummary {
@@ -183,5 +188,137 @@ describe('page merging', () => {
       run({ id: '01JB', runCode: '260811', tags: ['calibration'] }),
     ]
     expect(knownTags(rows)).toEqual(['calibration', 'thesis'])
+  })
+})
+
+vi.mock('../../src/session/SessionProvider.tsx', () => ({
+  useSession: () => ({ status: 'signed-in', capabilities: ['workspace:read'] }),
+}))
+vi.mock('../../src/components/ScreenFrame.tsx', () => ({
+  ScreenFrame: ({ children }: { children: React.ReactNode }) => children,
+}))
+vi.mock('../../src/router/Router.tsx', () => ({
+  Link: ({ children, to }: { children: React.ReactNode; to: string }) =>
+    createElement('a', { href: to }, children),
+}))
+vi.mock('../../src/cloud/gateway.ts', async (original) => ({
+  ...(await original<object>()),
+  listRuns: vi.fn(),
+  listWorkspaceRuns: vi.fn(),
+  listRevisions: vi.fn(),
+}))
+
+function deferred<T>() {
+  let resolve!: (value: T) => void
+  const promise = new Promise<T>((done) => {
+    resolve = done
+  })
+  return { promise, resolve }
+}
+
+describe('gallery request lifecycle', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+    vi.mocked(listRevisions).mockResolvedValue({ ok: true, value: { revisions: [] } })
+  })
+  afterEach(cleanup)
+
+  it('loads cards and their facts after StrictMode effect replay', async () => {
+    const rows = [
+      { ...run({ id: 'strict', runCode: '260811' }), ownerUserId: 'owner', ownerDisplayName: 'Researcher' },
+    ]
+    vi.mocked(listWorkspaceRuns).mockResolvedValue({ ok: true, value: { runs: rows, nextCursor: null } })
+    render(createElement(StrictMode, null, createElement(RunsScreen)))
+    expect(await screen.findByText('260811')).toBeTruthy()
+    await waitFor(() => expect(screen.queryByText('読み込んでいます…')).toBeNull())
+    expect(await screen.findByText('ポスター図なし')).toBeTruthy()
+    expect(listRevisions).toHaveBeenCalledWith('strict')
+  })
+
+  it('keeps the newest scope and cursor when the older scope finishes last', async () => {
+    const team = deferred<Awaited<ReturnType<typeof listWorkspaceRuns>>>()
+    vi.mocked(listWorkspaceRuns).mockReturnValue(team.promise)
+    vi.mocked(listRuns).mockResolvedValue({
+      ok: true,
+      value: { runs: [run({ id: 'mine', runCode: '260812' })], nextCursor: null },
+    })
+    render(createElement(RunsScreen))
+    fireEvent.click(screen.getByRole('radio', { name: /自分のみ/ }))
+    expect(await screen.findByText('260812')).toBeTruthy()
+    await act(async () =>
+      team.resolve({
+        ok: true,
+        value: {
+          runs: [
+            {
+              ...run({ id: 'team', runCode: '260810' }),
+              ownerUserId: 'owner',
+              ownerDisplayName: 'Researcher',
+            },
+          ],
+          nextCursor: 'obsolete',
+        },
+      }),
+    )
+    expect(screen.getByText('260812')).toBeTruthy()
+    expect(screen.queryByText('260810')).toBeNull()
+    expect(screen.queryByRole('button', { name: /さらに \d+ 件を読み込む/ })).toBeNull()
+  })
+
+  it('discards an obsolete page after a new filter is applied', async () => {
+    const page = deferred<Awaited<ReturnType<typeof listWorkspaceRuns>>>()
+    vi.mocked(listWorkspaceRuns)
+      .mockResolvedValueOnce({
+        ok: true,
+        value: {
+          runs: [
+            {
+              ...run({ id: 'first', runCode: '260811' }),
+              ownerUserId: 'owner',
+              ownerDisplayName: 'Researcher',
+            },
+          ],
+          nextCursor: 'page-two',
+        },
+      })
+      .mockReturnValueOnce(page.promise)
+      .mockResolvedValueOnce({
+        ok: true,
+        value: {
+          runs: [
+            {
+              ...run({ id: 'filtered', runCode: '260813' }),
+              ownerUserId: 'owner',
+              ownerDisplayName: 'Researcher',
+            },
+          ],
+          nextCursor: null,
+        },
+      })
+    render(createElement(RunsScreen))
+    await screen.findByText('260811')
+    fireEvent.click(screen.getByRole('button', { name: /読み込む/ }))
+    fireEvent.change(screen.getByRole('searchbox', { name: /実験コード/ }), { target: { value: '260813' } })
+    const form = screen.getByRole('searchbox', { name: /実験コード/ }).closest('form')
+    expect(form).not.toBeNull()
+    fireEvent.submit(form as HTMLFormElement)
+    await screen.findByText('260813')
+    await act(async () =>
+      page.resolve({
+        ok: true,
+        value: {
+          runs: [
+            {
+              ...run({ id: 'old-page', runCode: '260809' }),
+              ownerUserId: 'owner',
+              ownerDisplayName: 'Researcher',
+            },
+          ],
+          nextCursor: 'stale-cursor',
+        },
+      }),
+    )
+    expect(screen.queryByText('260809')).toBeNull()
+    expect(screen.getByText('260813')).toBeTruthy()
   })
 })

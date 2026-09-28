@@ -36,9 +36,18 @@ export function FileDropZone(props: FileDropZoneProps): React.JSX.Element {
       event.preventDefault()
       dragDepth.current = 0
       setActive(false)
-      if (props.disabled) return
+      if (props.disabled) {
+        event.stopPropagation()
+        return
+      }
+      // Inside GraphArea the parent owns the drop, including clearing its drag
+      // overlay. Let it import once; stopping only drop would strand that overlay.
+      if (event.currentTarget.closest('#aat-graph') !== null) return
       const files = csvFilesFrom(event.dataTransfer.files)
-      if (files.length > 0) props.onFiles(files)
+      if (files.length > 0) {
+        event.stopPropagation()
+        props.onFiles(files)
+      }
     },
     [props],
   )
