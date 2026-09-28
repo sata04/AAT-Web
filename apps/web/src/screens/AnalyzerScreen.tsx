@@ -37,6 +37,7 @@ import { type CloudStatuses, INITIAL_STATUSES } from '../cloud/status.ts'
 import { useTopmostDialogKeys } from '../components/Dialog.tsx'
 import { applyViewEvent, useNotices } from '../components/hooks.ts'
 import type { ChartGeometry } from '../graph/geometry.ts'
+import type { PlotCanvas } from '../graph/plot-legend.ts'
 import {
   buildPlotModel,
   defaultViewportFor,
@@ -190,7 +191,7 @@ export function AnalyzerScreen(): React.JSX.Element {
   const [selection, setSelection] = useState<SelectionRange | null>(null)
   const [viewport, setViewport] = useState<ChartViewport | null>(null)
   const [geometry, setGeometry] = useState<ChartGeometry | null>(null)
-  const [canvas, setCanvas] = useState<HTMLCanvasElement | null>(null)
+  const [canvas, setCanvas] = useState<PlotCanvas | null>(null)
   const [gestureLayer, setGestureLayer] = useState<HTMLElement | null>(null)
   const [statuses, setStatuses] = useState<CloudStatuses>(INITIAL_STATUSES)
   const [settingsOpen, setSettingsOpen] = useState(false)

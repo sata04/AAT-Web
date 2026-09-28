@@ -5,8 +5,8 @@
  * `drag_from_anywhere=True`; uPlot has nothing equivalent, so the behaviour is
  * rebuilt: drag on empty plot area to create a span, drag an edge to resize,
  * drag from inside to move, and the whole thing works with a finger as well as a
- * mouse because every handler is a pointer event and the grips are 11 px wide
- * rather than 1 px.
+ * mouse because every handler is a pointer event and selection.ts hit-tests a
+ * wider edge tolerance on the gesture layer than the visible 1 px line.
  *
  * All the arithmetic lives in `selection.ts` and `geometry.ts`. This component
  * only translates pointer positions into calls and paints the result.

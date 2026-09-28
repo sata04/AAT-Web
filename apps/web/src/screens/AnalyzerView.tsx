@@ -14,6 +14,7 @@ import { RangeStatisticsPanel } from '../components/RangeStatisticsPanel.tsx'
 import { StatisticsPanel } from '../components/StatisticsPanel.tsx'
 import { TABLE_SCROLL_PROPS } from '../components/table-scroll.ts'
 import type { ChartGeometry } from '../graph/geometry.ts'
+import type { PlotCanvas } from '../graph/plot-legend.ts'
 import type { PlotModel } from '../graph/plot-model.ts'
 import { SelectionOverlay } from '../graph/SelectionOverlay.tsx'
 import type { SelectionRange } from '../graph/selection.ts'
@@ -70,7 +71,7 @@ interface AnalyzerPlotState {
   viewport: ChartViewport
   bounds: ChartViewport
   geometry: ChartGeometry | null
-  canvas: HTMLCanvasElement | null
+  canvas: PlotCanvas | null
   /** uPlot's `.u-over` element — where selection gestures actually listen. */
   gestureLayer: HTMLElement | null
 }
@@ -84,7 +85,7 @@ interface AnalyzerViewActions {
   setConfig: Dispatch<SetStateAction<AnalysisConfig>>
   setViewport: Dispatch<SetStateAction<ChartViewport | null>>
   setGeometry: Dispatch<SetStateAction<ChartGeometry | null>>
-  setCanvas: Dispatch<SetStateAction<HTMLCanvasElement | null>>
+  setCanvas: Dispatch<SetStateAction<PlotCanvas | null>>
   setGestureLayer: Dispatch<SetStateAction<HTMLElement | null>>
   setSelection: Dispatch<SetStateAction<SelectionRange | null>>
   setActiveName: Dispatch<SetStateAction<string | null>>

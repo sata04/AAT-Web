@@ -620,12 +620,63 @@ textarea {
 
 .plot-frame {
   position: relative;
+  display: flex;
+  flex-direction: column;
   flex: 1 1 auto;
+  min-width: 0;
   min-height: 260px;
   border: 1px solid var(--border);
   border-radius: var(--radius-panel);
   background: var(--bg-primary);
   overflow: hidden;
+}
+
+.plot-frame__heading {
+  flex-shrink: 0;
+  padding: var(--space-sm) var(--space-md) var(--space-2xs);
+}
+
+.plot-frame__title {
+  margin: 0;
+  font-size: var(--size-subheader);
+  font-weight: var(--weight-medium);
+  overflow-wrap: anywhere;
+}
+
+.plot-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2xs) var(--space-lg);
+  margin: var(--space-2xs) 0 0;
+  padding: 0;
+  list-style: none;
+  font-size: var(--size-small);
+  color: var(--text-secondary);
+}
+
+.plot-legend__entry {
+  display: flex;
+  align-items: center;
+  gap: var(--space-xs);
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.plot-legend__swatch {
+  flex: 0 0 18px;
+  height: 1px;
+}
+
+.plot-legend__swatch--band {
+  height: 6px;
+  opacity: 0.1;
+}
+
+.plot-frame__chart {
+  position: relative;
+  flex: 1 1 0;
+  min-height: 0;
+  min-width: 0;
 }
 
 .plot-frame__empty {
@@ -640,16 +691,9 @@ textarea {
 /*
  * The range-selection layer, above uPlot rather than beside it.
  *
- * `z-index` is load-bearing, not decoration. The overlay is rendered before the chart, and uPlot
- * appends its own root when it builds — so in DOM order `.u-over` comes last. With neither element
- * carrying a z-index, painting order decides, `elementFromPoint` returns `.u-over`, and the pointer
- * never reaches this layer no matter how correctly its handlers are bound. Dragging a range on the
- * graph did nothing at all until this line existed; the numeric inputs above the chart kept
- * working, which is exactly why it was easy to miss.
- *
- * `pointer-events` is set inline by the component (auto only while selection is enabled), so it is
- * deliberately not declared here — two sources for one property is how the next person spends an
- * afternoon.
+ * uPlot appends its root after the overlay, so z-index keeps the selection
+ * visible above the canvas. The component sets pointer-events:none so gestures
+ * reach uPlot's .u-over layer, where selection.ts supplies edge hit testing.
  */
 .selection-overlay {
   position: absolute;
@@ -669,8 +713,8 @@ textarea {
 /*
  * Edge grips.
  *
- * Wider than they look: the visible line is 1px, the hit area is 11px, because
- * a 1px grab target is unusable with a mouse and impossible with a finger.
+ * The visible line is 1px. These elements only paint; the wider grab tolerance
+ * is applied by selection.ts on the chart's gesture layer.
  */
 .selection-overlay__handle {
   position: absolute;
@@ -678,9 +722,6 @@ textarea {
   bottom: 0;
   width: 11px;
   margin-left: -5px;
-  cursor: ew-resize;
-  pointer-events: auto;
-  touch-action: none;
 }
 
 .selection-overlay__handle::after {
@@ -717,13 +758,14 @@ textarea {
 }
 
 .dialog {
+  --dialog-pad: var(--space-2xl);
   display: flex;
   flex-direction: column;
   gap: var(--space-lg);
   width: min(40rem, 100%);
   max-height: min(90vh, 48rem);
   overflow-y: auto;
-  padding: var(--space-2xl);
+  padding: var(--dialog-pad);
   background: var(--bg-primary);
   border: 1px solid var(--border-strong);
   border-radius: var(--radius-panel);
@@ -756,10 +798,18 @@ textarea {
 }
 
 .dialog__actions {
+  position: sticky;
+  bottom: 0;
+  z-index: 2;
   display: flex;
+  flex-shrink: 0;
   flex-wrap: wrap;
   justify-content: flex-end;
   gap: var(--space-sm);
+  /* Cover the dialog's padding too, so scrolling fields cannot show through. */
+  margin: 0 calc(-1 * var(--dialog-pad)) calc(-1 * var(--dialog-pad));
+  padding: var(--space-md) var(--dialog-pad) var(--dialog-pad);
+  background: var(--bg-primary);
 }
 
 .separator {
@@ -1710,6 +1760,11 @@ textarea {
 .graph-hint__body > b {
   margin-right: var(--space-sm);
   font-weight: var(--weight-bold);
+}
+
+.graph-hint > button {
+  flex-shrink: 0;
+  white-space: nowrap;
 }
 
 /* InfoTip — a `?` affordance whose bubble opens on hover or focus. */

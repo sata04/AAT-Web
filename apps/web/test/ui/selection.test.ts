@@ -109,6 +109,23 @@ describe('editing', () => {
     expect(resizeSelection(range, 'start', 0.95, BOUNDS)).toEqual({ xMin: 0.8, xMax: 0.95 })
   })
 
+  it.each([
+    { start: 0.2, anchor: 0.8, positions: [0.95, 1.1, 1.2, 0.5] },
+    { start: 0.8, anchor: 0.2, positions: [0.1, 0.05, -0.1, 0.5] },
+  ])(
+    'keeps the opposite endpoint fixed throughout a crossing from $start',
+    ({ start, anchor, positions }) => {
+      const previous = { xMin: 0.2, xMax: 0.8 }
+      let drag = beginDrag(previous, start, 0.01)
+      for (const position of positions) {
+        drag = updateDrag(drag, position, BOUNDS)
+        const expected = clampRange(normaliseRange(anchor, position), BOUNDS)
+        expect(dragRange(drag, BOUNDS)).toEqual(expected)
+        expect(commitDrag(drag, previous, BOUNDS)).toEqual(expected)
+      }
+    },
+  )
+
   it('moves without changing the width', () => {
     const range = { xMin: 0.2, xMax: 0.5 }
     const moved = moveSelection(range, 0.3, BOUNDS)

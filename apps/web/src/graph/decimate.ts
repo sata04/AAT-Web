@@ -20,11 +20,9 @@
  * `src/analysis/series.ts`). That is the whole point: nothing that computes a
  * published number will accept this value.
  *
- * One honest limitation: the column scan assumes an ascending time axis. AAT
- * only *warns* about a non-monotonic axis rather than rejecting it, so such a
- * recording draws approximately. It never computes approximately — statistics,
- * G-quality, range statistics and every export read the full-resolution arrays,
- * which this module cannot reach.
+ * Ordered axes use a bisected column scan. Unordered axes bucket every finite
+ * vertex directly, so a backward timestamp cannot hide an extreme. Both paths
+ * interpolate only between adjacent finite source vertices; NaNs are breaks.
  */
 
 import type { FullResolutionArray } from '../analysis/series.ts'
@@ -49,10 +47,10 @@ function isMonotonic(time: FullResolutionArray): boolean {
   const known = monotonicAxes.get(time)
   if (known !== undefined) return known
   let sorted = true
-  for (let index = 1; index < time.length; index++) {
+  for (let index = 0; index < time.length; index++) {
     const current = time[index] as number
     const previous = time[index - 1] as number
-    if (!(current >= previous)) {
+    if (!Number.isFinite(current) || (index > 0 && !(current >= previous))) {
       sorted = false
       break
     }
@@ -71,23 +69,6 @@ function bisectFirstVisible(series: SeriesWindow, xMin: number): number {
     else upper = mid
   }
   return lower
-}
-
-/** The linear answer for an unordered axis, where only input order is trustworthy. */
-function scanFirstVisible(series: SeriesWindow, xMin: number): number {
-  let cursor = 0
-  while (cursor < series.length && (series.time[cursor] as number) < xMin) cursor++
-  return cursor
-}
-
-/**
- * First index whose sample is not before `xMin`. Bisected on a monotonic axis —
- * at millions of samples a linear scan dominated every wheel tick's redraw —
- * scanned linearly when the axis steps backward, where "the prefix" does not
- * exist and only input order is trustworthy (the column loop's own assumption).
- */
-function firstVisibleIndex(series: SeriesWindow, xMin: number): number {
-  return isMonotonic(series.time) ? bisectFirstVisible(series, xMin) : scanFirstVisible(series, xMin)
 }
 
 /** The shared x axis every trace on one plot is decimated onto. */
@@ -111,7 +92,7 @@ export interface DisplaySeries {
   /** Aligned to `grid.x`; NaN marks a position this sensor did not measure. */
   readonly y: Float64Array
   readonly grid: DisplayGrid
-  /** How many source samples fell inside the grid's range. */
+  /** How many finite, placeable source samples fell inside the inclusive grid range. */
   readonly sourceLength: number
 }
 
@@ -139,16 +120,18 @@ export function buildDisplayGrid(xMin: number, xMax: number, columns: number): D
     x[column * 2] = start + (column + 0.25) * step
     x[column * 2 + 1] = start + (column + 0.75) * step
   }
-  return { x, columns: safeColumns, xMin: start, xMax: start + span }
+  // Reconstructing the requested end as start + span can round it inward.
+  return { x, columns: safeColumns, xMin: start, xMax: xMax > xMin ? xMax : start + span }
 }
 
 /**
  * Decimate one sensor's samples onto a grid.
  *
  * Per column: the minimum and the maximum of the samples that fall inside it.
- * A column with no samples is filled by interpolating between its neighbours
- * when it sits inside the sensor's measured span, and left as NaN when it does
- * not. That distinction is what keeps two different things looking different —
+ * Interior columns are half-open; the final column includes `grid.xMax`.
+ * A column with no samples interpolates only between adjacent, finite source
+ * samples bracketing its display positions. Skipped samples break interpolation.
+ * That distinction is what keeps two different things looking different —
  * a zoomed-in view where the grid is finer than the sampling interval draws a
  * continuous line, while a genuine dropout, or the region beyond a sensor's
  * data, stays visibly empty.
@@ -161,19 +144,22 @@ export function decimateToGrid(
   const y = new Float64Array(grid.x.length).fill(Number.NaN)
   const series: SeriesWindow = { time, values, length: Math.min(time.length, values.length) }
   if (series.length === 0) return { [DISPLAY_SERIES]: true, y, grid, sourceLength: 0 }
+  if (!isMonotonic(time)) return bucketUnorderedSamples(grid, series, y)
 
   const step = (grid.xMax - grid.xMin) / grid.columns
   let counted = 0
 
   // Skip samples before the viewport, remembering the last one so the first
   // visible column can interpolate back to it instead of starting mid-air.
-  let cursor = firstVisibleIndex(series, grid.xMin)
+  let cursor = bisectFirstVisible(series, grid.xMin)
   let previousIndex = cursor > 0 ? cursor - 1 : -1
 
   for (let column = 0; column < grid.columns; column++) {
     const scan = scanColumnSamples(series, {
       from: cursor,
-      columnEnd: grid.xMin + (column + 1) * step,
+      columnStart: grid.xMin + column * step,
+      columnEnd: column === grid.columns - 1 ? grid.xMax : grid.xMin + (column + 1) * step,
+      inclusiveEnd: column === grid.columns - 1,
       previousIndex,
     })
     cursor = scan.cursor
@@ -188,9 +174,11 @@ export function decimateToGrid(
 
     // No sample landed here. Interpolate only between two real samples that
     // bracket the column — never extrapolate past the ends of the data.
-    const nextIndex = nextFiniteIndex(series, cursor)
-    const priorIndex = previousFiniteIndex(series, previousIndex)
-    if (priorIndex < 0 || nextIndex < 0) continue
+    // Looking only at immediate neighbours also avoids rescanning a long
+    // dropout for every empty display column.
+    const nextIndex = cursor
+    const priorIndex = previousIndex
+    if (priorIndex < 0 || nextIndex >= series.length || nextIndex !== priorIndex + 1) continue
 
     interpolateColumn(grid, column, y, {
       x0: time[priorIndex] as number,
@@ -200,6 +188,66 @@ export function decimateToGrid(
     })
   }
 
+  return { [DISPLAY_SERIES]: true, y, grid, sourceLength: counted }
+}
+
+/** Half-open ownership, using the same boundaries as the ordered scan. */
+function columnForTime(grid: DisplayGrid, at: number): number {
+  const step = (grid.xMax - grid.xMin) / grid.columns
+  let column = Math.max(0, Math.min(grid.columns - 1, Math.floor((at - grid.xMin) / step)))
+  // Division can round a boundary into its neighbour. Comparing against the
+  // shared boundary expressions keeps ownership identical on both paths.
+  if (column > 0 && at < grid.xMin + column * step) column--
+  else if (column < grid.columns - 1 && at >= grid.xMin + (column + 1) * step) column++
+  return column
+}
+
+/**
+ * O(samples + columns), with no sorting or repeated walks over the input.
+ * Every finite vertex contributes to its own bucket, including backward steps.
+ * For empty buckets, record adjacent finite segments at their leftmost column
+ * and sweep their coverage. Keeping the furthest-reaching segment is enough to
+ * find a real interpolation bracket wherever one exists, without rescanning
+ * overlapping segments for each column. Populated buckets retain their exact
+ * vertex extrema; an empty bucket follows one covering segment.
+ */
+function bucketUnorderedSamples(grid: DisplayGrid, series: SeriesWindow, y: Float64Array): DisplaySeries {
+  const brackets: (ColumnBracket | undefined)[] = new Array(grid.columns)
+  let counted = 0
+  let previous: { at: number; value: number } | undefined
+  for (let index = 0; index < series.length; index++) {
+    const at = series.time[index] as number
+    const value = series.values[index] as number
+    if (!Number.isFinite(at) || !Number.isFinite(value)) {
+      previous = undefined
+      continue
+    }
+    if (at >= grid.xMin && at <= grid.xMax) {
+      const slot = columnForTime(grid, at) * 2
+      y[slot] = Number.isNaN(y[slot]) ? value : Math.min(y[slot] as number, value)
+      y[slot + 1] = Number.isNaN(y[slot + 1]) ? value : Math.max(y[slot + 1] as number, value)
+      counted++
+    }
+    if (previous !== undefined && previous.at !== at) {
+      const bracket =
+        previous.at < at
+          ? { x0: previous.at, v0: previous.value, x1: at, v1: value }
+          : { x0: at, v0: value, x1: previous.at, v1: previous.value }
+      if (bracket.x1 >= grid.xMin && bracket.x0 <= grid.xMax) {
+        const column = columnForTime(grid, bracket.x0)
+        const existing = brackets[column]
+        if (existing === undefined || bracket.x1 > existing.x1) brackets[column] = bracket
+      }
+    }
+    previous = { at, value }
+  }
+
+  let covering: ColumnBracket | undefined
+  for (let column = 0; column < grid.columns; column++) {
+    const bracket = brackets[column]
+    if (bracket !== undefined && (covering === undefined || bracket.x1 > covering.x1)) covering = bracket
+    if (Number.isNaN(y[column * 2]) && covering !== undefined) interpolateColumn(grid, column, y, covering)
+  }
   return { [DISPLAY_SERIES]: true, y, grid, sourceLength: counted }
 }
 
@@ -213,7 +261,9 @@ interface SeriesWindow {
 /** Where one pixel column's scan starts, ends, and what precedes it. */
 interface ColumnScanBounds {
   readonly from: number
+  readonly columnStart: number
   readonly columnEnd: number
+  readonly inclusiveEnd: boolean
   readonly previousIndex: number
 }
 
@@ -225,7 +275,7 @@ interface ColumnScan {
   readonly counted: number
   /** One past the last sample the column's range covered. */
   readonly cursor: number
-  /** The last covered sample, finite or not — interpolation reads back to it. */
+  /** Last covered sample, or -1 after an unplaceable timestamp. */
   readonly previousIndex: number
 }
 
@@ -235,7 +285,16 @@ function scanColumnSamples(series: SeriesWindow, bounds: ColumnScanBounds): Colu
   let counted = 0
   let cursor = bounds.from
   let previousIndex = bounds.previousIndex
-  while (cursor < series.length && (series.time[cursor] as number) < bounds.columnEnd) {
+  while (cursor < series.length) {
+    const at = series.time[cursor] as number
+    if (!Number.isFinite(at) || at < bounds.columnStart) {
+      // A missing or backward timestamp cannot belong to this column or act
+      // as an interpolation anchor, but must not block later valid samples.
+      previousIndex = -1
+      cursor++
+      continue
+    }
+    if (at > bounds.columnEnd || (at === bounds.columnEnd && !bounds.inclusiveEnd)) break
     const value = series.values[cursor] as number
     if (Number.isFinite(value)) {
       if (value < minValue) minValue = value
@@ -258,36 +317,24 @@ interface ColumnBracket {
 
 /**
  * Fill an empty column's two positions from the samples bracketing it.
- * `denominator === 0` means the bracketing samples share one x — draw the
- * earlier value rather than dividing through it.
+ * Invalid neighbours and positions outside their span remain missing; neither
+ * an explicit dropout nor an unordered timestamp permits extrapolation.
  */
 function interpolateColumn(grid: DisplayGrid, column: number, y: Float64Array, bracket: ColumnBracket): void {
   const denominator = bracket.x1 - bracket.x0
+  if (
+    !Number.isFinite(bracket.x0) ||
+    !Number.isFinite(bracket.x1) ||
+    !Number.isFinite(bracket.v0) ||
+    !Number.isFinite(bracket.v1) ||
+    denominator <= 0
+  )
+    return
   for (const slot of [0, 1] as const) {
     const at = grid.x[column * 2 + slot] as number
-    y[column * 2 + slot] =
-      denominator === 0
-        ? bracket.v0
-        : bracket.v0 + ((at - bracket.x0) / denominator) * (bracket.v1 - bracket.v0)
+    if (at < bracket.x0 || at > bracket.x1) continue
+    y[column * 2 + slot] = bracket.v0 + ((at - bracket.x0) / denominator) * (bracket.v1 - bracket.v0)
   }
-}
-
-function nextFiniteIndex(series: SeriesWindow, from: number): number {
-  for (let index = from; index < series.length; index++) {
-    if (Number.isFinite(series.values[index] as number) && Number.isFinite(series.time[index] as number)) {
-      return index
-    }
-  }
-  return -1
-}
-
-function previousFiniteIndex(series: SeriesWindow, from: number): number {
-  for (let index = from; index >= 0; index--) {
-    if (Number.isFinite(series.values[index] as number) && Number.isFinite(series.time[index] as number)) {
-      return index
-    }
-  }
-  return -1
 }
 
 /**

@@ -1,3 +1,4 @@
+// @vitest-environment jsdom
 /**
  * Export wiring.
  *
@@ -9,7 +10,7 @@
  */
 
 import { DEFAULT_ANALYSIS_CONFIG } from '@aat/shared'
-import { describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { asFullResolution } from '../../src/analysis/series.ts'
 import type { Dataset, SensorDataset } from '../../src/app/dataset.ts'
 import {
@@ -21,8 +22,14 @@ import {
   SHEET_GRAVITY_STATISTICS,
   XLSX_MAX_DATA_ROWS,
 } from '../../src/export/workbook.ts'
+import * as exportClient from '../../src/exporting/client.ts'
+import { exportPngFor } from '../../src/exporting/export-actions.ts'
 import { workbookInputFor } from '../../src/exporting/input.ts'
-import { PNG_PARITY_NOTICE } from '../../src/exporting/png.ts'
+import { canvasToPng, PNG_PARITY_NOTICE } from '../../src/exporting/png.ts'
+import { plotCanvasFor } from '../../src/graph/plot-legend.ts'
+import { graphPalette } from '../../src/graph/theme.ts'
+
+afterEach(() => vi.restoreAllMocks())
 
 function sensorDataset(options: {
   samples: number
@@ -206,5 +213,145 @@ describe('PNG parity', () => {
     // a guarantee.
     expect(PNG_PARITY_NOTICE).toContain('Matplotlib')
     expect(PNG_PARITY_NOTICE).toContain('ポスター')
+  })
+})
+
+/** jsdom supplies the real DOM; only the unavailable Canvas2D and encoder are stubbed. */
+function pngCanvas(width = 600, pixelRatio = 1) {
+  const source = document.createElement('canvas')
+  source.width = width * pixelRatio
+  source.height = 300 * pixelRatio
+  vi.spyOn(source, 'getBoundingClientRect').mockReturnValue({ width, height: 300 } as DOMRect)
+  const text: { label: string; x: number; y: number; color: string; font: string }[] = []
+  const rectangles: { x: number; y: number; width: number; height: number; color: string }[] = []
+  const context = {
+    font: '',
+    fillStyle: '',
+    measureText: (label: string) => ({ width: label.length * 6 }),
+    fillText(label: string, x: number, y: number) {
+      text.push({ label, x, y, color: this.fillStyle, font: this.font })
+    },
+    fillRect(x: number, y: number, width: number, height: number) {
+      rectangles.push({ x, y, width, height, color: this.fillStyle })
+    },
+    scale: vi.fn(),
+    drawImage: vi.fn(),
+  }
+  let target: HTMLCanvasElement | undefined
+  vi.spyOn(HTMLCanvasElement.prototype, 'getContext').mockImplementation(function (this: HTMLCanvasElement) {
+    target = this
+    return context as unknown as CanvasRenderingContext2D
+  })
+  // A valid tiny PNG fixture stands in for the browser encoder. Composition is
+  // asserted through the real exporter's draw calls and target dimensions.
+  const png = Uint8Array.from(
+    atob('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aWQAAAABJRU5ErkJggg=='),
+    (c) => c.charCodeAt(0),
+  )
+  const encode = vi.spyOn(HTMLCanvasElement.prototype, 'toBlob').mockImplementation((done) => {
+    done(new Blob([png], { type: 'image/png' }))
+  })
+  return { source, context, text, rectangles, encode, target: () => target }
+}
+
+describe('identified PNG export', () => {
+  it.each([1, 2])(
+    'composes the comparison title and visible trace colours at pixel ratio %s',
+    async (pixelRatio) => {
+      const probe = pngCanvas(600, pixelRatio)
+      const palette = graphPalette('dark')
+      const empty = asFullResolution(new Float64Array())
+      const plotted = plotCanvasFor(
+        probe.source,
+        {
+          title: 'Comparison: Run A / Run B',
+          traces: [
+            {
+              key: 'a',
+              label: 'Run A (Inner Capsule)',
+              colour: '#0969da',
+              axis: 'y',
+              time: empty,
+              values: empty,
+            },
+            {
+              key: 'b',
+              label: 'Run B (Drag Shield)',
+              colour: '#cf222e',
+              axis: 'y2',
+              time: empty,
+              values: empty,
+            },
+            {
+              key: 'hidden',
+              label: 'Hidden trace',
+              colour: '#ffffff',
+              axis: 'y',
+              time: empty,
+              values: empty,
+            },
+          ],
+          bands: [],
+          xLabel: 'Time',
+          yLabel: 'Gravity',
+          y2Label: 'Deviation',
+          xRange: null,
+          yRange: null,
+          emptyMessage: null,
+        },
+        new Set(['hidden']),
+      )
+      const save = vi.spyOn(exportClient, 'saveBlob').mockImplementation(() => {})
+      const notify = vi.fn()
+      await exportPngFor({ canvas: plotted, dataset: dataset(), palette, notify })
+
+      expect(probe.text.map((call) => call.label)).toEqual([
+        plotted.title,
+        ...plotted.legend.map((entry) => entry.label),
+      ])
+      expect(probe.text.every((call) => call.color === palette.textPrimary)).toBe(true)
+      expect(probe.text[0]?.font).toContain('13px')
+      expect(probe.text[1]?.font).toContain('11px')
+      expect(probe.rectangles.slice(1).map((call) => [call.color, call.width, call.height])).toEqual([
+        ['#0969da', 8, 8],
+        ['#cf222e', 8, 8],
+      ])
+      expect(probe.context.scale).toHaveBeenCalledWith(2 * pixelRatio, 2 * pixelRatio)
+      expect(probe.target()?.width).toBe(probe.source.width * 2)
+      expect(probe.target()?.height).toBe((300 + 62) * pixelRatio * 2)
+      expect(probe.context.drawImage).toHaveBeenCalledWith(probe.source, 0, 62, 600, 300)
+      expect(probe.rectangles[0]?.color).toBe(palette.background)
+      expect(probe.encode).toHaveBeenCalledWith(expect.any(Function), 'image/png')
+      expect(save).toHaveBeenCalledWith(expect.any(Blob), 'run-a_gl.png')
+      expect(save.mock.calls[0]?.[0].type).toBe('image/png')
+      expect(notify).toHaveBeenCalledWith('info', PNG_PARITY_NOTICE)
+    },
+  )
+
+  it('wraps dense legends and long titles above the plot without clipping labels', async () => {
+    const probe = pngCanvas(180)
+    const title = 'A long comparison title for a narrow plot'
+    const label = '長いファイル名'.repeat(8)
+    await canvasToPng(probe.source, {
+      scale: 1,
+      background: '#fff',
+      foreground: '#111',
+      title,
+      legend: [
+        { color: '#123456', label },
+        { color: '#abcdef', label: 'Run B' },
+      ],
+    })
+    const titleLines = probe.text.filter((call) => call.font.startsWith('500'))
+    const legendLines = probe.text.filter((call) => call.font.startsWith('400'))
+    expect(titleLines.map((call) => call.label).join('')).toBe(title)
+    expect(legendLines.map((call) => call.label).join('')).toBe(`${label}Run B`)
+    const plotTop = probe.context.drawImage.mock.calls[0]?.[2] as number
+    expect(plotTop).toBeGreaterThan(62)
+    for (const call of probe.text) {
+      expect(call.x + call.label.length * 6).toBeLessThanOrEqual(180 - 12)
+      expect(call.y + 16).toBeLessThan(plotTop)
+    }
+    expect(probe.target()?.height).toBe(300 + plotTop)
   })
 })
