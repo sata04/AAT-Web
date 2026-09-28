@@ -199,6 +199,16 @@ describe('parseCsvText', () => {
     },
   )
 
+  it('keeps comma when delimiter-free records can be omitted comma fields', () => {
+    // A valid comma CSV whose values happen to carry a semicolon: `1` has no
+    // semicolon, so nothing proves the file is semicolon-separated — the row
+    // is just a comma record with an omitted trailing field.
+    const table = parseCsvText('Time,Acceleration;raw\n0;1\n1\n')
+    expect(table.columnNames).toEqual(['Time', 'Acceleration;raw'])
+    expect(table.column('Time')?.cells).toEqual(['0;1', '1'])
+    expect(table.column('Acceleration;raw')?.cells).toEqual(['', ''])
+  })
+
   it.each([
     ['quotes', 't,a,n|o|t|e\n0,1,"p|q|r|s\n1,2,p|q|r|s\n'],
     ['width after an implicit index', 't,a,n|o|t|e\nr0,0,1,p|q|r|s\nr1,1,2,3,p|q|r|s\n'],

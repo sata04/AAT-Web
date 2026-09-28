@@ -248,10 +248,14 @@ export function parseCsvText(text: string): CsvTable {
     // alternative's errors so a malformed TSV cannot become a one-column CSV.
     // Otherwise require both positive header evidence and a clean alternative.
     // Short alternative rows are fine — pandas pads them like short CSV rows.
+    // A row without the delimiter is indistinguishable from a comma row with
+    // omitted trailing fields, so it cannot serve as evidence for either.
+    const delimiterInEveryRow = alternative.data.slice(1).every((row) => row.length > 1)
     if (
       (comma.data[0]?.length ?? 0) < 2 ||
       (hasCleanLayout(alternative) &&
-        (!hasUnquotedHeaderComma(records, delimiter) || hasOnlySingleFieldBody(comma)))
+        (!hasUnquotedHeaderComma(records, delimiter) ||
+          (hasOnlySingleFieldBody(comma) && delimiterInEveryRow)))
     ) {
       parsed = alternative
     }
