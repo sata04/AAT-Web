@@ -222,8 +222,10 @@ export function AnalyzerScreen(): React.JSX.Element {
 
   // One probe for the whole application, in the provider. A negative answer is
   // the normal, fully functional local-only mode.
-  const sessionStatus = useSession().status
+  const session = useSession()
+  const sessionStatus = session.status
   const signedIn = sessionStatus === 'signed-in'
+  const sessionUserId = session.user?.id ?? null
 
   const { analysisClient, getAnalysisClient, getExportClient } = useAnalysisClients()
   const { notices, notify, dismissNotice, dismissAllNotices } = useNotices(6)
@@ -234,6 +236,7 @@ export function AnalyzerScreen(): React.JSX.Element {
     analysisClient,
     config,
     signedIn,
+    sessionUserId,
     datasets,
     activeName,
     cloudSubject,

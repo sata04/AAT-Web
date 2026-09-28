@@ -35,12 +35,16 @@ export interface AnalyzerLoopDeps {
   imports: { current: WeakMap<Dataset, AnalysisRequest> }
   releaseCandidates: { current: Set<string> }
   syncRequested: { current: WeakSet<Dataset> }
+  /** The account the current `syncRequested` markers were issued under. */
+  syncRequestedUser: { current: string | null }
   /** Builds the worker client on first use; page load alone must not start one. */
   getAnalysisClient: () => AnalysisClient
   /** The live client ref — read by paths that only cancel, which must not construct one. */
   analysisClient: { current: AnalysisClient | null }
   config: AnalysisConfig
   signedIn: boolean
+  /** Signed-in account identity; null while signed out or still loading. */
+  sessionUserId: string | null
   datasets: readonly Dataset[]
   activeName: string | null
   /** Which file the cloud lanes are describing; a closed subject's failure is stale. */
@@ -271,6 +275,13 @@ async function installAnalysisResult(deps: AnalyzerLoopDeps, installed: Installe
 /** Reconcile completed imports after authentication or an analysis commit, once per result. */
 export function reconcileCloudFor(deps: AnalyzerLoopDeps): void {
   if (!deps.mounted.current || !deps.signedIn) return
+  // The analyzer stays mounted across sign-out/sign-in; a different account
+  // must not inherit the previous user's markers, or its open datasets would
+  // never reach the new account's revisions.
+  if (deps.syncRequestedUser.current !== deps.sessionUserId) {
+    deps.syncRequestedUser.current = deps.sessionUserId
+    deps.syncRequested.current = new WeakSet()
+  }
   for (const dataset of deps.datasetsRef.current) {
     const request = deps.imports.current.get(dataset)
     if (request === undefined || request.localOnly || deps.syncRequested.current.has(dataset)) continue
@@ -578,7 +589,12 @@ export function confirmPendingColumnsFor(deps: AnalyzerLoopDeps, mapping: Column
 export function cancelPendingColumnsFor(deps: AnalyzerLoopDeps): void {
   if (deps.pendingColumns !== null) {
     const request = requestForSource(deps, deps.pendingColumns.source)
-    if (request !== undefined) request.pending = false
+    if (request !== undefined) {
+      request.pending = false
+      // A cancelled open never owns the hash: its File and parsed table would
+      // otherwise stay retained with no dataset to release them.
+      if (request.sourceSha256 !== undefined) releaseSourceIfUnused(deps, request.sourceSha256)
+    }
   }
   deps.setPendingColumns(null)
   releaseUnusedSources(deps)
@@ -726,6 +742,8 @@ export interface AnalyzerLoopInput {
   analysisClient: { current: AnalysisClient | null }
   config: AnalysisConfig
   signedIn: boolean
+  /** Signed-in account identity; null while signed out or still loading. */
+  sessionUserId: string | null
   datasets: readonly Dataset[]
   activeName: string | null
   cloudSubject: string | null
@@ -756,6 +774,7 @@ function useLoopRefs(): Pick<
   | 'imports'
   | 'releaseCandidates'
   | 'syncRequested'
+  | 'syncRequestedUser'
 > & {
   pendingColumns: PendingColumnChoice | null
   setPendingColumns: Dispatch<SetStateAction<PendingColumnChoice | null>>
@@ -769,6 +788,7 @@ function useLoopRefs(): Pick<
   const imports = useRef(new WeakMap<Dataset, AnalysisRequest>())
   const releaseCandidates = useRef(new Set<string>())
   const syncRequested = useRef(new WeakSet<Dataset>())
+  const syncRequestedUser = useRef<string | null>(null)
   const cancelEpoch = useRef(0)
   const datasetsRef = useRef<readonly Dataset[]>([])
   useEffect(
@@ -786,6 +806,7 @@ function useLoopRefs(): Pick<
     imports,
     releaseCandidates,
     syncRequested,
+    syncRequestedUser,
     pendingColumns,
     setPendingColumns,
     sourceFiles,
@@ -857,6 +878,7 @@ export function useAnalyzerLoop(input: AnalyzerLoopInput): AnalyzerLoop {
     analysisClient,
     config,
     signedIn,
+    sessionUserId,
     datasets,
     activeName,
     cloudSubject,
@@ -889,6 +911,7 @@ export function useAnalyzerLoop(input: AnalyzerLoopInput): AnalyzerLoop {
       analysisClient,
       config,
       signedIn,
+      sessionUserId,
       datasets,
       activeName,
       cloudSubject,
@@ -908,6 +931,7 @@ export function useAnalyzerLoop(input: AnalyzerLoopInput): AnalyzerLoop {
       analysisClient,
       config,
       signedIn,
+      sessionUserId,
       datasets,
       activeName,
       cloudSubject,

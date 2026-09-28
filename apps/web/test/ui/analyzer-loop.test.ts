@@ -90,10 +90,12 @@ function loopDeps(client: AnalysisClient, overrides: Partial<AnalyzerLoopDeps> =
     imports: { current: new WeakMap() },
     releaseCandidates: { current: new Set() },
     syncRequested: { current: new WeakSet() },
+    syncRequestedUser: { current: null },
     getAnalysisClient: () => client,
     analysisClient: { current: client },
     config: DEFAULT_ANALYSIS_CONFIG,
     signedIn: false,
+    sessionUserId: null,
     datasets: datasetsBox.current,
     activeName: null,
     cloudSubject: null,
@@ -555,6 +557,23 @@ describe('import ownership and cloud reconciliation', () => {
     commit(deps, datasetsBox)
     reconcileCloudFor(deps)
     expect(deps.syncToCloud).toHaveBeenCalledTimes(1)
+  })
+  it('re-syncs open datasets when a different account signs in', async () => {
+    // The analyzer stays mounted across sign-out/sign-in: markers issued under
+    // one account must not suppress the next account's revisions.
+    const { deps, datasetsBox } = loopDeps(successfulClient())
+    await openFilesFor(deps, [new File(['real'], '260811_data.csv')])
+    commit(deps, datasetsBox)
+    deps.signedIn = true
+    deps.sessionUserId = 'alice'
+    reconcileCloudFor(deps)
+    reconcileCloudFor(deps)
+    expect(deps.syncToCloud).toHaveBeenCalledTimes(1)
+    deps.sessionUserId = 'bob'
+    reconcileCloudFor(deps)
+    expect(deps.syncToCloud).toHaveBeenCalledTimes(2)
+    reconcileCloudFor(deps)
+    expect(deps.syncToCloud).toHaveBeenCalledTimes(2)
   })
   it('preserves local-only ownership across a column dialog', async () => {
     const client = stubClient({ analyse: vi.fn(async () => result()) })
