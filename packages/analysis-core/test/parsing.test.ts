@@ -199,6 +199,21 @@ describe('parseCsvText', () => {
     },
   )
 
+  it.each(['\t', ';', '|'])(
+    'keeps %j when a delimiter-free row trails full alternative rows',
+    (delimiter) => {
+      // Three or more alternative header fields cannot be a comma artifact:
+      // a comma table only yields a two-field header here. The trailing record
+      // is a short row pandas pads, not evidence of a comma layout.
+      const table = parseCsvText(
+        `Time${delimiter}Acceleration${delimiter}note,unit\n0${delimiter}1${delimiter}ok\n1\n`,
+      )
+      expect(table.columnNames).toEqual(['Time', 'Acceleration', 'note,unit'])
+      expect(table.column('Acceleration')?.cells).toEqual(['1', ''])
+      expect(table.column('note,unit')?.cells).toEqual(['ok', ''])
+    },
+  )
+
   it('keeps comma when delimiter-free records can be omitted comma fields', () => {
     // A valid comma CSV whose values happen to carry a semicolon: `1` has no
     // semicolon, so nothing proves the file is semicolon-separated — the row
