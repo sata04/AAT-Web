@@ -51,6 +51,14 @@ const POLL_INTERVAL_MS = 2_500
  */
 const POLL_DEADLINE_MS = 120_000
 
+/*
+ * How long after a timed-out takeover POST to try reclaiming the row once
+ * more. Well past the gateway's own deadline, so the first request is dead
+ * either way, and early enough that a fresh inline render still finishes
+ * before the polling deadline.
+ */
+const TAKEOVER_RETRY_DELAY_MS = 30_000
+
 /** The identity a poster is filed under: which revision, and which experiment it belongs to. */
 export interface PosterContext {
   revisionId: string
@@ -183,12 +191,19 @@ export async function retryAutoPoster(
       // this POST is the only call that takes over a stale render; merely
       // observing it would loop on the deadline with no way to recover.
       if (!isAborted(signal)) onStatus({ kind: 'queued', posterId })
-      const pending = requestAutoPoster(context.revisionId, spec).then((outcome) => {
-        // The gateway deadline is far shorter than an inline takeover render:
-        // a POST that timed out does not mean nothing is rendering — keep
-        // observing the row the claim may still be settling.
+      const pending = requestAutoPoster(context.revisionId, spec).then(async (outcome) => {
+        // The gateway deadline is far shorter than an inline takeover render,
+        // and `unavailable` cannot tell a timed-out claim apart from a POST
+        // that never reached the Worker. POST /auto is idempotent against a
+        // live render — it returns the in-flight row and renders nothing — so
+        // one delayed re-claim is safe in either case: it rescues a stale row
+        // the first attempt never reached, and is a no-op against a render
+        // the first attempt started.
         if (outcome.ok || outcome.kind !== 'unavailable') return outcome
-        return { ok: true as const, value: { poster: found } }
+        await delay(TAKEOVER_RETRY_DELAY_MS, signal)
+        if (isAborted(signal)) return { ok: true as const, value: { poster: found } }
+        const retried = await requestAutoPoster(context.revisionId, spec)
+        return retried.ok ? retried : { ok: true as const, value: { poster: found } }
       })
       return settleRequest(context, pending, onStatus, signal, posterId)
     }

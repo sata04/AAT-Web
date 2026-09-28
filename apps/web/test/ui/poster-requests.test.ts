@@ -337,17 +337,36 @@ describe('retrying', () => {
     })
 
     const pending = retryAutoPoster(context(), POSTER_ID, () => {})
-    await vi.advanceTimersByTimeAsync(30_000)
+    await vi.advanceTimersByTimeAsync(60_000)
     const outcome = await pending
 
     expect(outcome.ok).toBe(true)
     // A takeover render runs inline on the Worker for far longer than the
-    // gateway's deadline: the timed-out POST still had the row claimed, so the
-    // only honest move is to keep polling it rather than reporting a failure
-    // the renderer never had.
-    expect(trace().filter((entry) => entry.startsWith('POST'))).toEqual([
-      `POST /api/v1/revisions/${REVISION_ID}/poster/auto`,
-    ])
+    // gateway's deadline. An unreachable POST gets exactly one bounded
+    // re-claim — idempotent against a live render — then the row is observed
+    // until the polling deadline.
+    expect(trace().filter((entry) => entry.startsWith('POST'))).toHaveLength(2)
+    expect(trace().every((entry) => !entry.includes('/retry'))).toBe(true)
+  })
+
+  it('reclaims a stale row when connectivity returns after a POST that never arrived', async () => {
+    vi.useFakeTimers()
+    let posts = 0
+    install((request) => {
+      if (request.method === 'GET') return json({ posters: [figure('rendering')] })
+      posts += 1
+      if (posts === 1) return Promise.reject(new TypeError('network'))
+      return json({ poster: figure('ready') })
+    })
+
+    const pending = retryAutoPoster(context(), POSTER_ID, () => {})
+    await vi.advanceTimersByTimeAsync(60_000)
+    const outcome = await pending
+
+    expect(outcome.ok).toBe(true)
+    // The first POST never reached the Worker; the delayed re-claim takes the
+    // row over and settles it without another polling cycle.
+    expect(posts).toBe(2)
   })
 
   it('keeps the poster id on a failed takeover so the next retry uses the retry endpoint', async () => {
