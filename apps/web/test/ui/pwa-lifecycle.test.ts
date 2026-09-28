@@ -98,6 +98,21 @@ describe('service worker lifecycle', () => {
     expect(installing.postMessage).not.toHaveBeenCalled()
     expect(vi.getTimerCount()).toBe(0)
   })
+  it('offers an update whose install was already in flight when the page loaded', async () => {
+    // An install started by a previous page load fires no `updatefound` on this
+    // registration — the worker must be watched directly or its transition to
+    // 'installed' is missed and no update is ever offered.
+    const h = harness()
+    h.registration.waiting = null
+    h.registration.installing = worker()
+    stop = setupServiceWorker(h.callbacks)
+    await Promise.resolve()
+    const installing = h.registration.installing
+    installing.state = 'installed'
+    h.registration.waiting = installing
+    installing.dispatchEvent(new Event('statechange'))
+    expect(h.callbacks.onUpdateAvailable).toHaveBeenCalledTimes(1)
+  })
   it('keeps hourly polling failures from becoming unhandled rejections', async () => {
     const h = harness()
     h.registration.update.mockRejectedValue(new TypeError('offline'))

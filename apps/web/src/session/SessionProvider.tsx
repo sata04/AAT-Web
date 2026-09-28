@@ -46,6 +46,8 @@ export interface SessionState {
   /** Re-probe after authentication or an explicit connection retry. */
   refresh: () => Promise<void>
   signOut: () => Promise<void>
+  /** Resolves once an in-flight sign-out settles; never rejects. */
+  waitForSignOut: () => Promise<void>
 }
 
 const NO_CAPABILITIES: readonly Capability[] = []
@@ -161,9 +163,16 @@ export function SessionProvider(props: SessionProviderProps): React.JSX.Element 
     logout.current = null
   }, [])
 
+  // Authentication writes a new session cookie; if a sign-out response is
+  // still in flight it can expire that cookie afterwards. Sign-in callers wait
+  // on this the same way refresh() does, so the two requests never overlap.
+  const waitForSignOut = useCallback(async () => {
+    if (logout.current !== null) await logout.current
+  }, [])
+
   const value = useMemo<SessionState>(
-    () => ({ ...snapshot, refreshing, refresh, signOut }),
-    [snapshot, refreshing, refresh, signOut],
+    () => ({ ...snapshot, refreshing, refresh, signOut, waitForSignOut }),
+    [snapshot, refreshing, refresh, signOut, waitForSignOut],
   )
 
   return <SessionContext.Provider value={value}>{props.children}</SessionContext.Provider>

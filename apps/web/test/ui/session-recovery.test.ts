@@ -160,6 +160,31 @@ describe('session recovery and operation ordering', () => {
     })
     expect(session.user?.id).toBe('after')
   })
+  it('waitForSignOut resolves only once the pending logout settles', async () => {
+    const logout = deferred<Awaited<ReturnType<typeof authClient.signOut>>>()
+    vi.mocked(authClient.signOut).mockReturnValueOnce(logout.promise)
+    await mount()
+    let signingOut!: Promise<void>
+    await act(async () => {
+      signingOut = session.signOut()
+    })
+    let settled = false
+    const waiting = session.waitForSignOut().then(() => {
+      settled = true
+    })
+    await act(async () => {})
+    expect(settled).toBe(false)
+    await act(async () => {
+      logout.resolve({ data: { success: true }, error: null })
+      await signingOut
+      await waiting
+    })
+    expect(settled).toBe(true)
+    // Once nothing is in flight the gate is a no-op.
+    await act(async () => {
+      await session.waitForSignOut()
+    })
+  })
   it.each(['reject', 'error'] as const)(
     'releases the refresh gate after a best-effort sign-out failure (%s)',
     async (failure) => {

@@ -60,6 +60,9 @@ export function SignInScreen(): React.JSX.Element {
     setFailure(null)
     setPending(true)
     try {
+      // A still-in-flight sign-out response would expire the cookie this call
+      // is about to set — authenticate only after it has settled.
+      await session.waitForSignOut()
       const result = await authClient.signIn.passkey()
       if (result.error !== null) {
         setFailure(describePasskeyFailure(result.error, 'authenticate'))

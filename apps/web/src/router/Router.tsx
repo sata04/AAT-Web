@@ -34,7 +34,7 @@
  */
 
 import { createContext, useContext, useEffect, useMemo, useSyncExternalStore } from 'react'
-import { initialFocusTarget } from '../components/Dialog.tsx'
+import { initialFocusTarget, panelSuspended } from '../components/Dialog.tsx'
 
 /** Every screen this application can be at. `not-found` is the answer for anything else. */
 export type RouteName =
@@ -239,14 +239,24 @@ export function useRouteFocus(host: React.RefObject<HTMLElement | null>): void {
       // A route left with a dialog open comes back to that dialog, not to the
       // landmark behind it — the trap still owns the keyboard there.
       const openDialogs = destination.querySelectorAll<HTMLElement>('[role="dialog"]')
-      const openDialog = openDialogs.length === 0 ? null : openDialogs.item(openDialogs.length - 1)
+      let openDialog: HTMLElement | null = null
+      for (let index = openDialogs.length - 1; index >= 0; index--) {
+        const candidate = openDialogs.item(index)
+        if (candidate !== null && !panelSuspended(candidate)) {
+          openDialog = candidate
+          break
+        }
+      }
       const target =
         openDialog === null
           ? (destination.querySelector<HTMLElement>('h1[tabindex]') ??
             destination.querySelector<HTMLElement>('main'))
           : (initialFocusTarget(openDialog) ?? openDialog)
       if (target === null) return
-      target.tabIndex = -1
+      // Only elements that cannot receive focus natively get an explicit -1:
+      // overwriting a button's tabindex would remove it from the dialog's own
+      // Tab order and strand keyboard navigation outside the trap.
+      if (target.tabIndex < 0 && !target.hasAttribute('tabindex')) target.tabIndex = -1
       target.focus()
     })
     return () => {

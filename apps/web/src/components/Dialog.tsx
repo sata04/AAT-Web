@@ -42,7 +42,7 @@ const openDialogPanels = new Set<HTMLElement>()
  * another route) cannot take keyboard ownership: its target would be unfocusable
  * and its Tab trap would deadlock navigation on the visible screen.
  */
-function panelSuspended(panel: HTMLElement): boolean {
+export function panelSuspended(panel: HTMLElement): boolean {
   return panel.closest('[inert],[hidden]') !== null
 }
 

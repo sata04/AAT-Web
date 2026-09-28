@@ -107,10 +107,7 @@ export function setupServiceWorker(callbacks: PwaCallbacks): () => void {
         callbacks.onUpdateAvailable(applyUpdate(registration))
       }
 
-      const onUpdateFound = () => {
-        if (cancelled) return
-        const installing = registration.installing
-        if (installing === null) return
+      const watchInstalling = (installing: ServiceWorker) => {
         const onStateChange = () => {
           if (cancelled) return
           if (installing.state !== 'installed') return
@@ -124,6 +121,20 @@ export function setupServiceWorker(callbacks: PwaCallbacks): () => void {
         }
         installing.addEventListener('statechange', onStateChange)
         removeListeners.push(() => installing.removeEventListener('statechange', onStateChange))
+        // The install may already be further along than 'installing' by the
+        // time the listener attaches — check the current state once.
+        onStateChange()
+      }
+
+      // An install already in flight from a previous page load fires no
+      // `updatefound` on this registration — watch it directly.
+      if (registration.installing !== null) watchInstalling(registration.installing)
+
+      const onUpdateFound = () => {
+        if (cancelled) return
+        const installing = registration.installing
+        if (installing === null) return
+        watchInstalling(installing)
       }
       registration.addEventListener('updatefound', onUpdateFound)
       removeListeners.push(() => registration.removeEventListener('updatefound', onUpdateFound))
