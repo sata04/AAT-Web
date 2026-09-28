@@ -203,18 +203,15 @@ function columnForTime(grid: DisplayGrid, at: number): number {
 }
 
 /**
- * O(samples + columns + total coverage), with no sorting or repeated walks
- * over the input. Every finite vertex contributes to its own bucket, including
- * backward steps. Segments are recorded at their leftmost and rightmost
- * columns, and every one that covers a column merges its interpolated values
- * into that column's envelope — keeping only the furthest-reaching segment
- * would erase parallel branches a non-monotone series draws through the same
- * pixels. Populated buckets retain their exact vertex extrema; an empty bucket
- * takes the union of the segments covering it.
+ * O(samples + brackets·log²columns + columns·log columns). Every finite vertex
+ * contributes to its own bucket, including backward steps, and every segment
+ * covering an empty column merges its interpolated value into that column's
+ * envelope — keeping only the furthest-reaching segment would erase parallel
+ * branches a non-monotone series draws through the same pixels. Populated
+ * buckets retain their exact vertex extrema.
  */
 function bucketUnorderedSamples(grid: DisplayGrid, series: SeriesWindow, y: Float64Array): DisplaySeries {
-  const starts: (ColumnBracket[] | undefined)[] = new Array(grid.columns)
-  const ends: (ColumnBracket[] | undefined)[] = new Array(grid.columns)
+  const brackets: ColumnBracket[] = []
   let counted = 0
   let previous: { at: number; value: number } | undefined
   for (let index = 0; index < series.length; index++) {
@@ -235,37 +232,218 @@ function bucketUnorderedSamples(grid: DisplayGrid, series: SeriesWindow, y: Floa
         previous.at < at
           ? { x0: previous.at, v0: previous.value, x1: at, v1: value }
           : { x0: at, v0: value, x1: previous.at, v1: previous.value }
-      if (bracket.x1 >= grid.xMin && bracket.x0 <= grid.xMax) {
-        const start = columnForTime(grid, bracket.x0)
-        const end = columnForTime(grid, Math.min(bracket.x1, grid.xMax))
-        const bucket = starts[start] ?? []
-        if (starts[start] === undefined) starts[start] = bucket
-        bucket.push(bracket)
-        if (end > start) {
-          const departures = ends[end] ?? []
-          if (ends[end] === undefined) ends[end] = departures
-          departures.push(bracket)
-        }
-      }
+      if (bracket.x1 >= grid.xMin && bracket.x0 <= grid.xMax) brackets.push(bracket)
     }
     previous = { at, value }
   }
 
-  const covering = new Set<ColumnBracket>()
-  for (let column = 0; column < grid.columns; column++) {
-    const starters = starts[column]
-    if (starters !== undefined) for (const bracket of starters) covering.add(bracket)
-    // Populated buckets keep their exact vertex extrema; an empty bucket takes
-    // the union of every segment covering it.
-    if (Number.isNaN(y[column * 2])) {
-      for (const bracket of covering) mergeColumnBracket(grid, column, y, bracket)
-    }
-    // A bracket expiring here still covers the part of this column before its
-    // end, so it only leaves the set after contributing to the column.
-    const expiring = ends[column]
-    if (expiring !== undefined) for (const bracket of expiring) covering.delete(bracket)
-  }
+  if (brackets.length > 0) drawSegmentEnvelopes(grid, y, brackets)
   return { [DISPLAY_SERIES]: true, y, grid, sourceLength: counted }
+}
+
+/** The x a bracket's drawn segment evaluates to — the merge formula exactly. */
+function bracketValue(bracket: ColumnBracket, at: number): number {
+  return bracket.v0 + ((at - bracket.x0) / (bracket.x1 - bracket.x0)) * (bracket.v1 - bracket.v0)
+}
+
+/** First grid position at or after `x`, or `xs.length` when there is none. */
+function firstSlotAtOrAfter(xs: Float64Array, x: number): number {
+  let lower = 0
+  let upper = xs.length
+  while (lower < upper) {
+    const mid = (lower + upper) >>> 1
+    if ((xs[mid] as number) < x) lower = mid + 1
+    else upper = mid
+  }
+  return lower
+}
+
+/** Last grid position at or before `x`, or -1 when there is none. */
+function lastSlotAtOrBefore(xs: Float64Array, x: number): number {
+  let lower = 0
+  let upper = xs.length
+  while (lower < upper) {
+    const mid = (lower + upper) >>> 1
+    if ((xs[mid] as number) <= x) lower = mid + 1
+    else upper = mid
+  }
+  return lower - 1
+}
+
+/**
+ * Whether `candidate` wins the envelope comparison at this position: the lower
+ * envelope keeps the smaller drawn value, the upper envelope the larger.
+ */
+function preferValue(candidate: number, holder: number, upper: boolean): boolean {
+  return upper ? candidate > holder : candidate < holder
+}
+
+/**
+ * Insert one segment into an envelope tree over the column domain.
+ *
+ * Each tree is a Li Chao structure indexed by column: a node holds the segment
+ * winning its representative position, and a query reads the best value along
+ * the root-to-leaf path. The two parities live in separate trees because the
+ * lower slot keeps the minimum and the upper slot the maximum — and because
+ * each parity maps a column to a different x position in `grid.x`.
+ *
+ * The segment is only inserted into nodes its column range fully covers, so
+ * comparisons always evaluate inside its span: neither a dropout nor an
+ * unordered timestamp permits extrapolation, matching the merge's skip.
+ */
+function insertBracket(
+  tree: Int32Array,
+  brackets: ColumnBracket[],
+  id: number,
+  node: number,
+  left: number,
+  right: number,
+  lo: number,
+  hi: number,
+  xAt: (column: number) => number,
+  upper: boolean,
+): void {
+  if (right < lo || left > hi || left > right) return
+  const mid = (left + right) >> 1
+  if (lo <= left && right <= hi) {
+    let candidate = id
+    let current = node
+    let l = left
+    let r = right
+    for (;;) {
+      const centre = (l + r) >> 1
+      const holder = tree[current] as number
+      if (holder < 0) {
+        tree[current] = candidate
+        return
+      }
+      const xCentre = xAt(centre)
+      if (
+        preferValue(
+          bracketValue(brackets[candidate] as ColumnBracket, xCentre),
+          bracketValue(brackets[holder] as ColumnBracket, xCentre),
+          upper,
+        )
+      ) {
+        tree[current] = candidate
+        candidate = holder
+      }
+      if (l === r) return
+      const holderId = tree[current] as number
+      const xLeft = xAt(l)
+      const xRight = xAt(r)
+      if (
+        preferValue(
+          bracketValue(brackets[candidate] as ColumnBracket, xLeft),
+          bracketValue(brackets[holderId] as ColumnBracket, xLeft),
+          upper,
+        )
+      ) {
+        r = centre
+        current *= 2
+      } else if (
+        preferValue(
+          bracketValue(brackets[candidate] as ColumnBracket, xRight),
+          bracketValue(brackets[holderId] as ColumnBracket, xRight),
+          upper,
+        )
+      ) {
+        l = centre + 1
+        current = current * 2 + 1
+      } else return
+    }
+  }
+  insertBracket(tree, brackets, id, node * 2, left, mid, lo, hi, xAt, upper)
+  insertBracket(tree, brackets, id, node * 2 + 1, mid + 1, right, lo, hi, xAt, upper)
+}
+
+/** The best drawn value covering `column`, or NaN when no segment reaches it. */
+function envelopeAt(
+  tree: Int32Array,
+  brackets: ColumnBracket[],
+  column: number,
+  xAt: (column: number) => number,
+  upper: boolean,
+  columns: number,
+): number {
+  let best = Number.NaN
+  let node = 1
+  let left = 0
+  let right = columns - 1
+  for (;;) {
+    const id = tree[node] as number
+    if (id >= 0) {
+      const value = bracketValue(brackets[id] as ColumnBracket, xAt(column))
+      if (Number.isNaN(best) || preferValue(value, best, upper)) best = value
+    }
+    if (left === right) return best
+    const mid = (left + right) >> 1
+    if (column <= mid) {
+      node *= 2
+      right = mid
+    } else {
+      node = node * 2 + 1
+      left = mid + 1
+    }
+  }
+}
+
+/**
+ * Merge every segment's interpolated value into the empty columns it covers.
+ *
+ * A Li Chao envelope tree per slot parity answers "the lowest drawn value at
+ * this position" (even slots) and "the highest" (odd slots) in O(log columns),
+ * so a trace zigzagging across the viewport cannot turn a synchronous redraw
+ * into one pass over every covering segment per column.
+ */
+function drawSegmentEnvelopes(grid: DisplayGrid, y: Float64Array, brackets: ColumnBracket[]): void {
+  const columns = grid.columns
+  const lower = new Int32Array(columns * 4).fill(-1)
+  const upper = new Int32Array(columns * 4).fill(-1)
+  const xs = grid.x
+  const xAtLower = (column: number) => xs[column * 2] as number
+  const xAtUpper = (column: number) => xs[column * 2 + 1] as number
+  for (let id = 0; id < brackets.length; id++) {
+    const bracket = brackets[id] as ColumnBracket
+    // The slot positions the segment's span actually covers — its columns are
+    // derived per parity from this interval rather than from the column range
+    // of its endpoints, so positions outside the span stay untouched.
+    const lo = firstSlotAtOrAfter(xs, bracket.x0)
+    const hi = lastSlotAtOrBefore(xs, bracket.x1)
+    if (lo > hi) continue
+    insertBracket(
+      lower,
+      brackets,
+      id,
+      1,
+      0,
+      columns - 1,
+      Math.ceil(lo / 2),
+      Math.floor(hi / 2),
+      xAtLower,
+      false,
+    )
+    insertBracket(
+      upper,
+      brackets,
+      id,
+      1,
+      0,
+      columns - 1,
+      Math.ceil((lo - 1) / 2),
+      Math.floor((hi - 1) / 2),
+      xAtUpper,
+      true,
+    )
+  }
+  for (let column = 0; column < columns; column++) {
+    const slot = column * 2
+    if (!Number.isNaN(y[slot] as number)) continue
+    const min = envelopeAt(lower, brackets, column, xAtLower, false, columns)
+    if (!Number.isNaN(min)) y[slot] = min
+    const max = envelopeAt(upper, brackets, column, xAtUpper, true, columns)
+    if (!Number.isNaN(max)) y[slot + 1] = max
+  }
 }
 
 /** A slice of one sensor's series, bounded by the shorter of its two arrays. */
@@ -330,43 +508,6 @@ interface ColumnBracket {
   readonly x1: number
   readonly v0: number
   readonly v1: number
-}
-
-/**
- * Merge one bracket's interpolated values into a column's envelope — the lower
- * position keeps the minimum, the upper keeps the maximum, across every
- * covering segment. With exactly one covering segment this is identical to
- * {@link interpolateColumn}; extra segments only widen the envelope where they
- * genuinely reach. Positions outside the bracket's span are untouched; neither
- * an explicit dropout nor an unordered timestamp permits extrapolation.
- */
-function mergeColumnBracket(
-  grid: DisplayGrid,
-  column: number,
-  y: Float64Array,
-  bracket: ColumnBracket,
-): void {
-  const denominator = bracket.x1 - bracket.x0
-  if (
-    !Number.isFinite(bracket.x0) ||
-    !Number.isFinite(bracket.x1) ||
-    !Number.isFinite(bracket.v0) ||
-    !Number.isFinite(bracket.v1) ||
-    denominator <= 0
-  )
-    return
-  for (const slot of [0, 1] as const) {
-    const index = column * 2 + slot
-    const at = grid.x[index] as number
-    if (at < bracket.x0 || at > bracket.x1) continue
-    const value = bracket.v0 + ((at - bracket.x0) / denominator) * (bracket.v1 - bracket.v0)
-    const current = y[index] as number
-    y[index] = Number.isNaN(current)
-      ? value
-      : slot === 0
-        ? Math.min(current, value)
-        : Math.max(current, value)
-  }
 }
 
 /**
