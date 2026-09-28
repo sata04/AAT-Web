@@ -244,17 +244,14 @@ export function parseCsvText(text: string): CsvTable {
   if (delimiter !== ',') {
     const alternativeRecords = normaliseRecords(source, delimiter)
     const alternative = Papa.parse<string[]>(alternativeRecords, { ...options, delimiter })
-    const fullAlternativeRows = alternative.data
-      .slice(1)
-      .every((row) => row.length === alternative.data[0]?.length)
     // A one-column comma header supplies no competing layout: keep the
     // alternative's errors so a malformed TSV cannot become a one-column CSV.
     // Otherwise require both positive header evidence and a clean alternative.
+    // Short alternative rows are fine — pandas pads them like short CSV rows.
     if (
       (comma.data[0]?.length ?? 0) < 2 ||
       (hasCleanLayout(alternative) &&
-        (!hasUnquotedHeaderComma(records, delimiter) ||
-          (hasOnlySingleFieldBody(comma) && fullAlternativeRows)))
+        (!hasUnquotedHeaderComma(records, delimiter) || hasOnlySingleFieldBody(comma)))
     ) {
       parsed = alternative
     }

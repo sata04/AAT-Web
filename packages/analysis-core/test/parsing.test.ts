@@ -186,6 +186,19 @@ describe('parseCsvText', () => {
     expect(table.column('note,unit')?.cells).toEqual(['plain', 'text'])
   })
 
+  it.each(['\t', ';', '|'])(
+    'pads short %j records instead of falling back to a comma layout',
+    (delimiter) => {
+      // pandas pads the short record's trailing field; it does not reinterpret
+      // the file as comma-separated because of the header's lone comma.
+      const table = parseCsvText(
+        `t${delimiter}a${delimiter}note,unit\n0${delimiter}1${delimiter}plain\n1${delimiter}2\n`,
+      )
+      expect(table.columnNames).toEqual(['t', 'a', 'note,unit'])
+      expect(table.column('note,unit')?.cells).toEqual(['plain', ''])
+    },
+  )
+
   it.each([
     ['quotes', 't,a,n|o|t|e\n0,1,"p|q|r|s\n1,2,p|q|r|s\n'],
     ['width after an implicit index', 't,a,n|o|t|e\nr0,0,1,p|q|r|s\nr1,1,2,3,p|q|r|s\n'],
