@@ -632,7 +632,11 @@ textarea {
 }
 
 .plot-frame__heading {
-  flex-shrink: 0;
+  /* Title and legend wrap unboundedly; the heading may shrink and scroll so a
+     long name can never crowd the chart out of a fixed-height frame. */
+  flex-shrink: 1;
+  min-height: 0;
+  overflow-y: auto;
   padding: var(--space-sm) var(--space-md) var(--space-2xs);
 }
 

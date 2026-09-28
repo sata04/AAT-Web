@@ -223,16 +223,18 @@ function pngCanvas(width = 600, pixelRatio = 1) {
   source.height = 300 * pixelRatio
   vi.spyOn(source, 'getBoundingClientRect').mockReturnValue({ width, height: 300 } as DOMRect)
   const text: { label: string; x: number; y: number; color: string; font: string }[] = []
-  const rectangles: { x: number; y: number; width: number; height: number; color: string }[] = []
+  const rectangles: { x: number; y: number; width: number; height: number; color: string; alpha: number }[] =
+    []
   const context = {
     font: '',
     fillStyle: '',
+    globalAlpha: 1,
     measureText: (label: string) => ({ width: label.length * 6 }),
     fillText(label: string, x: number, y: number) {
       text.push({ label, x, y, color: this.fillStyle, font: this.font })
     },
     fillRect(x: number, y: number, width: number, height: number) {
-      rectangles.push({ x, y, width, height, color: this.fillStyle })
+      rectangles.push({ x, y, width, height, color: this.fillStyle, alpha: this.globalAlpha })
     },
     scale: vi.fn(),
     drawImage: vi.fn(),
@@ -346,6 +348,13 @@ describe('identified PNG export', () => {
     const legendLines = probe.text.filter((call) => call.font.startsWith('400'))
     expect(titleLines.map((call) => call.label).join('')).toBe(title)
     expect(legendLines.map((call) => call.label).join('')).toBe(`${label}Run B`)
+    // Band swatches must keep the plot's 10% shading — an opaque square would
+    // claim a saturation the graph never shows.
+    const swatches = probe.rectangles.slice(1)
+    expect(swatches.map((call) => [call.color, call.alpha])).toEqual([
+      ['#123456', 1],
+      ['#abcdef', 0.1],
+    ])
     const plotTop = probe.context.drawImage.mock.calls[0]?.[2] as number
     expect(plotTop).toBeGreaterThan(62)
     for (const call of probe.text) {
