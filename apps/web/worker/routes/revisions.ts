@@ -656,6 +656,14 @@ revisionRoutes.put(
 
     const [existing] = await currentSource(db, run.id)
     if (existing?.sha256 === query.sha256) {
+      // A matching declared hash is not proof the body holds those bytes: a caller
+      // reusing a stale digest would otherwise receive a successful upload for a
+      // source that was never stored. Verify the bounded body before answering
+      // idempotently — the same `sha256_mismatch` the normal path reports.
+      const body = await readBoundedBody(context.req.raw.body, query.declaredBytes, 'SOURCE_TOO_LARGE')
+      if (body.sha256 !== query.sha256) {
+        throw new ApiError('INVALID_CSV', { details: { reason: 'sha256_mismatch' } })
+      }
       // Older deployments allowed duplicates. A retry also retires those surplus rows, but only
       // while this source still owns the slot; it must not remove a racing replacement.
       const retired = await db
@@ -876,9 +884,10 @@ revisionRoutes.delete('/runs/:runId/source', requireCapability('raw:delete'), as
 
   // Live rows are not the whole set that must die: a staged source uploaded but not yet
   // published already carries a tombstone, so `deleted_at IS NULL` would miss it — and its
-  // in-flight PUT would then publish a "deleted" source afterwards. Walk anything still live
-  // or still unclaimed (`settled_claim` is the once-only dead marker; a claimed row's
-  // reservation is terminal, which also fails the publisher's `ready` check).
+  // in-flight PUT would then publish a "deleted" source afterwards. Terminal rows are left
+  // out on purpose: a reservation-backed tombstone whose accounting is settled would be
+  // re-selected (and its R2 key re-deleted) on every retry, even though its cleanup belongs
+  // to the sweeper. Only rows still live, still unclaimed, or still in flight come here.
   const records = await db
     .select()
     .from(cloudObjects)
@@ -886,7 +895,13 @@ revisionRoutes.delete('/runs/:runId/source', requireCapability('raw:delete'), as
       and(
         eq(cloudObjects.runId, run.id),
         eq(cloudObjects.kind, 'source'),
-        or(isNull(cloudObjects.deletedAt), isNull(cloudObjects.settledClaim)),
+        or(
+          isNull(cloudObjects.deletedAt),
+          sql`EXISTS (SELECT 1 FROM quota_reservations res
+            WHERE res.id = ${cloudObjects.reservationId}
+              AND res.status IN ('pending', 'finalised'))`,
+          and(isNull(cloudObjects.reservationId), isNull(cloudObjects.settledClaim)),
+        ),
       ),
     )
 

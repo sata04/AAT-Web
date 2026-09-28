@@ -71,6 +71,14 @@ const PAGE_SIZE = 50
  */
 const RESERVATION_KEY_DELETE_BUDGET = 2_000
 
+/*
+ * Same budget, applied to owned cloud objects — each iteration costs several
+ * subrequests (R2 delete + accounting batch + row delete), so it is lower than
+ * the reservation-key cap. Rows past the budget cascade with the user; their
+ * keys are already in deleted_account_object_keys for the sweeper.
+ */
+const OBJECT_DELETE_BUDGET = 1_000
+
 function deletionPending(): ApiError {
   return new ApiError('FORBIDDEN', { details: { reason: ACCOUNT_DELETION_REASON } })
 }
@@ -241,8 +249,9 @@ adminRoutes.delete('/users/:userId', requireCapability('user:manage'), async (co
       .update(runs)
       .set({ deletedAt: now, updatedAt: now })
       .where(and(eq(runs.ownerUserId, targetId), isNull(runs.deletedAt))),
-    // This snapshot includes previously swept reservations. Admission closes in this same
-    // transaction, and these keys survive the user cascade even if a late PUT's handler dies.
+    // This snapshot includes previously swept reservations and every owned object. Admission
+    // closes in this same transaction, and these keys survive the user cascade even if a late
+    // PUT's handler dies or the eager cleanup below runs out of subrequest budget.
     db
       .insert(deletedAccountObjectKeys)
       .select(
@@ -254,6 +263,19 @@ adminRoutes.delete('/users/:userId', requireCapability('user:manage'), async (co
           })
           .from(quotaReservations)
           .where(and(eq(quotaReservations.userId, targetId), isNotNull(quotaReservations.r2Key))),
+      )
+      .onConflictDoNothing(),
+    db
+      .insert(deletedAccountObjectKeys)
+      .select(
+        db
+          .select({
+            r2Key: cloudObjects.r2Key,
+            userId: cloudObjects.ownerUserId,
+            lastCheckedAt: sql<Date>`0`.as('last_checked_at'),
+          })
+          .from(cloudObjects)
+          .where(eq(cloudObjects.ownerUserId, targetId)),
       )
       .onConflictDoNothing(),
   ])
@@ -269,12 +291,22 @@ adminRoutes.delete('/users/:userId', requireCapability('user:manage'), async (co
 
   // Delete the bytes before the row: the cascade would otherwise remove every record of which
   // objects existed, leaving them in R2 with nothing pointing at them and no way to find them.
+  // Bound the eager pass like the reservation pass below — every owned key is already in
+  // deleted_account_object_keys, so rows past the budget lose nothing but promptness: the
+  // sweeper drains their bytes once the owner is gone.
   const objects = await db.select().from(cloudObjects).where(eq(cloudObjects.ownerUserId, targetId))
+  let objectsEagerlyDeleted = 0
   for (const object of objects) {
+    if (objectsEagerlyDeleted >= OBJECT_DELETE_BUDGET) break
     await context.env.AAT_OBJECTS.delete(object.r2Key)
     await releaseObjectAccounting(db, object, now)
     await db.delete(cloudObjects).where(eq(cloudObjects.id, object.id))
+    objectsEagerlyDeleted++
   }
+  // Rows past the budget lose their bookkeeping with the cascade; the NOT EXISTS guard
+  // below then protects only objects a racing commit inserted after this enumeration,
+  // whose keys the same snapshot already holds for the sweeper.
+  await db.delete(cloudObjects).where(eq(cloudObjects.ownerUserId, targetId))
   // Failed uploads can retain a reservation key without an object row. Those retry records
   // also cascade with the user, so their bytes must be deleted before removing the account.
   const reservations = await db
@@ -286,10 +318,10 @@ adminRoutes.delete('/users/:userId', requireCapability('user:manage'), async (co
   // no progress — deletion would never finish. The transaction already copied every key
   // into deleted_account_object_keys, so cap this eager pass; the sweeper drains the rest
   // once the user row is gone.
-  const deletedKeys = new Set(objects.map((object) => object.r2Key))
+  const objectKeys = new Set(objects.map((object) => object.r2Key))
   const reservationKeys = new Set<string>()
   for (const reservation of reservations) {
-    if (reservation.r2Key && !deletedKeys.has(reservation.r2Key)) reservationKeys.add(reservation.r2Key)
+    if (reservation.r2Key && !objectKeys.has(reservation.r2Key)) reservationKeys.add(reservation.r2Key)
   }
   let reservationKeysDeleted = 0
   for (const r2Key of reservationKeys) {

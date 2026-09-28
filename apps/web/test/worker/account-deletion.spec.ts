@@ -258,6 +258,58 @@ describe('account deletion barrier', () => {
     expect(retained.map((row) => row.r2Key)).toHaveLength(keys)
   })
 
+  it('bounds eager object deletion and checkpoints the remainder for the sweeper', async () => {
+    const admin = await createUser({ role: 'Admin' })
+    const user = await createUser()
+    await ensureQuotaRow(db(), user.userId, 1048576)
+    // Owned objects used to be walked without a budget: an account past the
+    // subrequest allowance could never finish deletion — no checkpoint.
+    const keys = 1_100
+    await db()
+      .insert(cloudObjects)
+      .values(
+        Array.from({ length: keys }, (_, index) => ({
+          id: `obj-${index}`,
+          ownerUserId: user.userId,
+          kind: 'source' as const,
+          r2Key: `sources/${user.userId}/obj-${index}`,
+          byteSize: 1,
+          sha256: 'a'.repeat(64),
+          contentType: 'text/csv',
+          reservationId: null,
+          createdAt: new Date(0),
+        })),
+      )
+    await db()
+      .update(quotaUsage)
+      .set({ bytesUsed: keys, objectCount: keys })
+      .where(eq(quotaUsage.userId, user.userId))
+    let deletes = 0
+    const countDeletes = withBucket({
+      put: env.AAT_OBJECTS.put.bind(env.AAT_OBJECTS),
+      delete: async (...args: Parameters<R2Bucket['delete']>) => {
+        deletes += 1
+        return env.AAT_OBJECTS.delete(...args)
+      },
+    })
+    const response = await worker.fetch(
+      new Request(`${ORIGIN}/api/v1/admin/users/${user.userId}`, {
+        method: 'DELETE',
+        headers: { origin: ORIGIN, cookie: admin.cookie },
+      }),
+      countDeletes,
+      createExecutionContext(),
+    )
+    expect(response.status).toBe(200)
+    expect(deletes).toBeLessThanOrEqual(1_000)
+    expect(await db().select().from(userTable).where(eq(userTable.id, user.userId))).toHaveLength(0)
+    const retained = await db()
+      .select()
+      .from(deletedAccountObjectKeys)
+      .where(eq(deletedAccountObjectKeys.userId, user.userId))
+    expect(retained).toHaveLength(keys)
+  })
+
   it('reclaims an already-accounted legacy row without releasing its usage twice', async () => {
     const admin = await createUser({ role: 'Admin' })
     const user = await createUser()
