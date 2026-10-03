@@ -66,7 +66,8 @@ from someone silencing a real alarm.
   `0.x` minor can be breaking.
 - Majors always get a human.
 - Dependency PRs open once a week (`before 7am on monday`, Asia/Tokyo) rather than
-  per release, so one batch re-runs CI once instead of per release. OSV
+  per release, so a package with several releases in a week gets one PR and one
+  CI run (different packages still get separate PRs). OSV
   vulnerability alerts keep their own unrestricted schedule and are not delayed.
 - Weekly `lockFileMaintenance` with auto-merge, so transitive dependencies do
   not rot. Everything landing there has already passed all three pnpm gates.
