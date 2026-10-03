@@ -15,6 +15,13 @@
   // version that is outside it rather than nothing.
   internalChecksFilter: "strict",
 
+  // Open dependency PRs once a week, not as each release lands. Every branch
+  // update re-runs CI, so one Monday batch costs far fewer runner minutes than
+  // a trickle of releases. Vulnerability alerts (osvVulnerabilityAlerts below)
+  // carry their own, unrestricted schedule and still arrive immediately, and
+  // automerge is not restricted by this schedule either.
+  schedule: ["before 7am on monday"],
+
   // Transitive dependencies are refreshed weekly. Everything that lands here
   // has already passed the three pnpm gates (7-day wait, blockExoticSubdeps,
   // trustPolicy: no-downgrade), so a large batch is not a batch of unvetted

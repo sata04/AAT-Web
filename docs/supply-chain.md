@@ -65,6 +65,9 @@ from someone silencing a real alarm.
 - minor/patch auto-merge on green CI; `0.x` auto-merges patches only, since a
   `0.x` minor can be breaking.
 - Majors always get a human.
+- Dependency PRs open once a week (`before 7am on monday`, Asia/Tokyo) rather than
+  per release, so one batch re-runs CI once instead of per release. OSV
+  vulnerability alerts keep their own unrestricted schedule and are not delayed.
 - Weekly `lockFileMaintenance` with auto-merge, so transitive dependencies do
   not rot. Everything landing there has already passed all three pnpm gates.
 - **Deployment-path dependencies wait 30 days**: `wrangler`,
