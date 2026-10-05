@@ -65,16 +65,16 @@
     {
       // THE POSTER RENDERER IS A VISUAL CONTRACT.
       //
-      // Matplotlib, NumPy, the Python base image, FreeType and the font stack
-      // all change rendered pixels. A "harmless" patch bump can silently move
-      // a tick label and invalidate the compatibility guarantee that is the
-      // entire reason the container exists. These are therefore NEVER
+      // Matplotlib, NumPy, the pinned Pyodide build, FreeType and the font
+      // stack all change rendered pixels. A "harmless" patch bump can silently
+      // move a tick label and invalidate the compatibility guarantee that is
+      // the entire reason the pinned renderer exists. These are therefore NEVER
       // auto-merged, at any update type, and require visual regression review
       // (poster-renderer/tests compares against checked-in reference images).
       //
       // See docs/poster-renderer.md for the review procedure.
       description: "Poster renderer dependencies never auto-merge — they change research figures",
-      matchManagers: ["dockerfile", "pip_requirements", "pip-compile", "pep621"],
+      matchManagers: ["pip_requirements", "pip-compile", "pep621"],
       matchFileNames: ["poster-renderer/**"],
       automerge: false,
       minimumReleaseAge: "7 days",

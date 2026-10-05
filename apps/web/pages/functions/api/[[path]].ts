@@ -52,8 +52,14 @@ interface ServiceBinding {
 }
 
 interface Env {
-  /** The private `aat-api` Worker. No route, no public subdomain; reachable only from here. */
-  AAT_API: ServiceBinding
+  /**
+   * The private `aat-api` Worker. No route, no public subdomain; reachable only from here.
+   *
+   * Absent — legitimately — on a cloud-disabled deployment, where no Worker is deployed and
+   * `resolve-pages-config.mjs` emits no `services` entry. Optional rather than required so the
+   * check below compiles honestly instead of promising a binding that is not there.
+   */
+  AAT_API?: ServiceBinding
 }
 
 interface PagesContext {
@@ -62,6 +68,31 @@ interface PagesContext {
 }
 
 export async function onRequest(context: PagesContext): Promise<Response> {
+  /*
+   * No binding means this deployment has no cloud half — AAT_CLOUD_ENABLED=false, no Worker,
+   * no D1, no R2. That is a supported configuration, not a fault, and 404 is how this codebase
+   * says so: the client's gateway reads it as "local-only" and the user is shown nothing broken.
+   * It is answered without touching the catch path on purpose — a missing binding is not an
+   * error, and a 502 here would misreport an intentional posture as a failure.
+   */
+  if (context.env.AAT_API === undefined || context.env.AAT_API === null) {
+    return new Response(
+      JSON.stringify({
+        error: {
+          code: 'RESOURCE_NOT_FOUND',
+          message: 'このデプロイではクラウド機能は無効です。',
+        },
+      }),
+      {
+        status: 404,
+        headers: {
+          'content-type': 'application/json; charset=utf-8',
+          'cache-control': 'no-store',
+        },
+      },
+    )
+  }
+
   try {
     return await context.env.AAT_API.fetch(context.request)
   } catch (error) {
