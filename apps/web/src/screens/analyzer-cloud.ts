@@ -5,19 +5,14 @@
  * with no Worker, the analyzer above these lines still runs.
  */
 
-import type { AnalysisConfig } from '@aat/shared'
+import { type AnalysisConfig, parseRunFilename } from '@aat/shared'
 import { type Dispatch, type SetStateAction, useCallback, useEffect, useRef, useState } from 'react'
 import type { Dataset } from '../app/dataset.ts'
-import type { CloudOutcome, PosterFigure } from '../cloud/gateway.ts'
+import type { CloudOutcome } from '../cloud/gateway.ts'
 import type { CloudStatuses, PosterStatus } from '../cloud/status.ts'
 import { type CloudSyncResult, syncDataset } from '../cloud/sync.ts'
-import {
-  generateAutoPoster,
-  type PosterContext,
-  type PosterRequestOutcome,
-  retryAutoPoster,
-} from '../poster/requests.ts'
-import type { SessionStatus } from '../session/SessionProvider.tsx'
+import type { PosterEntry } from '../poster/entry.ts'
+import { generateAutoPoster, type PosterContext, type PosterRequestOutcome } from '../poster/requests.ts'
 
 interface CloudSyncDeps {
   /** Serializes the lanes: a stale completion must not overwrite a newer sync. */
@@ -26,7 +21,7 @@ interface CloudSyncDeps {
   setStatuses: Dispatch<SetStateAction<CloudStatuses>>
   setCloudSubject: Dispatch<SetStateAction<string | null>>
   setSyncedPoster: Dispatch<SetStateAction<PosterContext | null>>
-  startAutoPoster: (context: PosterContext, posterId: string | null) => Promise<void>
+  startAutoPoster: (context: PosterContext) => Promise<void>
 }
 
 /**
@@ -48,15 +43,11 @@ async function startAutoPosterFor(
   deps: Pick<CloudSyncDeps, 'posterPoll'>,
   setPosterStatus: (poster: PosterStatus) => void,
   context: PosterContext,
-  posterId: string | null,
 ): Promise<void> {
   deps.posterPoll.current?.abort()
   const controller = new AbortController()
   deps.posterPoll.current = controller
-  const outcome =
-    posterId === null
-      ? await generateAutoPoster(context, setPosterStatus, controller.signal)
-      : await retryAutoPoster(context, posterId, setPosterStatus, controller.signal)
+  const outcome = await generateAutoPoster(context, setPosterStatus, controller.signal)
   reportPosterOutcome(outcome, setPosterStatus)
 }
 
@@ -126,19 +117,19 @@ async function syncToCloudFor(
   deps.setStatuses((current) => ({
     ...current,
     sync: { kind: 'saved', revisionId, at: Date.now() },
-    poster: { kind: 'queued' },
+    poster: { kind: 'loading' },
   }))
 
   // Poster generation is a separate lane on purpose: it can be slow, it can
   // fail, and neither outcome touches the analysis the user already has.
-  await deps.startAutoPoster(context, null)
+  await deps.startAutoPoster(context)
 }
 
 export interface CloudSyncLane {
   cloudSubject: string | null
   syncedPoster: PosterContext | null
   syncToCloud: (dataset: Dataset, analysedWith?: AnalysisConfig) => Promise<void>
-  startAutoPoster: (context: PosterContext, posterId: string | null) => Promise<void>
+  startAutoPoster: (context: PosterContext) => Promise<void>
 }
 
 export function useCloudSync(setStatuses: Dispatch<SetStateAction<CloudStatuses>>): CloudSyncLane {
@@ -148,10 +139,10 @@ export function useCloudSync(setStatuses: Dispatch<SetStateAction<CloudStatuses>
   // local-first.
   const [syncedPoster, setSyncedPoster] = useState<PosterContext | null>(null)
   const syncGeneration = useRef(0)
-  // Aborts the poster poll when the screen goes away or a newer request
-  // starts. Polling is a read loop against the poster listing; abandoning one
-  // costs the renderer nothing, which is the point of not queueing work
-  // server-side.
+  // Aborts a superseded poster request's status writes when the screen goes
+  // away or a newer request starts. The render itself is local work —
+  // abandoning it stops nothing expensive; the guard exists so a stale request
+  // cannot keep writing to the lane.
   const posterPoll = useRef<AbortController | null>(null)
 
   useEffect(
@@ -167,8 +158,7 @@ export function useCloudSync(setStatuses: Dispatch<SetStateAction<CloudStatuses>
   )
 
   const startAutoPoster = useCallback(
-    (context: PosterContext, posterId: string | null) =>
-      startAutoPosterFor({ posterPoll }, setPosterStatus, context, posterId),
+    (context: PosterContext) => startAutoPosterFor({ posterPoll }, setPosterStatus, context),
     [setPosterStatus],
   )
   const syncToCloud = useCallback(
@@ -185,59 +175,55 @@ export function useCloudSync(setStatuses: Dispatch<SetStateAction<CloudStatuses>
 }
 
 /**
- * A poster belongs to one revision of one file, so the panel shows one only
- * while that file is the one on screen. Switching datasets does not clear the
- * stored context — coming back to the file brings its poster back with it.
+ * The context a poster is drawn under for the file on screen.
+ *
+ * A synced dataset draws (and, cloud willing, stores) against its revision;
+ * an unsynced or unsigned-in one still gets a context, because the figure is
+ * rendered locally — it just files nothing server-side. The only dataset that
+ * gets no poster is one whose filename cannot yield a run code: the run code
+ * is the figure's identity, and inventing one would misname a formal output.
  */
 export function posterContextFor(
   syncedPoster: PosterContext | null,
   active: Dataset | null,
 ): PosterContext | null {
-  if (syncedPoster === null || active === null) return null
-  return syncedPoster.dataset.name === active.name ? syncedPoster : null
+  if (active === null) return null
+  if (syncedPoster !== null && syncedPoster.dataset.name === active.name) return syncedPoster
+  const runCode = parseRunFilename(active.filename).runCode
+  if (runCode === null) return null
+  return { revisionId: null, runCode, dataset: active }
 }
 
-export function posterUnavailableReasonFor(
-  posterContext: PosterContext | null,
-  sessionStatus: SessionStatus,
-): string | null {
+export function posterUnavailableReasonFor(posterContext: PosterContext | null): string | null {
   if (posterContext !== null) return null
-  if (sessionStatus === 'unavailable') {
-    return 'この環境ではクラウド機能を利用できません。解析・グラフ・統計・書き出しはこのまま利用できます。'
-  }
-  if (sessionStatus === 'signed-out') {
-    return 'サインインすると、解析結果を保存してデスクトップ版と同じ体裁のポスター図を作成できます。解析・グラフ・統計・書き出しはサインインなしで利用できます。'
-  }
-  // Signed in, but this dataset has not been stored yet. The panel's own
-  // default sentence says so; there is nothing more specific to add.
-  return null
+  return (
+    'ファイル名からラン番号を読み取れないため、ポスター図は作成できません。' +
+    'YYMMDD_data.csv（同じ日に複数回行った場合は YYMMDDa_data.csv）の形式で保存し直してください。'
+  )
 }
 
 export function activePostersFor(
-  customPosters: readonly PosterFigure[],
+  customPosters: readonly PosterEntry[],
   posterContext: PosterContext | null,
-): PosterFigure[] {
+): PosterEntry[] {
   if (posterContext === null) return []
-  return customPosters.filter((poster) => poster.analysisRevisionId === posterContext.revisionId)
+  const revisionId = posterContext.revisionId ?? 'local'
+  return customPosters.filter((poster) => poster.analysisRevisionId === revisionId)
 }
 
 /**
  * Retry the automatic poster.
  *
- * A figure that has an id and reached `failed` goes through the retry
- * endpoint, which is conditional on it still being failed — so five presses
- * start one render. A figure with no id (the request itself was refused, or
- * the renderer shed load before a row existed) goes back through the
- * idempotent endpoint, which picks up the queued row.
+ * There is no remote render to re-attempt: a retry is the same local render
+ * plus upload the first attempt was, and the upload endpoint's unique index
+ * makes a repeat safe — an already-stored figure is read back, not drawn twice.
  */
 export function retryPosterFor(
-  statuses: CloudStatuses,
   syncedPoster: PosterContext | null,
-  startAutoPoster: (context: PosterContext, posterId: string | null) => Promise<void>,
+  startAutoPoster: (context: PosterContext) => Promise<void>,
 ): void {
   if (syncedPoster === null) return
-  const posterId = statuses.poster.kind === 'failed' ? (statuses.poster.posterId ?? null) : null
-  void startAutoPoster(syncedPoster, posterId)
+  void startAutoPoster(syncedPoster)
 }
 
 /**

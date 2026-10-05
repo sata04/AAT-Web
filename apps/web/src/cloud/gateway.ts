@@ -12,7 +12,7 @@
  * `docs/web-architecture.md`, plus Better Auth's own `/api/auth/*` prefix for
  * the one AAT-specific auth exchange (invitation redemption). Requests carry
  * credentials so Better Auth's session cookie is sent; responses are read
- * through the shared error taxonomy, so a `POSTER_BUSY` or a `QUOTA_EXCEEDED`
+ * through the shared error taxonomy, so a `RATE_LIMITED` or a `QUOTA_EXCEEDED`
  * arrives as a code the UI can react to rather than as an HTTP number.
  *
  * Every response type below was derived by reading `worker/routes/*.ts` and
@@ -67,7 +67,7 @@ export type CloudOutcome<T> =
     }
 
 /** Codes worth offering a retry for; the rest need a different action, not another try. */
-const RETRYABLE: ReadonlySet<string> = new Set(['POSTER_BUSY', 'RATE_LIMITED', 'INTERNAL'])
+const RETRYABLE: ReadonlySet<string> = new Set(['RATE_LIMITED', 'INTERNAL'])
 
 /**
  * Read the taxonomy error out of a failure body.
@@ -586,21 +586,17 @@ export function posterImageUrl(posterId: string): string {
 }
 
 /**
- * POST /api/v1/revisions/:revisionId/poster/auto — the automatic formal poster.
+ * POST /api/v1/revisions/:revisionId/poster/auto — store a locally rendered
+ * automatic poster.
  *
- * Idempotent, and idempotent *in the database*: the partial unique index
- * `poster_figures_auto_unique (analysis_revision_id, preset_version) WHERE kind
- * = 'auto'` means the claiming `INSERT ... ON CONFLICT DO NOTHING` succeeds for
- * exactly one caller. Everyone else reads back the row that already exists. So
- * a double-submit, a reload halfway through the request and the same user on
- * two devices produce one poster and one render.
- *
- * Crucially, a repeat call after the figure is `ready` — or while it is
- * `rendering`, or after it has `failed` — renders *nothing* and answers 200
- * with `created: false`. That is what makes this endpoint safe to call again
- * after a dropped connection, and it is also why a failed figure has to be
- * retried through {@link retryPoster}: a client polling this endpoint cannot
- * turn a persistent renderer fault into a render loop.
+ * The figure is drawn by the local engine, not the Worker: this call uploads
+ * the finished PNG (`pngBase64`) alongside the `spec` it was rendered from,
+ * and the Worker files the bytes under a `poster_figures` row that is born
+ * `ready`. Idempotent, and idempotent *in the database*: the partial unique
+ * index `poster_figures_auto_unique (analysis_revision_id, preset_version)
+ * WHERE kind = 'auto'` means a double-submit, a reload halfway through and the
+ * same user on two devices produce one row; repeats answer `created: false`
+ * with the existing figure.
  *
  * `spec.analysisRevisionId` MUST equal `revisionId` and `spec.posterKind` MUST
  * be `'auto'`; the Worker answers `INVALID_ANALYSIS_CONFIG` otherwise, because
@@ -611,15 +607,19 @@ export function posterImageUrl(posterId: string): string {
 export function requestAutoPoster(
   revisionId: string,
   spec: PosterPlotSpec,
+  pngBase64: string,
 ): Promise<CloudOutcome<{ poster: PosterFigure; created?: boolean }>> {
-  return request<{ poster: PosterFigure; created?: boolean }>(`/revisions/${id(revisionId)}/poster/auto`, {
-    method: 'POST',
-    ...jsonBody({ spec }),
-  })
+  // The PNG is a bulk-byte upload — the same timeout class as object moves.
+  return request<{ poster: PosterFigure; created?: boolean }>(
+    `/revisions/${id(revisionId)}/poster/auto`,
+    { method: 'POST', ...jsonBody({ spec, pngBase64 }) },
+    OBJECT_TIMEOUT_MS,
+  )
 }
 
 /**
- * POST /api/v1/revisions/:revisionId/posters — a hand-configured figure.
+ * POST /api/v1/revisions/:revisionId/posters — store a hand-configured figure
+ * rendered locally.
  *
  * Deliberately **not** idempotent, and that is the point: a researcher adjusting
  * the axis bounds and rendering again is asking for a different picture each
@@ -634,29 +634,13 @@ export function requestAutoPoster(
 export function createCustomPoster(
   revisionId: string,
   spec: PosterPlotSpec,
+  pngBase64: string,
 ): Promise<CloudOutcome<{ poster: PosterFigure }>> {
-  return request<{ poster: PosterFigure }>(`/revisions/${id(revisionId)}/posters`, {
-    method: 'POST',
-    ...jsonBody({ spec }),
-  })
-}
-
-/**
- * POST /api/v1/posters/:posterId/retry — re-attempt a figure that failed.
- *
- * The spec is sent again rather than replayed from storage, and its
- * `posterKind` must match the stored figure's. Only a `failed` or `queued`
- * figure may be claimed, and only by the request that wins the conditional
- * UPDATE, so a user pressing "retry" five times starts one render.
- */
-export function retryPoster(
-  posterId: string,
-  spec: PosterPlotSpec,
-): Promise<CloudOutcome<{ poster: PosterFigure }>> {
-  return request<{ poster: PosterFigure }>(`/posters/${id(posterId)}/retry`, {
-    method: 'POST',
-    ...jsonBody({ spec }),
-  })
+  return request<{ poster: PosterFigure }>(
+    `/revisions/${id(revisionId)}/posters`,
+    { method: 'POST', ...jsonBody({ spec, pngBase64 }) },
+    OBJECT_TIMEOUT_MS,
+  )
 }
 
 /* ------------------------------------------------------------------------- */

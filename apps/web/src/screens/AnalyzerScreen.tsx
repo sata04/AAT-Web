@@ -32,7 +32,6 @@ import {
 } from '../app/onboarding.ts'
 import { type RangeStatisticsResult, rangeResultFor } from '../app/range-statistics.ts'
 import { loadConfig } from '../app/settings.ts'
-import type { PosterFigure } from '../cloud/gateway.ts'
 import { type CloudStatuses, INITIAL_STATUSES } from '../cloud/status.ts'
 import { useTopmostDialogKeys } from '../components/Dialog.tsx'
 import { applyViewEvent, useNotices } from '../components/hooks.ts'
@@ -59,8 +58,9 @@ import {
 } from '../graph/view-mode.ts'
 import { type DemoDataset, demoCsvFile, demoFilename } from '../onboarding/demo-data.ts'
 import { type TourDriver, type TourSnapshot, type TourView, tourViewOf } from '../onboarding/tour-driver.ts'
+import type { PosterEntry } from '../poster/entry.ts'
 import type { PosterContext } from '../poster/requests.ts'
-import { type SessionStatus, useSession } from '../session/SessionProvider.tsx'
+import { useSession } from '../session/SessionProvider.tsx'
 import { type AnalyzerHint, AnalyzerView } from './AnalyzerView.tsx'
 import { analyzerActions, useAnalysisClients } from './analyzer-actions.ts'
 import {
@@ -81,7 +81,7 @@ interface AnalyzerDerived {
   rangeResult: RangeStatisticsResult | null
   posterContext: PosterContext | null
   posterUnavailableReason: string | null
-  activeCustomPosters: readonly PosterFigure[]
+  activeCustomPosters: readonly PosterEntry[]
   /** The plotted data's x extent — the tour's driver reads it to place selections. */
   dataRange: { min: number; max: number } | null
 }
@@ -95,21 +95,10 @@ function useAnalyzerDerived(input: {
   viewport: ChartViewport | null
   selection: SelectionRange | null
   syncedPoster: PosterContext | null
-  customPosters: readonly PosterFigure[]
-  sessionStatus: SessionStatus
+  customPosters: readonly PosterEntry[]
 }): AnalyzerDerived {
-  const {
-    datasets,
-    activeName,
-    mode,
-    config,
-    palette,
-    viewport,
-    selection,
-    syncedPoster,
-    customPosters,
-    sessionStatus,
-  } = input
+  const { datasets, activeName, mode, config, palette, viewport, selection, syncedPoster, customPosters } =
+    input
 
   const active = useMemo(
     () => datasets.find((dataset) => dataset.name === activeName) ?? null,
@@ -152,10 +141,7 @@ function useAnalyzerDerived(input: {
   )
 
   const posterContext = useMemo(() => posterContextFor(syncedPoster, active), [syncedPoster, active])
-  const posterUnavailableReason = useMemo(
-    () => posterUnavailableReasonFor(posterContext, sessionStatus),
-    [posterContext, sessionStatus],
-  )
+  const posterUnavailableReason = useMemo(() => posterUnavailableReasonFor(posterContext), [posterContext])
   const activeCustomPosters = useMemo(
     () => activePostersFor(customPosters, posterContext),
     [customPosters, posterContext],
@@ -194,7 +180,7 @@ export function AnalyzerScreen(): React.JSX.Element {
   const [gestureLayer, setGestureLayer] = useState<HTMLElement | null>(null)
   const [statuses, setStatuses] = useState<CloudStatuses>(INITIAL_STATUSES)
   const [settingsOpen, setSettingsOpen] = useState(false)
-  const [customPosters, setCustomPosters] = useState<PosterFigure[]>([])
+  const [customPosters, setCustomPosters] = useState<PosterEntry[]>([])
   const [onboarding, setOnboarding] = useState<OnboardingState>(loadOnboarding)
   // The first-run tour — the flag it consumes is still `welcomeSeen`, so the
   // returning researcher who answered the old welcome is not re-greeted by its
@@ -262,7 +248,6 @@ export function AnalyzerScreen(): React.JSX.Element {
     selection,
     syncedPoster,
     customPosters,
-    sessionStatus,
   })
 
   const analysisReady = statuses.analysis.kind === 'ready'
