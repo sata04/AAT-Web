@@ -1,17 +1,20 @@
 # poster-renderer
 
-The canonical formal-poster renderer for AAT Web: a small Python + Matplotlib service that turns
+The canonical formal-poster renderer for AAT Web: a Python + Matplotlib package that turns
 an already-analysed numeric series and a declarative plot specification into a PNG.
 
-It runs as a Cloudflare Container. It performs **no analysis** — every number it draws was
-computed by `packages/analysis-core` in the browser, bit-for-bit compatibly with the desktop
-application (see `docs/numerical-compatibility.md`). Its one job is to be the *only* place in AAT
+It runs inside the browser under Pyodide (CPython compiled to WASM), in a dedicated Web Worker —
+see `apps/web/src/poster/engine/`. The HTTP service and container image it used to ship as have
+been removed. It performs **no analysis** — every number it draws was computed by
+`packages/analysis-core` in the browser, bit-for-bit compatibly with the desktop application
+(see `docs/numerical-compatibility.md`). Its one job is to be the *only* place in AAT
 Web where a formal research figure is drawn, so that figure looks the same today, next year, and
 on every machine.
 
+Running the contract suite still only needs a pinned virtualenv:
+
 ```
-POST /render    application/json  ->  image/png
-GET  /health                      ->  application/json
+poster-renderer/.venv/bin/python -m pytest poster-renderer/tests
 ```
 
 ---

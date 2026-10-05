@@ -1,8 +1,9 @@
 """AAT poster renderer — the canonical formal-poster figure renderer.
 
 This package is the *only* thing in AAT Web that is allowed to draw a formal research figure.
-It runs as a Cloudflare Container (Python + Matplotlib on the Agg backend), receives an
-already-analysed, strictly validated numeric plot specification, and returns PNG bytes.
+It runs inside the browser under Pyodide — CPython compiled to WASM — in a dedicated Web Worker
+(Matplotlib on the Agg backend), receives an already-analysed, strictly validated numeric plot
+specification, and returns PNG bytes.
 
 It performs no analysis, executes no client-supplied code, reads no client-supplied path, and
 accepts no client-supplied Matplotlib configuration. Everything about how a poster *looks* is a
