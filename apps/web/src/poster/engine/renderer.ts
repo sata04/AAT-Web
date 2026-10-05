@@ -1,61 +1,128 @@
 /**
- * The local poster renderer — placeholder.
+ * Public API of the in-browser poster engine — the replacement for the poster container's
+ * `POST /render`. W2's request layer depends on these exact signatures.
  *
- * The real implementation renders `spec` with Matplotlib running on Pyodide
- * (WASM CPython) inside the browser. This stub exists so the request/UI wiring
- * is exercisable before it lands; it emits the engine's status sequence and
- * returns a tiny valid PNG instead of a figure. Everything outside this file
- * consumes only the contract below, so replacing the file replaces the engine.
+ * Nothing Pyodide-related exists until the first `renderPosterPng` call: the worker is spawned
+ * lazily, so importing this module is free and the ~26 MiB engine download only ever happens
+ * when somebody actually asks for a poster. After that first render the WASM and wheels are
+ * held by the service worker's runtime cache (`/pyodide/<version>/`, CacheFirst — the URLs are
+ * versioned, hence immutable), which is what makes repeat renders work offline.
  */
-import type { PosterPlotSpec } from '@aat/plot-spec'
 
-/**
- * Engine lifecycle, watched by the request layer for status display.
- * `loading` is the first-run runtime fetch (tens of MB); `rendering` is an
- * actual draw; `ready`/`idle` are the quiet states between them.
- */
-export interface PosterEngineStatus {
-  kind: 'idle' | 'loading' | 'ready' | 'rendering' | 'failed'
-  detail?: string
+import type { PosterPlotSpec } from '@aat/plot-spec'
+import pyodidePackage from 'pyodide/package.json'
+
+import { PosterEngineError, type PosterEngineStatus } from './engine-core.ts'
+
+export type { PosterEngineStatus }
+export { PosterEngineError }
+
+interface WorkerRenderedMessage {
+  type: 'rendered'
+  id: number
+  ok: boolean
+  png?: Uint8Array
+  kind?: 'spec' | 'engine'
+  code?: string
+  message?: string
+  field?: string | undefined
 }
 
-type Listener = (status: PosterEngineStatus) => void
+type WorkerOutbound =
+  | WorkerRenderedMessage
+  | { type: 'status'; status: PosterEngineStatus }
+  | { type: 'ready'; version: string }
 
-const listeners = new Set<Listener>()
-let current: PosterEngineStatus = { kind: 'idle' }
+let worker: Worker | null = null
+let nextRequestId = 1
+const pending = new Map<number, { resolve: (png: Uint8Array) => void; reject: (error: Error) => void }>()
 
-function emit(status: PosterEngineStatus): void {
-  current = status
+let currentStatus: PosterEngineStatus = { kind: 'idle' }
+const listeners = new Set<(status: PosterEngineStatus) => void>()
+
+/**
+ * The engine version string stamped onto stored poster records. Before the worker has booted
+ * this honestly reports only the loader version it *would* boot; once booted (the worker pushes
+ * its measured matplotlib/numpy/pillow versions on `ready`) it reports the full form, e.g.
+ * `pyodide-314.0.7/matplotlib-3.10.8/numpy-2.4.6/pillow-12.2.0`.
+ */
+let engineVersion = `pyodide-${pyodidePackage.version}`
+
+function setStatus(status: PosterEngineStatus): void {
+  currentStatus = status
   for (const listener of listeners) listener(status)
 }
 
-/** Subscribe to engine status changes; returns the unsubscribe. */
-export function onPosterEngineStatus(callback: Listener): () => void {
-  listeners.add(callback)
-  callback(current)
-  return () => listeners.delete(callback)
+function failPending(message: string): void {
+  setStatus({ kind: 'failed', detail: message })
+  for (const { reject } of pending.values()) {
+    reject(new PosterEngineError('engine', 'POSTER_ENGINE_UNAVAILABLE', message))
+  }
+  pending.clear()
 }
 
-/** Version stamped onto figures this engine produced. */
+function ensureWorker(): Worker {
+  worker ??= (() => {
+    // `new URL(..., import.meta.url)` is the form Vite recognises for bundling a module worker.
+    const spawned = new Worker(new URL('./pyodide.worker.ts', import.meta.url), { type: 'module' })
+    spawned.onmessage = (event: MessageEvent<WorkerOutbound>) => {
+      const message = event.data
+      if (message.type === 'status') {
+        setStatus(message.status)
+        return
+      }
+      if (message.type === 'ready') {
+        engineVersion = message.version
+        return
+      }
+      const entry = pending.get(message.id)
+      if (!entry) return
+      pending.delete(message.id)
+      if (message.ok && message.png) {
+        entry.resolve(message.png)
+      } else {
+        entry.reject(
+          new PosterEngineError(
+            message.kind ?? 'engine',
+            message.code ?? 'POSTER_RENDER_FAILED',
+            message.message ?? 'poster rendering failed',
+            message.field,
+          ),
+        )
+      }
+    }
+    spawned.onerror = () => failPending('poster engine worker failed')
+    spawned.onmessageerror = () => failPending('poster engine worker dropped a message')
+    return spawned
+  })()
+  return worker
+}
+
+/**
+ * Render a poster spec to PNG bytes inside the Pyodide worker.
+ *
+ * The spec is passed to the worker as a structured clone and serialised to JSON *there* — even a
+ * maximum-size spec (200k points × 4 arrays, ~8.6 MB of base64) never touches the main thread's
+ * JSON machinery. Python-side `validation.validate_spec` re-validates it regardless of what the
+ * TypeScript side already checked; a rejection comes back as `PosterEngineError` with
+ * `kind: 'spec'`, an engine fault as `kind: 'engine'`.
+ */
+export function renderPosterPng(spec: PosterPlotSpec): Promise<Uint8Array> {
+  const spawned = ensureWorker()
+  const id = nextRequestId++
+  return new Promise<Uint8Array>((resolve, reject) => {
+    pending.set(id, { resolve, reject })
+    spawned.postMessage({ type: 'render', id, spec })
+  })
+}
+
 export function posterEngineVersion(): string {
-  return 'aat-poster-engine/pyodide-stub'
+  return engineVersion
 }
 
-/** A valid 1×1 PNG, standing in for a rendered figure until the real engine lands. */
-const STUB_PNG = new Uint8Array([
-  0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44, 0x52, 0x00, 0x00,
-  0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06, 0x00, 0x00, 0x00, 0x1f, 0x15, 0xc4, 0x89, 0x00, 0x00, 0x00,
-  0x0d, 0x49, 0x44, 0x41, 0x54, 0x78, 0xda, 0x63, 0xfc, 0xcf, 0xc0, 0x50, 0x0f, 0x00, 0x04, 0x85, 0x01, 0x80,
-  0x84, 0xa9, 0x8c, 0x21, 0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4e, 0x44, 0xae, 0x42, 0x60, 0x82,
-])
-
-const delay = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms))
-
-export async function renderPosterPng(_spec: PosterPlotSpec): Promise<Uint8Array> {
-  emit({ kind: 'loading', detail: 'placeholder engine' })
-  await delay(150)
-  emit({ kind: 'rendering' })
-  await delay(150)
-  emit({ kind: 'ready' })
-  return STUB_PNG
+/** Subscribe to engine status; the current status is delivered synchronously on subscribe. */
+export function onPosterEngineStatus(callback: (status: PosterEngineStatus) => void): () => void {
+  listeners.add(callback)
+  callback(currentStatus)
+  return () => listeners.delete(callback)
 }

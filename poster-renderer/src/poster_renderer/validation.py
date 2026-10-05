@@ -1,15 +1,16 @@
 """Strict validation of an incoming poster plot spec.
 
-This is a from-scratch reimplementation of `packages/plot-spec/src/spec.ts` (Zod). The Worker has
-already validated the spec with that schema; this container validates it again anyway, because a
-container must never treat its caller as trusted. Every limit it enforces lives in
+This is a from-scratch reimplementation of `packages/plot-spec/src/spec.ts` (Zod). The app has
+already validated the spec with that schema; the renderer validates it again anyway, because the
+renderer must never treat its caller as trusted — the JS/Python bridge is still a boundary.
+Every limit it enforces lives in
 :mod:`poster_renderer.limits`, so the two implementations can be reconciled by diffing constants.
 
 Two differences from the Zod original, both deliberate:
 
-  * Zod collects every issue; this raises on the first one. The Worker's copy of the schema is
-    what produces a helpful multi-issue message for a human — by the time a request reaches the
-    container, *any* failure is a bug on the caller's side and one precise reason is enough.
+  * Zod collects every issue; this raises on the first one. The app's copy of the schema is
+    what produces a helpful multi-issue message for a human — by the time a spec reaches the
+    renderer, *any* failure is a bug on the caller's side and one precise reason is enough.
   * Error messages name the offending field and the rule it broke, and never quote the offending
     value. Nothing client-controlled is reflected back into a response or a log line.
 
