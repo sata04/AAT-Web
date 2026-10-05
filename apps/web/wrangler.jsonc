@@ -119,90 +119,28 @@
     }
   ],
 
-  /*
-   * The poster renderer container, reached through a Durable Object stub.
-   *
-   * Both of the following are cost guards, not performance tuning — see
-   * docs/cost-controls.md:
-   *
-   *  - "max_instances": 1 caps the blast radius of a render storm. AAT renders
-   *    one poster per analysis; a second instance would only ever exist because
-   *    something is looping, and paying for that loop is the failure mode this
-   *    project cannot afford. The Worker returns POSTER_BUSY as backpressure
-   *    instead of queueing work behind a scaling container fleet.
-   *
-   *  - the sleep-after timeout lives in the Durable Object class
-   *    (POSTER_RENDERER_SLEEP_AFTER_MS in worker/container/poster-renderer.ts),
-   *    because Wrangler's container schema has no sleepAfter field — it is a
-   *    property of the container class in @cloudflare/containers, which this
-   *    project does not depend on. A container that stays warm between the two
-   *    posters a researcher generates in a day is a container being billed for
-   *    a day, so it is deliberately short.
-   *
-   * "instance_type": "lite" is the smallest shape available. Matplotlib Agg
-   * rendering a 10.6x3.4in figure at 300 dpi fits comfortably.
-   *
-   * The image is referenced by its Cloudflare managed-registry path, which
-   * embeds the account id — replace the placeholder id below together with
-   * d1_databases[0].database_id. Wrangler refuses an image whose account id is
-   * not the account being deployed to, so a placeholder fails loudly instead of
-   * pulling some other account's image.
-   *
-   * CI builds and tests the image in a credential-free job and pushes it from
-   * the deploy job (see .github/workflows/deploy.yml). Wrangler does no
-   * environment-variable substitution inside this file, so the placeholder below
-   * is not filled in by the deploy step reading a variable — instead
-   * scripts/resolve-wrangler-config.mjs writes a deploy-time copy of this file
-   * with the pushed digest and the D1 id substituted, and every command that
-   * reads configuration is passed that copy with --config. This committed file
-   * stays invalid on purpose.
-   */
-  "durable_objects": {
-    "bindings": [
-      {
-        "name": "POSTER_RENDERER",
-        "class_name": "PosterRendererContainer"
-      }
-    ]
-  },
-  "migrations": [
-    {
-      "tag": "v1",
-      "new_sqlite_classes": ["PosterRendererContainer"]
-    }
-  ],
-  "containers": [
-    {
-      "class_name": "PosterRendererContainer",
-      "name": "aat-poster-renderer",
-      "image": "registry.cloudflare.com/00000000000000000000000000000000/aat-poster-renderer:latest",
-      "max_instances": 1,
-      "instance_type": "lite",
-      "rollout_step_percentage": 100
-    }
-  ],
+  // No durable_objects, migrations or containers: posters are drawn in the browser — Pyodide +
+  // Matplotlib in WASM — and POSTed back, so the Worker only validates and records uploaded PNGs.
 
   /*
    * Non-secret tunables. Anything that would identify the deployment (hostname,
    * relying-party id) is a secret instead — see "secrets" below.
    */
   "vars": {
+    /**
+     * The whole cloud API's kill switch. The literal string 'false' makes every /api/* request a
+     * 404 answered before any secret is read — so a deployment running SPA-only needs none of the
+     * values in "secrets" below set at all. Anything else, including unset, means enabled.
+     */
+    "AAT_CLOUD_ENABLED": "true",
     /** Per-user storage ceiling applied on first use. Cost guard, adjustable per user by an admin. */
     "AAT_DEFAULT_QUOTA_BYTES": "1073741824",
     /** Largest accepted analysis snapshot (gzipped). Bounds Worker memory as well as storage. */
     "AAT_MAX_SNAPSHOT_BYTES": "16777216",
     /** Largest accepted original CSV backup. */
     "AAT_MAX_SOURCE_BYTES": "33554432",
-    /** Largest accepted poster PNG returned by the renderer. */
+    /** Largest accepted poster PNG uploaded by the client. */
     "AAT_MAX_POSTER_BYTES": "8388608",
-    /**
-     * How many poster renders may be in flight across the whole deployment.
-     * Matches "max_instances": 1 above — a second concurrent render would queue
-     * inside the container and burn Worker wall-clock waiting for it.
-     */
-    "AAT_MAX_CONCURRENT_RENDERS": "1",
-    /** Seconds after which a poster stuck in 'rendering' is treated as abandoned and retryable. */
-    "AAT_RENDER_STALE_SECONDS": "300",
     /** Seconds a quota reservation may stay pending before the sweeper reclaims it. */
     "AAT_RESERVATION_TTL_SECONDS": "900"
   },
@@ -232,8 +170,8 @@
 
   /*
    * A runaway request is a runaway bill. Nothing in this Worker legitimately
-   * needs 30 s of CPU: the heavy numerical work happens in the browser, and the
-   * poster render is wall-clock time spent waiting on the container, not CPU.
+   * needs 30 s of CPU: the heavy numerical work — including poster rendering —
+   * happens in the browser, so the largest cost here is buffering an upload.
    */
   "limits": {
     "cpu_ms": 30000

@@ -37,6 +37,14 @@
  *
  * `wrangler pages dev` does NOT reproduce that swallowing — it returns the stack
  * trace — so no local run can tell you this is right. See docs/ci.md.
+ *
+ * ## No binding at all is also an answer
+ *
+ * A cloud-disabled deployment does not deploy the `aat-api` Worker, so the Service binding is
+ * not merely failing — it is absent. That case is answered 404 JSON rather than thrown: an
+ * exception would fall into the same SPA fallback as a crash, and RESOURCE_NOT_FOUND is the code
+ * the client gateway already reads as "this deployment has no cloud half" — which is exactly
+ * what this is.
  */
 
 /**
@@ -52,8 +60,11 @@ interface ServiceBinding {
 }
 
 interface Env {
-  /** The private `aat-api` Worker. No route, no public subdomain; reachable only from here. */
-  AAT_API: ServiceBinding
+  /**
+   * The private `aat-api` Worker. No route, no public subdomain; reachable only from here.
+   * Absent entirely on a cloud-disabled deployment, which never deploys the Worker.
+   */
+  AAT_API?: ServiceBinding
 }
 
 interface PagesContext {
@@ -62,6 +73,25 @@ interface PagesContext {
 }
 
 export async function onRequest(context: PagesContext): Promise<Response> {
+  // No binding means no cloud half by configuration, not by failure — see the header comment.
+  // This must be a normal Response: throwing would surface as the SPA's index.html.
+  if (!context.env?.AAT_API) {
+    return new Response(
+      JSON.stringify({
+        error: {
+          code: 'RESOURCE_NOT_FOUND',
+          message: 'このデプロイではクラウド機能は無効です。',
+        },
+      }),
+      {
+        status: 404,
+        headers: {
+          'content-type': 'application/json; charset=utf-8',
+          'cache-control': 'no-store',
+        },
+      },
+    )
+  }
   try {
     return await context.env.AAT_API.fetch(context.request)
   } catch (error) {

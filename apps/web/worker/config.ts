@@ -28,12 +28,15 @@ export interface WorkerConfig {
   rpName: string
   /** Exact origins allowed to complete an auth ceremony. Compared by equality, never by suffix. */
   trustedOrigins: readonly string[]
+  /**
+   * Whether the cloud API is on at all. `AAT_CLOUD_ENABLED === 'false'` means every /api/*
+   * request is a 404 at the fetch gate — and none of the values below is ever read.
+   */
+  cloudEnabled: boolean
   defaultQuotaBytes: number
   maxSnapshotBytes: number
   maxSourceBytes: number
   maxPosterBytes: number
-  maxConcurrentRenders: number
-  renderStaleSeconds: number
   reservationTtlSeconds: number
 }
 
@@ -120,10 +123,37 @@ export function resolveConfig(env: Env): WorkerConfig {
   const cached = CONFIG_CACHE.get(env)
   if (cached) return cached
 
+  /*
+   * The disabled deployment returns an inert config without consulting a single secret.
+   * index.ts's fetch gate answers every request 404 before any of these values can be read, so
+   * requiring them here would be backwards: the point of `AAT_CLOUD_ENABLED: 'false'` is that a
+   * deployment without the secrets still boots. Anything that is not the literal string 'false'
+   * — including unset — means enabled.
+   */
+  const cloudEnabledFlag: string | undefined = env.AAT_CLOUD_ENABLED
+  if (cloudEnabledFlag === 'false') {
+    const config: WorkerConfig = {
+      cloudEnabled: false,
+      authSecret: '',
+      authBaseUrl: '',
+      rpId: '',
+      rpName: '',
+      trustedOrigins: [],
+      defaultQuotaBytes: 0,
+      maxSnapshotBytes: 0,
+      maxSourceBytes: 0,
+      maxPosterBytes: 0,
+      reservationTtlSeconds: 0,
+    }
+    CONFIG_CACHE.set(env, config)
+    return config
+  }
+
   const rpId = requireSecret(env, 'AAT_RP_ID')
   assertValidRpId(rpId)
 
   const config: WorkerConfig = {
+    cloudEnabled: true,
     authSecret: requireSecret(env, 'BETTER_AUTH_SECRET'),
     authBaseUrl: requireSecret(env, 'BETTER_AUTH_URL').replace(/\/+$/, ''),
     rpId,
@@ -133,8 +163,6 @@ export function resolveConfig(env: Env): WorkerConfig {
     maxSnapshotBytes: requireNumber(env, 'AAT_MAX_SNAPSHOT_BYTES'),
     maxSourceBytes: requireNumber(env, 'AAT_MAX_SOURCE_BYTES'),
     maxPosterBytes: requireNumber(env, 'AAT_MAX_POSTER_BYTES'),
-    maxConcurrentRenders: requireNumber(env, 'AAT_MAX_CONCURRENT_RENDERS'),
-    renderStaleSeconds: requireNumber(env, 'AAT_RENDER_STALE_SECONDS'),
     reservationTtlSeconds: requireNumber(env, 'AAT_RESERVATION_TTL_SECONDS'),
   }
 

@@ -1,7 +1,11 @@
 /// <reference path="../../worker-configuration.d.ts" />
 
 /**
- * Poster rendering: admission control, the container call, and persistence.
+ * Poster figures: validating a client-rendered PNG and recording it.
+ *
+ * The renderer is gone. The browser draws the figure itself — Pyodide + Matplotlib in WASM — and
+ * POSTs the PNG; the Worker's job is narrowed to accepting it: decode, check it is really a PNG,
+ * store it in R2 through the quota protocol, and write the `poster_figures` row that records it.
  *
  * ## Idempotency is the database's job
  *
@@ -9,238 +13,214 @@
  * the partial unique index `poster_figures_auto_unique (analysis_revision_id, preset_version)
  * WHERE kind = 'auto'`. Exactly one caller inserts a row; everyone else gets zero rows affected
  * and reads back the row that already exists. A double-submitted request, a reload halfway
- * through, or the same user on two devices therefore produces one poster and one render — and
- * crucially, a *repeat* call after the poster is ready does not re-render, it returns the existing
- * figure.
+ * through, or the same user on two devices therefore produces one poster — and a *repeat* call
+ * after it exists uploads nothing at all.
  *
  * A client-side "have I already asked for this?" check cannot provide that. This one is a
  * constraint in SQLite, so it holds even when the client is wrong.
  *
- * ## Backpressure, not queueing
+ * ## Store before recording; unwind on failure
  *
- * There is no queue and no Workflow. When the renderer is already busy — or the circuit breaker is
- * open — the endpoint answers POSTER_BUSY and the browser retries later. Spawning work that
- * outlives the request would mean paying for container time nobody is waiting for, which is the
- * failure mode a single-container deployment cannot absorb.
+ * The figure row carries `object_id`, so the object must already exist — `cloud_objects` row
+ * claiming the key, bytes in R2, reservation finalised — before the figure is inserted. Anything
+ * that fails between the quota reservation and the figure insert unwinds the whole upload through
+ * `unwindUploadedObject`, which is idempotent against a cleanup that already ran.
+ *
+ * A `poster/auto` caller that loses the figure insert unwinds its own upload the same way. Its
+ * object key contains a fresh figure id, so the winner's bytes are never touched; the loss costs
+ * one bounded, fully reclaimed upload and nothing else.
  */
 
-import type { PosterPlotSpec } from '@aat/plot-spec'
-import { ApiError } from '@aat/shared'
-import { and, eq, gt, inArray, sql } from 'drizzle-orm'
+import { ApiError, sha256Hex } from '@aat/shared'
+import { and, eq } from 'drizzle-orm'
+import type { WorkerConfig } from '../config.ts'
 import { type Database, rowsAffected } from '../db/client.ts'
-import { posterFigures } from '../db/schema.ts'
+import { cloudObjects, posterFigures } from '../db/schema.ts'
 import { newId } from '../lib/ids.ts'
-import { getCircuitBreaker } from './flags.ts'
+import {
+  commitUploadedObject,
+  ensureQuotaRow,
+  insertObjectRowClaimingKey,
+  reserveQuota,
+  unwindUploadedObject,
+} from './quota.ts'
+import { posterKey } from './storage.ts'
 
-/** Statuses shared with @aat/plot-spec's `PosterFigureStatus`, so one vocabulary spans the system. */
-export type PosterStatus = 'queued' | 'rendering' | 'ready' | 'failed'
+const BASE64_PATTERN = /^[A-Za-z0-9+/]*={0,2}$/
+const PNG_SIGNATURE = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]
 
-export interface RenderOutcome {
-  png: Uint8Array
-  rendererVersion: string
-  presetVersion: string | null
+export interface DecodedPosterPng {
+  bytes: Uint8Array
+  sha256: string
 }
 
 /**
- * Ask the container to draw a spec.
- *
- * The Durable Object stub is addressed by a fixed name: with `max_instances: 1` there is exactly
- * one renderer, and giving every request its own object id would create a fleet of Durable Objects
- * each trying to start a container.
+ * Decode a base64 string strictly: padding, length and alphabet all checked — `atob` alone
+ * silently skips garbage, so a malformed upload must be rejected before a byte is produced.
  */
-export async function renderViaContainer(env: Env, spec: PosterPlotSpec): Promise<RenderOutcome> {
-  const stub = env.POSTER_RENDERER.get(env.POSTER_RENDERER.idFromName('poster-renderer'))
-  const response = await stub.fetch('http://renderer/render', {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify(spec),
-  })
-
-  if (response.status === 429) {
-    throw new ApiError('POSTER_BUSY', { details: { source: 'renderer' } })
+function strictBase64Decode(encoded: string): Uint8Array {
+  if (encoded.length === 0 || encoded.length % 4 !== 0 || !BASE64_PATTERN.test(encoded)) {
+    throw new ApiError('INVALID_ANALYSIS_CONFIG', { details: { reason: 'invalid_png_base64' } })
   }
-  if (!response.ok) {
-    // The renderer's error body is an internal vocabulary (see poster-renderer/errors.py). Its
-    // code is useful in a log and in `poster_figures.error_code`; it is not echoed to the client.
-    let code = 'POSTER_RENDER_FAILED'
-    try {
-      const body = (await response.json()) as { code?: unknown }
-      if (typeof body.code === 'string') code = body.code
-    } catch {
-      // Non-JSON error body; the status alone is what gets recorded.
+  const binary = atob(encoded)
+  const bytes = new Uint8Array(binary.length)
+  for (let index = 0; index < binary.length; index++) bytes[index] = binary.charCodeAt(index)
+  return bytes
+}
+
+/**
+ * Decode and validate a client-rendered PNG.
+ *
+ * Three checks, all before a byte is stored: the base64 must be strict, the decoded size must
+ * fit `maxBytes`, and the first eight bytes must be the PNG signature. The signature is the
+ * cheap proof that what was uploaded is the image the client claims it is; a browser-rendered
+ * PNG never fails it, so a failure is a malformed request rather than a rendering problem.
+ */
+export async function decodePosterPng(pngBase64: string, maxBytes: number): Promise<DecodedPosterPng> {
+  const bytes = strictBase64Decode(pngBase64)
+  if (bytes.length === 0 || bytes.length > maxBytes) {
+    throw new ApiError('REQUEST_TOO_LARGE', { details: { maxBytes } })
+  }
+  if (!PNG_SIGNATURE.every((byte, index) => bytes[index] === byte)) {
+    throw new ApiError('INVALID_ANALYSIS_CONFIG', { details: { reason: 'png_signature_mismatch' } })
+  }
+  return { bytes, sha256: await sha256Hex(bytes) }
+}
+
+/**
+ * The stored object's identity — everything `unwindUploadedObject` needs to take it back.
+ */
+export interface StoredPosterObject {
+  id: string
+  r2Key: string
+  byteSize: number
+  sha256: string
+  ownerUserId: string
+  reservationId: string
+}
+
+/**
+ * Store the uploaded PNG: reserve the quota, claim the key, write the bytes, settle.
+ *
+ * The reservation is taken against the ACTUAL byte count, which — unlike the old render path —
+ * is known before anything is written. On any failure after the reservation the partial object is
+ * unwound before the error propagates, so the caller only ever sees a committed object or an
+ * error, never a remnant.
+ */
+export async function storePosterPng(
+  db: Database,
+  bucket: R2Bucket,
+  config: WorkerConfig,
+  args: {
+    figureId: string
+    revision: { id: string; runId: string; ownerUserId: string }
+    png: DecodedPosterPng
+  },
+  now: Date = new Date(),
+): Promise<StoredPosterObject> {
+  const { figureId, revision, png } = args
+  const ownerUserId = revision.ownerUserId
+  const r2Key = posterKey(ownerUserId, revision.runId, revision.id, figureId)
+
+  await ensureQuotaRow(db, ownerUserId, config.defaultQuotaBytes, now)
+  const reservation = await reserveQuota(
+    db,
+    ownerUserId,
+    png.bytes.length,
+    'poster',
+    r2Key,
+    config.reservationTtlSeconds,
+    now,
+  )
+
+  const stored: StoredPosterObject = {
+    id: newId(),
+    r2Key,
+    // Provisional until R2 reports what it stored — corrected below before the commit.
+    byteSize: png.bytes.length,
+    sha256: png.sha256,
+    ownerUserId,
+    reservationId: reservation.id,
+  }
+
+  try {
+    // The row claims the key BEFORE the bytes are written — the same ordering as the snapshot
+    // path — so a contender for the key fails its insert rather than its put, and can never leave
+    // its bytes under the winner's checksum.
+    await insertObjectRowClaimingKey(
+      db,
+      r2Key,
+      {
+        id: stored.id,
+        ownerUserId,
+        kind: 'poster',
+        r2Key,
+        byteSize: stored.byteSize,
+        sha256: stored.sha256,
+        contentType: 'image/png',
+        originalFilename: null,
+        runId: revision.runId,
+        analysisRevisionId: revision.id,
+        reservationId: reservation.id,
+        createdAt: now,
+      },
+      now,
+    )
+
+    const put = await bucket.put(r2Key, png.bytes as ArrayBufferView, {
+      httpMetadata: { contentType: 'image/png' },
+      sha256: stored.sha256,
+      customMetadata: { revisionId: revision.id, posterId: figureId, ownerUserId },
+    })
+    const actualBytes = put?.size ?? png.bytes.length
+    if (actualBytes !== stored.byteSize) {
+      await db.update(cloudObjects).set({ byteSize: actualBytes }).where(eq(cloudObjects.id, stored.id))
+      stored.byteSize = actualBytes
     }
-    throw new ApiError('POSTER_RENDER_FAILED', {
-      details: { rendererStatus: response.status },
-      cause: new Error(`renderer responded ${response.status} ${code}`),
-    })
-  }
 
-  const png = new Uint8Array(await response.arrayBuffer())
-  return {
-    png,
-    rendererVersion: response.headers.get('x-poster-renderer-version') ?? 'unknown',
-    presetVersion: response.headers.get('x-poster-preset-version'),
+    await commitUploadedObject(
+      db,
+      bucket,
+      { id: stored.id, r2Key, ownerUserId, byteSize: actualBytes },
+      reservation,
+      revision.runId,
+      now,
+    )
+    return stored
+  } catch (error) {
+    // Cleanup failure must not replace the error the request actually died of — a remnant it
+    // leaves is reclaimable by the sweeper.
+    await unwindUploadedObject(db, bucket, stored, now).catch(() => {})
+    throw error
   }
 }
 
-/**
- * Refuse to start a render when one is already in flight or the breaker is open.
- *
- * "In flight" counts rows in `rendering` whose `startedAt` is recent. A row left behind by a
- * Worker that was evicted mid-render would otherwise block every future render forever, so
- * anything older than `staleSeconds` is not counted — and is separately reclaimable by
- * {@link takeOverStaleRender}.
- */
-export async function assertRenderCapacity(
-  db: Database,
-  maxConcurrent: number,
-  staleSeconds: number,
-  now: Date = new Date(),
-): Promise<void> {
-  const breaker = await getCircuitBreaker(db)
-  if (breaker.open) {
-    throw new ApiError('POSTER_BUSY', { details: { reason: 'renderer_disabled' } })
-  }
-
-  const staleBefore = new Date(now.getTime() - staleSeconds * 1000)
-  const [row] = await db
-    .select({ count: sql<number>`count(*)` })
+/** The existing automatic figure for (revision, preset version), if one has been recorded. */
+export async function findAutoPosterFigure(db: Database, revisionId: string, presetVersion: string) {
+  const [figure] = await db
+    .select()
     .from(posterFigures)
-    .where(and(eq(posterFigures.status, 'rendering'), gt(posterFigures.startedAt, staleBefore)))
-
-  if ((row?.count ?? 0) >= maxConcurrent) {
-    throw new ApiError('POSTER_BUSY', { details: { reason: 'renderer_at_capacity' } })
-  }
-}
-
-export interface RenderClaimOptions {
-  /**
-   * Render slots. The claim refuses atomically while this many non-stale renders exist — the
-   * count check inside the UPDATE's WHERE is what makes the limit hold under concurrency,
-   * where an earlier assertRenderCapacity only makes the common case fail fast.
-   */
-  maxConcurrent: number
-  /** How old a render may be before it stops counting as live — the stale-claim threshold. */
-  staleSeconds: number
-  /**
-   * The spec about to be drawn. A retry may carry a different spec than the figure was inserted
-   * with, so the claim records it: `specHash` must always name the spec that produced the PNG.
-   */
-  spec?: { specHash: string; presetVersion: string }
-}
-
-/** Render slots still occupied — a self-subquery usable inside an UPDATE's WHERE clause. */
-function liveRenderCount(staleBeforeSeconds: number) {
-  return sql<number>`(select count(*) from ${posterFigures} where ${posterFigures.status} = 'rendering' and ${posterFigures.startedAt} > ${staleBeforeSeconds})`
+    .where(
+      and(
+        eq(posterFigures.analysisRevisionId, revisionId),
+        eq(posterFigures.presetVersion, presetVersion),
+        eq(posterFigures.kind, 'auto'),
+      ),
+    )
+    .limit(1)
+  return figure
 }
 
 /**
- * Move a figure into `rendering`, but only from a status it may legally leave.
+ * Insert the `poster_figures` row that records a committed upload.
  *
- * Conditional on the current status, so two requests that both read `queued` cannot both start a
- * render: one transitions, the other sees zero rows affected and backs off. The capacity clause
- * rides inside the same UPDATE, so two requests that both saw a free slot cannot both claim the
- * last one either.
+ * Returns the rows written: 0 means a concurrent request already holds the
+ * (revision, preset_version) auto slot — the caller unwinds its own upload and reads back theirs.
  */
-export async function claimForRender(
+export async function insertPosterFigure(
   db: Database,
-  posterId: string,
-  fromStatuses: readonly PosterStatus[],
-  options: RenderClaimOptions,
-  now: Date = new Date(),
-): Promise<string | null> {
-  const staleBefore = Math.floor((now.getTime() - options.staleSeconds * 1000) / 1000)
-  // The attempt token makes 'stale' a soft handoff rather than a duplicate ownership: a
-  // superseded attempt that eventually finishes cannot markRendered under the new token, so the
-  // row's specHash and PNG always come from the same attempt.
-  const attempt = newId()
-  const result = await db
-    .update(posterFigures)
-    .set({
-      status: 'rendering',
-      startedAt: now,
-      updatedAt: now,
-      attemptCount: sql`${posterFigures.attemptCount} + 1`,
-      renderAttempt: attempt,
-      errorCode: null,
-      ...(options.spec === undefined
-        ? {}
-        : { specHash: options.spec.specHash, presetVersion: options.spec.presetVersion }),
-    })
-    .where(
-      and(
-        eq(posterFigures.id, posterId),
-        inArray(posterFigures.status, [...fromStatuses]),
-        sql`${liveRenderCount(staleBefore)} < ${options.maxConcurrent}`,
-      ),
-    )
-  return rowsAffected(result) === 1 ? attempt : null
-}
-
-/** Reclaim a render that has been in `rendering` past the stale threshold. */
-export async function takeOverStaleRender(
-  db: Database,
-  posterId: string,
-  options: RenderClaimOptions,
-  now: Date = new Date(),
-): Promise<string | null> {
-  const staleBefore = Math.floor((now.getTime() - options.staleSeconds * 1000) / 1000)
-  const attempt = newId()
-  const result = await db
-    .update(posterFigures)
-    .set({
-      status: 'rendering',
-      startedAt: now,
-      updatedAt: now,
-      attemptCount: sql`${posterFigures.attemptCount} + 1`,
-      renderAttempt: attempt,
-      ...(options.spec === undefined
-        ? {}
-        : { specHash: options.spec.specHash, presetVersion: options.spec.presetVersion }),
-    })
-    .where(
-      and(
-        eq(posterFigures.id, posterId),
-        eq(posterFigures.status, 'rendering'),
-        // The figure being reclaimed does not count itself: its own started_at is at or below
-        // the stale bound, and the capacity subquery counts only strictly-newer renders.
-        sql`${posterFigures.startedAt} <= ${staleBefore}`,
-        sql`${liveRenderCount(staleBefore)} < ${options.maxConcurrent}`,
-      ),
-    )
-  return rowsAffected(result) === 1 ? attempt : null
-}
-
-/**
- * Publish a finished render — but only if `attempt` still owns the figure. A stale-render
- * takeover hands the row to a new attempt while the old render can still be in flight; the token
- * gate is what stops that old render from publishing its PNG under the new attempt's specHash.
- * Returns whether the transition ran.
- */
-export async function markRendered(
-  db: Database,
-  posterId: string,
-  objectId: string,
-  rendererVersion: string,
-  attempt: string,
-  now: Date = new Date(),
-): Promise<boolean> {
-  const result = await db
-    .update(posterFigures)
-    .set({ status: 'ready', objectId, rendererVersion, completedAt: now, updatedAt: now, errorCode: null })
-    .where(and(eq(posterFigures.id, posterId), eq(posterFigures.renderAttempt, attempt)))
-  return rowsAffected(result) === 1
-}
-
-export async function markFailed(
-  db: Database,
-  posterId: string,
-  errorCode: string,
-  attempt: string,
-  now: Date = new Date(),
-): Promise<void> {
-  await db
-    .update(posterFigures)
-    .set({ status: 'failed', errorCode, completedAt: now, updatedAt: now })
-    .where(and(eq(posterFigures.id, posterId), eq(posterFigures.renderAttempt, attempt)))
+  values: typeof posterFigures.$inferInsert,
+): Promise<number> {
+  const inserted = await db.insert(posterFigures).values(values).onConflictDoNothing()
+  return rowsAffected(inserted)
 }

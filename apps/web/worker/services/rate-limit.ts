@@ -33,8 +33,6 @@ export const RATE_LIMITS = {
   passkeyAuthenticate: { limit: 30, windowSeconds: 60 },
   /** Creating invitations, per admin. */
   inviteCreate: { limit: 30, windowSeconds: 60 },
-  /** Poster renders, per user — the only endpoint that costs container time. */
-  posterRender: { limit: 20, windowSeconds: 60 },
 } as const satisfies Record<string, RateLimitRule>
 
 /**
