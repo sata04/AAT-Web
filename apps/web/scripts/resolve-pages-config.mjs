@@ -176,6 +176,8 @@ writeFileSync(outputPath, `${JSON.stringify(config, null, 2)}\n`)
 // The project name is the public hostname; it is not printed.
 console.log(
   `Wrote ${outputPath}: ` +
-    (cloudEnabled ? `binding ${SERVICE_BINDING} -> ${worker.name}, ` : 'no service binding (cloud disabled), ') +
+    (cloudEnabled
+      ? `binding ${SERVICE_BINDING} -> ${worker.name}, `
+      : 'no service binding (cloud disabled), ') +
     `compatibility ${worker.compatibility_date} [${worker.compatibility_flags.join(', ')}]`,
 )

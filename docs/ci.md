@@ -52,8 +52,8 @@ commit SHA, every `actions/checkout` sets `persist-credentials: false`, no
 forbidden — and no two jobs share a name.
 
 That last one is why it is a line scanner rather than a YAML parser. Merging the
-V1 branch produced a `ci.yml` with **two `e2e:` jobs**, one of which built the
-poster-renderer image and one of which did not. YAML keeps the last duplicate
+V1 branch produced a `ci.yml` with **two `e2e:` jobs** whose definitions
+differed in what the suite covered. YAML keeps the last duplicate
 key and every parser accepts it silently, so the merge could have switched off
 two end-to-end specs with no visible conflict and no failing check. By the time
 a parser has read the file, the evidence is gone.
@@ -74,8 +74,8 @@ printf 'docs/ci.md\n' | node scripts/detect-changes.mjs --files-from -
 
 The routing, in one table. `web` is lint + typecheck + the Node/DOM/workerd
 suites + build + the Worker bundle gate; `numerical` is the vendored Python
-oracle and the golden check; `poster` is the renderer suite, the container build
-and the suite again inside the image; `e2e` is Playwright against a real local
+oracle and the golden check; `poster` is the renderer pytest suite, including
+the reference-image tolerance check; `e2e` is Playwright against a real local
 stack.
 
 | change | web | numerical | poster | e2e |
@@ -95,7 +95,7 @@ stack.
 | `reference/python/**` (everything else) | | ● | | |
 | `tests/golden/**` | ● | ● | | |
 | `tests/fixtures/**` | ● | ● | | ● |
-| `poster-renderer/**` (incl. `Dockerfile`, `requirements.txt`) | | | ● | ● |
+| `poster-renderer/**` (incl. `requirements.txt`, the vendored wheels) | | | ● | ● |
 | `pnpm-lock.yaml`, `pnpm-workspace.yaml`, `tsconfig.base.json` | ● | | | ● |
 | `biome.json` | ● | | | |
 | `package.json` (root) | ● | ● | ● | ● |
@@ -109,8 +109,9 @@ over-caution and are not:
   Python renderer consumes. Changing it on one side without the other is exactly
   the failure the visual-contract tests exist to catch.
 - **`poster-renderer/**` runs the E2E suite.** `renderer-integration.spec.ts`
-  drives that image through the Worker. A change to the renderer's HTTP contract
-  breaks it and the renderer's own pytest suite would not notice.
+  drives that exact Python code inside the browser under test — the same render
+  core the Pyodide engine loads — so a change to what it draws breaks the spec
+  and the renderer's own pytest suite would not notice.
 - **`pnpm-lock.yaml` does *not* run the Python jobs.** An npm lockfile cannot
   move a Python wheel. This is the single largest saving in the table: Renovate
   opens a `lockFileMaintenance` pull request every Monday, and each one used to
@@ -148,12 +149,13 @@ once as `pull_request` — on the same tree for the same answer.
 It is gated, never trimmed. All of it runs, or none of it: `retries: 0`,
 `workers: 1`, no mocks, a real Chromium against a real `workerd` with a real
 local D1 and R2, a Chromium virtual authenticator completing real passkey
-ceremonies, and the pinned Python renderer under Docker.
+ceremonies, and the pinned Python renderer running under Pyodide inside the
+page under test.
 
-The CI job builds `aat-poster-renderer:ci` before running it. Without that image
-the harness reports the container as missing and two specs skip themselves —
-and a skip in CI is indistinguishable from a pass. Building it is how
-"the browser's plot spec reaches the real renderer" stays a claim CI can make.
+The poster specs assert what the browser itself produced: the render core runs
+in a Web Worker in the same page, and the PNG is captured off the upload
+request, so "the real renderer drew this figure" is a claim the suite can make
+without any container or fixture in the middle.
 
 The suite also typechecks itself there (`tsc -p e2e/tsconfig.json`). It is a
 separate TypeScript programme that `tsc -b` in `apps/web` does not include, and
@@ -168,12 +170,10 @@ supply-chain gates hook into, and a poisoned cache would be indistinguishable
 from a clean install. A store cache is content-addressed by integrity hash, so a
 corrupted entry is rejected rather than trusted. `--frozen-lockfile` stays.
 
-The poster-renderer container build has **no** cache, on purpose. Its whole value
-is being reproducible from pinned inputs — base image by digest, every wheel by
-hash, `--only-binary=:all:` — and a mutable cache is a mutable input to the one
-artefact where that is the point. A BuildKit cache mount is not available either:
-the Dockerfile's runtime stage has to stay byte-for-byte what `deploy.yml` ships.
-The build costs a couple of minutes and runs in parallel with everything else.
+The renderer's Python dependencies install into a plain venv with `--require-hashes`,
+so the pinned wheels are fetched and verified on every run — the same discipline
+the container build used to enforce, kept because the visual contract still rests
+on exactly those bytes.
 
 ## Deployment
 
