@@ -22,12 +22,7 @@ import { useMountedRef } from '../components/hooks.ts'
 import type { NoticeItem } from '../components/NoticeStack.tsx'
 import type { MemoSaveOutcome } from '../components/RunMemoEditor.tsx'
 import { saveBlob } from '../exporting/client.ts'
-import {
-  generateAutoPoster,
-  type PosterContext,
-  type PosterRequestOutcome,
-  retryAutoPoster,
-} from '../poster/requests.ts'
+import { generateAutoPoster, type PosterContext, type PosterRequestOutcome } from '../poster/requests.ts'
 import { downloadSourceBackup, fetchSnapshotBytes } from '../runs/api.ts'
 import { latestRevision } from '../runs/facts.ts'
 import { decodeRunMetrics, type RunMetrics } from '../runs/metrics.ts'
@@ -267,32 +262,29 @@ function posterFailureText(outcome: Extract<PosterRequestOutcome, { ok: false }>
 }
 
 /**
- * Ask for the automatic figure, or retry one that failed.
+ * Ask for the automatic figure — the first time, or again after a failure.
  *
- * Both go through `src/poster/requests.ts`, which is the analyzer's own path: it builds the spec
- * from the frozen preset and the dataset's branded arrays, submits it, and polls the *listing* —
- * never the render endpoint — until the figure settles. Sharing that rather than reimplementing
- * it is what keeps "the automatic poster of this revision" one document with one spec hash,
- * whichever screen asked for it.
+ * The figure is drawn by the local engine and its PNG uploaded, through
+ * `src/poster/requests.ts`, which is the analyzer's own path: it builds the spec
+ * from the frozen preset and the dataset's branded arrays, renders it, and lets
+ * the Worker's partial unique index deduplicate the store. Sharing that rather
+ * than reimplementing it is what keeps "the automatic poster of this revision"
+ * one document with one spec hash, whichever screen asked for it.
  *
- * Retry is offered for the automatic figure only. `POST /posters/:id/retry` needs the full spec
- * in the body, and `listPosters` returns a figure's status and hashes but not its document — so a
- * custom figure's range, size and DPI cannot be reconstructed from anything this screen holds.
- * Retrying it with invented parameters under its original id would file a different picture as
- * the same one, so the panel says to re-create it from the dialog instead.
+ * Retry is offered for the automatic figure only: a custom figure's range, size
+ * and DPI are not reconstructed from anything this screen holds, and retrying
+ * with invented parameters would file a different picture — so the panel says
+ * to re-create custom figures from the dialog instead.
  */
-export async function runAutoPosterFor(
-  deps: {
-    mounted: { current: boolean }
-    replay: ReplayState
-    run: LoadState<RunSummary>
-    notify: Notify
-    setBusy: Dispatch<SetStateAction<boolean>>
-    setAutoPosterStatus: Dispatch<SetStateAction<PosterStatus>>
-    setPosters: Dispatch<SetStateAction<readonly PosterFigure[]>>
-  },
-  posterId: string | null,
-): Promise<void> {
+export async function runAutoPosterFor(deps: {
+  mounted: { current: boolean }
+  replay: ReplayState
+  run: LoadState<RunSummary>
+  notify: Notify
+  setBusy: Dispatch<SetStateAction<boolean>>
+  setAutoPosterStatus: Dispatch<SetStateAction<PosterStatus>>
+  setPosters: Dispatch<SetStateAction<readonly PosterFigure[]>>
+}): Promise<void> {
   if (deps.replay.kind !== 'ready' || deps.run.kind !== 'ready') return
   const context: PosterContext = {
     revisionId: deps.replay.revisionId,
@@ -300,10 +292,7 @@ export async function runAutoPosterFor(
     dataset: deps.replay.replay.dataset,
   }
   deps.setBusy(true)
-  const outcome =
-    posterId === null
-      ? await generateAutoPoster(context, deps.setAutoPosterStatus)
-      : await retryAutoPoster(context, posterId, deps.setAutoPosterStatus)
+  const outcome = await generateAutoPoster(context, deps.setAutoPosterStatus)
   if (!deps.mounted.current) return
   deps.setBusy(false)
 
@@ -311,10 +300,15 @@ export async function runAutoPosterFor(
     deps.notify('error', posterFailureText(outcome))
     return
   }
-  deps.setPosters((current) => [
-    outcome.poster,
-    ...current.filter((existing) => existing.posterId !== outcome.poster.posterId),
-  ])
+  // `figure` is present iff the upload ran; a signed-in run detail always asks
+  // for it, but a refusal still leaves the rendered entry usable.
+  const figure = outcome.entry.figure
+  if (figure !== undefined) {
+    deps.setPosters((current) => [
+      figure,
+      ...current.filter((existing) => existing.posterId !== figure.posterId),
+    ])
+  }
   deps.notify('info', '自動ポスター図を生成しました。')
 }
 

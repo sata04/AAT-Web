@@ -54,7 +54,7 @@ describe('independence', () => {
   })
 
   it('never blocks the UI for cloud work', () => {
-    // A poster container starting up must not look like the application being
+    // A poster drawing or uploading must not look like the application being
     // busy — that is the specific failure this model exists to prevent.
     const busyCloud: CloudStatuses = {
       ...READY,
@@ -62,6 +62,8 @@ describe('independence', () => {
       poster: { kind: 'rendering' },
     }
     expect(blocksInteraction(busyCloud)).toBe(false)
+    expect(blocksInteraction({ ...busyCloud, poster: { kind: 'loading' } })).toBe(false)
+    expect(blocksInteraction({ ...busyCloud, poster: { kind: 'uploading' } })).toBe(false)
   })
 
   it('blocks only while the local analysis is actually running', () => {
@@ -125,5 +127,14 @@ describe('labels', () => {
 
   it('falls back to a generic label for an unknown stage rather than showing a key', () => {
     expect(analysisLabel({ kind: 'running', stage: 'future-stage', percent: 5 }).text).toBe('解析中 5%')
+  })
+
+  it('labels every poster lane state in Japanese', () => {
+    expect(posterLabel({ kind: 'unavailable' }).text).toBe('未生成')
+    expect(posterLabel({ kind: 'loading' }).text).toBe('準備中')
+    expect(posterLabel({ kind: 'rendering' }).text).toBe('生成中')
+    expect(posterLabel({ kind: 'uploading' }).text).toBe('アップロード中')
+    expect(posterLabel({ kind: 'ready', url: '/p.png' }).text).toBe('生成済み')
+    expect(posterLabel({ kind: 'failed', message: 'x', retryable: true }).text).toBe('失敗')
   })
 })

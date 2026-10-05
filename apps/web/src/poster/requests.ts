@@ -1,76 +1,83 @@
 /**
  * The poster requests the browser makes, and the rules about when it may make them.
  *
- * Two figures, two completely different lifecycles:
+ * Two figures, two different lifecycles — and both are drawn **locally** now, by
+ * the Pyodide engine in `engine/`, not by a container behind the Worker:
  *
- *  - **The automatic poster** is asked for exactly once per analysis revision, right after the
- *    snapshot is stored. It is idempotent *in the database* — a partial unique index on
- *    `(analysis_revision_id, preset_version) WHERE kind = 'auto'` — so the browser does not have to
- *    be careful, and this module does not implement a second, weaker guarantee on top of it. What
- *    it does implement is the rule that the endpoint is called from a *completed sync*, never from
- *    a React effect, a rerender, or the act of looking at a poster: `listPosters` and
+ *  - **The automatic poster** is produced once per analysis revision, right after
+ *    the snapshot is stored. It is idempotent *in the database* — a partial unique
+ *    index on `(analysis_revision_id, preset_version) WHERE kind = 'auto'` — so the
+ *    browser does not have to be careful, and this module does not implement a
+ *    second, weaker guarantee on top of it. What it does implement is the rule that
+ *    the upload is made from a *completed sync*, never from a React effect, a
+ *    rerender, or the act of looking at a poster: `listPosters` and
  *    `posterImageUrl` are reads, and reading a gallery must never start a render.
- *  - **A custom poster** is asked for when a researcher presses the button, and is deliberately not
- *    idempotent, because adjusting the axis bounds and rendering again is a request for a different
- *    picture. History is kept; nothing is overwritten.
+ *  - **A custom poster** is produced when a researcher presses the button, and is
+ *    deliberately not idempotent, because adjusting the axis bounds and rendering
+ *    again is a request for a different picture. History is kept; nothing is
+ *    overwritten.
  *
- * Both settle the same way. The Worker renders inline and normally answers with the finished
- * figure, but it may also hand back one that another tab is already rendering, so anything not yet
- * `ready` or `failed` is polled through `GET /revisions/:id/posters` — a listing, which renders
- * nothing — until it settles or the deadline passes.
+ * Rendering needs no account, no network and no Worker: with the cloud disabled or
+ * unreachable the PNG still exists and can be downloaded — the cloud copy is an
+ * optional upload of a finished local image, not the way the image comes to be.
+ * Uploads happen only when `cloudEnabled()` and the revision exists; nothing else
+ * ever calls the Worker.
  *
- * Every failure here is reported and then forgotten. None of it touches the local analysis: by the
- * time any of this runs, the numbers the researcher came for already exist on their machine.
+ * Every failure here is reported and then forgotten. None of it touches the local
+ * analysis: by the time any of this runs, the numbers the researcher came for
+ * already exist on their machine.
  */
 
 import type { PosterPlotSpec } from '@aat/plot-spec'
 import { buildAutoPosterPlotSpec, buildPosterPlotSpec, type PosterPlotSpecBuildRequest } from '@aat/plot-spec'
 import type { Dataset } from '../app/dataset.ts'
-import {
-  type CloudOutcome,
-  createCustomPoster,
-  listPosters,
-  type PosterFigure,
-  posterImageUrl,
-  requestAutoPoster,
-  retryPoster,
-} from '../cloud/gateway.ts'
+import { cloudEnabled } from '../cloud/enabled.ts'
+import { createCustomPoster, posterImageUrl, requestAutoPoster } from '../cloud/gateway.ts'
 import type { PosterStatus } from '../cloud/status.ts'
+import { onPosterEngineStatus, posterEngineVersion, renderPosterPng } from './engine/renderer.ts'
+import { entryFromRender, entryWithFigure, type PosterEntry, pngToBase64 } from './entry.ts'
 import { describePosterSpecError, type PosterSpecAdvice } from './errors.ts'
 import { posterSourceFor } from './source.ts'
 
-/** How often a figure that is still rendering is re-read. */
-const POLL_INTERVAL_MS = 2_500
-
 /**
- * How long to keep polling before giving up.
+ * The identity a poster is filed under: which revision, and which experiment it
+ * belongs to.
  *
- * A cold Python + Matplotlib container takes seconds to start and the Worker's own render deadline
- * is 60 s, so two minutes covers a cold start plus a render with room to spare. Past that, saying
- * "it did not finish, try again" is more honest than a lane that says 生成中 forever.
+ * `revisionId` is null when the analysis was never stored — signed out, offline,
+ * or a deployment with no cloud half. The poster is still drawn and downloadable;
+ * its spec records `local` as the revision and no upload is attempted.
  */
-const POLL_DEADLINE_MS = 120_000
-
-/** The identity a poster is filed under: which revision, and which experiment it belongs to. */
 export interface PosterContext {
-  revisionId: string
+  revisionId: string | null
   /** Six digits and an optional suffix letter — `spec.runCode`, and the figure's default name. */
   runCode: string
   dataset: Dataset
 }
 
 export type PosterRequestOutcome =
-  | { ok: true; poster: PosterFigure }
+  /**
+   * The figure rendered. `uploaded` says whether a copy now exists server-side;
+   * `entry` is displayable either way (its `posterId` is set iff uploaded).
+   */
+  | { ok: true; entry: PosterEntry; uploaded: boolean }
   /** The spec could not be built at all. Nothing was sent, and the advice says what to change. */
   | { ok: false; kind: 'spec'; advice: PosterSpecAdvice }
-  /** The request was made and refused, or the render did not finish. */
-  | { ok: false; kind: 'cloud'; message: string; retryable: boolean }
+  /**
+   * The request failed — the draw threw, or storing the finished PNG was
+   * refused / dropped. `entry` is present when the render itself succeeded, so
+   * a caller can still show and download the image; only the cloud copy is
+   * missing. It is null when the engine could not draw at all.
+   */
+  | { ok: false; kind: 'cloud'; entry: PosterEntry | null; message: string; retryable: boolean }
 
 /** The presentation choices a custom poster carries, on top of its range and sensors. */
 export type CustomPosterRequest = Omit<
   PosterPlotSpecBuildRequest,
   'analysisRevisionId' | 'runCode' | 'source'
 >
+
+/** `spec.analysisRevisionId` for a poster the cloud will never see. */
+const LOCAL_REVISION_ID = 'local'
 
 /* ------------------------------------------------------------------------------------------- */
 /* Building                                                                                     */
@@ -85,7 +92,7 @@ export type CustomPosterRequest = Omit<
  */
 export function buildAutoSpec(context: PosterContext): PosterPlotSpec {
   return buildAutoPosterPlotSpec({
-    analysisRevisionId: context.revisionId,
+    analysisRevisionId: context.revisionId ?? LOCAL_REVISION_ID,
     runCode: context.runCode,
     source: posterSourceFor(context.dataset),
   })
@@ -101,23 +108,98 @@ export function buildAutoSpec(context: PosterContext): PosterPlotSpec {
 export function buildCustomSpec(context: PosterContext, request: CustomPosterRequest): PosterPlotSpec {
   return buildPosterPlotSpec({
     ...request,
-    analysisRevisionId: context.revisionId,
+    analysisRevisionId: context.revisionId ?? LOCAL_REVISION_ID,
     runCode: context.runCode,
     source: posterSourceFor(context.dataset),
   })
 }
 
 /* ------------------------------------------------------------------------------------------- */
-/* Requesting                                                                                   */
+/* Rendering                                                                                    */
 /* ------------------------------------------------------------------------------------------- */
+
+/**
+ * Draw a spec locally and — only when there is a cloud to keep it — upload the
+ * finished PNG.
+ *
+ * The lane sees the engine's own lifecycle while the draw runs (`loading` on the
+ * first call, which fetches the runtime; `rendering` after that), then `uploading`
+ * for the optional store, then the settled state. An abandoned request keeps
+ * rendering — a drawn figure is cheap to keep — but stops writing statuses, so a
+ * superseded request cannot describe a figure nobody is waiting for any more.
+ */
+async function renderAndMaybeStore(
+  spec: PosterPlotSpec,
+  kind: 'auto' | 'custom',
+  context: PosterContext,
+  onStatus: (status: PosterStatus) => void,
+  signal: AbortSignal | undefined,
+): Promise<PosterRequestOutcome> {
+  const report = (status: PosterStatus) => {
+    if (!isAborted(signal)) onStatus(status)
+  }
+
+  const unsubscribe = onPosterEngineStatus((engine) => {
+    if (engine.kind === 'loading') report({ kind: 'loading' })
+    else if (engine.kind === 'rendering') report({ kind: 'rendering' })
+  })
+  let png: Uint8Array
+  try {
+    png = await renderPosterPng(spec)
+  } catch (error) {
+    const message = renderFailureMessage(error)
+    report({ kind: 'failed', message, retryable: true })
+    return { ok: false, kind: 'cloud', entry: null, message, retryable: true }
+  } finally {
+    unsubscribe()
+  }
+
+  const entry = entryFromRender({
+    png,
+    kind,
+    presetVersion: spec.posterPresetVersion,
+    rendererVersion: posterEngineVersion(),
+    analysisRevisionId: spec.analysisRevisionId,
+  })
+
+  if (!shouldUpload(context)) {
+    report({ kind: 'ready', url: entry.imageUrl })
+    return { ok: true, entry, uploaded: false }
+  }
+
+  report({ kind: 'uploading' })
+  const stored =
+    kind === 'auto'
+      ? await requestAutoPoster(context.revisionId as string, spec, pngToBase64(png))
+      : await createCustomPoster(context.revisionId as string, spec, pngToBase64(png))
+
+  if (!stored.ok) {
+    const retryable = stored.kind === 'unavailable' || stored.retryable
+    // The image exists; only its cloud copy is missing — so the failure is
+    // reported with the entry still usable.
+    report({ kind: 'failed', message: stored.message, retryable })
+    return { ok: false, kind: 'cloud', entry, message: stored.message, retryable }
+  }
+
+  const figure = stored.value.poster
+  const storedEntry = entryWithFigure(entry, figure, posterImageUrl(figure.posterId))
+  report({ kind: 'ready', url: storedEntry.imageUrl, posterId: figure.posterId })
+  return { ok: true, entry: storedEntry, uploaded: true }
+}
+
+/** Whether this context's render gets a cloud copy. */
+function shouldUpload(context: PosterContext): boolean {
+  return cloudEnabled() && context.revisionId !== null
+}
 
 /**
  * Ask for the automatic poster.
  *
- * Safe to call again after a dropped connection or a reload: the endpoint claims the figure with
- * `INSERT ... ON CONFLICT DO NOTHING`, so a repeat call reads back the existing row and renders
- * nothing — including when that row has already failed, which is why a failure is retried through
- * {@link retryAutoPoster} and not by calling this again.
+ * Safe to call again after a dropped connection or a reload: rendering again is
+ * local work, and the upload endpoint claims the figure with
+ * `INSERT ... ON CONFLICT DO NOTHING`, so a repeat stores nothing twice —
+ * including after a previous upload already succeeded, when it answers the
+ * existing row with `created: false`.
  */
 export async function generateAutoPoster(
   context: PosterContext,
@@ -130,34 +212,7 @@ export async function generateAutoPoster(
   } catch (error) {
     return { ok: false, kind: 'spec', advice: describePosterSpecError(error) }
   }
-  onStatus({ kind: 'queued' })
-  return settleRequest(context, requestAutoPoster(context.revisionId, spec), onStatus, signal)
-}
-
-/**
- * Retry the automatic poster.
- *
- * A figure that reached `failed` is re-attempted through the retry endpoint, which is conditional
- * on it still being failed or queued — so pressing the button five times starts one render. A
- * figure we never got an id for (the request itself was refused, or the renderer shed load) is
- * retried by calling the idempotent endpoint again, which picks up the queued row.
- */
-export async function retryAutoPoster(
-  context: PosterContext,
-  posterId: string | null,
-  onStatus: (status: PosterStatus) => void,
-  signal?: AbortSignal,
-): Promise<PosterRequestOutcome> {
-  if (posterId === null) return generateAutoPoster(context, onStatus, signal)
-
-  let spec: PosterPlotSpec
-  try {
-    spec = buildAutoSpec(context)
-  } catch (error) {
-    return { ok: false, kind: 'spec', advice: describePosterSpecError(error) }
-  }
-  onStatus({ kind: 'queued', posterId })
-  return settleRequest(context, retryPoster(posterId, spec), onStatus, signal)
+  return renderAndMaybeStore(spec, 'auto', context, onStatus, signal)
 }
 
 /**
@@ -178,86 +233,12 @@ export async function generateCustomPoster(
   } catch (error) {
     return { ok: false, kind: 'spec', advice: describePosterSpecError(error) }
   }
-  onStatus({ kind: 'queued' })
-  return settleRequest(context, createCustomPoster(context.revisionId, spec), onStatus, signal)
+  return renderAndMaybeStore(spec, 'custom', context, onStatus, signal)
 }
 
 /* ------------------------------------------------------------------------------------------- */
-/* Settling                                                                                     */
+/* Statuses                                                                                     */
 /* ------------------------------------------------------------------------------------------- */
-
-async function settleRequest(
-  context: PosterContext,
-  pending: Promise<CloudOutcome<{ poster: PosterFigure }>>,
-  onStatus: (status: PosterStatus) => void,
-  signal: AbortSignal | undefined,
-): Promise<PosterRequestOutcome> {
-  // An abandoned request must not keep writing to the lane. A newer request aborts the older one
-  // and immediately reports `queued`; without this guard the older one's next update would land
-  // afterwards and describe a figure nobody is waiting for any more.
-  const report = (status: PosterStatus) => {
-    if (!isAborted(signal)) onStatus(status)
-  }
-
-  const outcome = await pending
-  if (!outcome.ok) {
-    const failure = {
-      ok: false as const,
-      kind: 'cloud' as const,
-      message: outcome.message,
-      // An unreachable cloud is almost always a network that came back; the taxonomy decides for
-      // everything else, and `POSTER_BUSY` is backpressure rather than a fault.
-      retryable: outcome.kind === 'unavailable' || outcome.retryable,
-    }
-    report({ kind: 'failed', message: failure.message, retryable: failure.retryable })
-    return failure
-  }
-
-  const figure = await pollUntilSettled(context.revisionId, outcome.value.poster, report, signal)
-  report(statusFor(figure))
-
-  if (figure.status === 'ready') return { ok: true, poster: figure }
-  if (figure.status === 'failed') {
-    return { ok: false, kind: 'cloud', message: failureMessage(figure), retryable: true }
-  }
-  return {
-    ok: false,
-    kind: 'cloud',
-    message: 'ポスターの生成が時間内に終わりませんでした。しばらくしてから再試行してください。',
-    retryable: true,
-  }
-}
-
-/**
- * Re-read a figure until it is `ready` or `failed`.
- *
- * The listing endpoint is a plain read: it renders nothing, it starts nothing, and it is the only
- * way to observe a figure another request is drawing. A transient listing failure is not fatal —
- * the previous state is kept and the next tick tries again — because a poll that gives up on one
- * dropped response would report a failure the renderer never had.
- */
-async function pollUntilSettled(
-  revisionId: string,
-  initial: PosterFigure,
-  onStatus: (status: PosterStatus) => void,
-  signal: AbortSignal | undefined,
-): Promise<PosterFigure> {
-  let current = initial
-  const deadline = Date.now() + POLL_DEADLINE_MS
-
-  while (current.status !== 'ready' && current.status !== 'failed') {
-    if (isAborted(signal) || Date.now() >= deadline) return current
-    onStatus(statusFor(current))
-    await delay(POLL_INTERVAL_MS, signal)
-    if (isAborted(signal)) return current
-
-    const listed = await listPosters(revisionId)
-    if (!listed.ok) continue
-    const found = listed.value.posters.find((poster) => poster.posterId === current.posterId)
-    if (found !== undefined) current = found
-  }
-  return current
-}
 
 /**
  * Read the signal through a call rather than inline.
@@ -270,47 +251,15 @@ function isAborted(signal: AbortSignal | undefined): boolean {
   return signal?.aborted === true
 }
 
-function delay(milliseconds: number, signal: AbortSignal | undefined): Promise<void> {
-  return new Promise((resolve) => {
-    const timer = setTimeout(() => {
-      signal?.removeEventListener('abort', onAbort)
-      resolve()
-    }, milliseconds)
-    const onAbort = () => {
-      clearTimeout(timer)
-      resolve()
-    }
-    signal?.addEventListener('abort', onAbort, { once: true })
-  })
-}
-
-/** The three-lane status a figure corresponds to. */
-export function statusFor(figure: PosterFigure): PosterStatus {
-  switch (figure.status) {
-    case 'ready':
-      return { kind: 'ready', url: posterImageUrl(figure.posterId), posterId: figure.posterId }
-    case 'failed':
-      return {
-        kind: 'failed',
-        message: failureMessage(figure),
-        retryable: true,
-        posterId: figure.posterId,
-      }
-    case 'rendering':
-      return { kind: 'rendering', posterId: figure.posterId }
-    default:
-      return { kind: 'queued', posterId: figure.posterId }
-  }
-}
-
 /**
- * Why a figure failed, in Japanese.
+ * Why a local render threw, in Japanese.
  *
- * `failureCode` is the renderer's internal vocabulary — useful in a log and in the row, and not
- * something to put in front of a researcher on its own. It is appended in brackets so a support
- * question can quote it, and the sentence stands without it.
+ * The engine's own message is useful in a log and in a support question, and not
+ * something to put in front of a researcher on its own — it is appended in
+ * brackets, and the sentence stands without it.
  */
-function failureMessage(figure: PosterFigure): string {
+function renderFailureMessage(error: unknown): string {
   const base = 'ポスターの生成に失敗しました。'
-  return figure.failureCode === null ? base : `${base}（${figure.failureCode}）`
+  const detail = error instanceof Error ? error.message : String(error)
+  return detail.length === 0 ? base : `${base}（${detail}）`
 }
