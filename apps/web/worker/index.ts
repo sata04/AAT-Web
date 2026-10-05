@@ -13,9 +13,9 @@
  * The API is versioned so that a future CLI or Python client can be added without the browser and
  * that client having to move in lockstep.
  *
- * Nothing here does analysis. The browser owns the numerical pipeline (see
- * docs/web-architecture.md); this Worker owns identity, authorization, quotas, metadata and the
- * poster renderer's leash.
+ * Nothing here does analysis — or rendering. The browser owns the numerical pipeline (see
+ * docs/web-architecture.md) and draws posters itself with Pyodide + Matplotlib in WASM; this
+ * Worker owns identity, authorization, quotas, metadata, and recording the PNGs it is handed.
  */
 
 import { ApiError } from '@aat/shared'
@@ -29,8 +29,6 @@ import { meRoutes } from './routes/me.ts'
 import { posterRoutes } from './routes/posters.ts'
 import { revisionRoutes } from './routes/revisions.ts'
 import { runRoutes, workspaceRoutes } from './routes/runs.ts'
-
-export { PosterRendererContainer } from './container/poster-renderer.ts'
 
 const app = new Hono<AppEnv>()
 
@@ -182,6 +180,26 @@ app.route('/api/v1', v1)
  */
 export default {
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
+    /*
+     * The cloud-disabled deployment: `AAT_CLOUD_ENABLED: 'false'` means this Worker has no API
+     * at all. Answered here, on the raw env, rather than through resolveConfig — the point of
+     * the flag is that a deployment with no auth secrets still boots, so the gate must run before
+     * anything that could require them. Better Auth is never initialised either: getAuth is only
+     * reached inside the routes below.
+     *
+     * 404 RESOURCE_NOT_FOUND rather than a new code: the frontend gateway already reads a 404 on
+     * /api/* as "this deployment has no cloud half" and degrades to local-only, which is exactly
+     * the configuration this flag selects.
+     */
+    // `AAT_CLOUD_ENABLED` is typed as the literal this deployment's vars declare, so the flag is
+    // read through `string` — 'false' is only ever reachable by declaring a different value.
+    const cloudEnabled: string = env.AAT_CLOUD_ENABLED
+    if (cloudEnabled === 'false') {
+      return Response.json(
+        { error: new ApiError('RESOURCE_NOT_FOUND').toPayload() },
+        { status: 404, headers: { 'cache-control': 'no-store' } },
+      )
+    }
     try {
       return await app.fetch(request, env, ctx)
     } catch (error) {
