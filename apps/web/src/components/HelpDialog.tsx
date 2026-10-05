@@ -9,6 +9,7 @@
  * in step with `UPlotChart` and `SelectionOverlay` when they change.
  */
 
+import { cloudEnabled } from '../cloud/enabled.ts'
 import { Dialog } from './Dialog.tsx'
 
 export interface HelpDialogProps {
@@ -81,7 +82,9 @@ export function HelpDialog(props: HelpDialogProps): React.JSX.Element {
       </HelpSection>
       <HelpSection title="ローカルとクラウド">
         <p>
-          解析とエクスポートはすべてブラウザ内で完結し、オフラインでも動作します。サインインした場合のみ、解析結果のクラウド保存とポスター図の生成が有効になります。
+          {cloudEnabled()
+            ? '解析とエクスポートはすべてブラウザ内で完結し、オフラインでも動作します。サインインした場合のみ、解析結果のクラウド保存とポスター図の生成が有効になります。'
+            : '解析とエクスポートはすべてブラウザ内で完結し、オフラインでも動作します。このアプリはローカル専用の構成で提供されています。'}
         </p>
       </HelpSection>
     </Dialog>

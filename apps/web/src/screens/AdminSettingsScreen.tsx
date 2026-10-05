@@ -1,11 +1,11 @@
 /**
- * `/admin/settings` — the two things worth changing at runtime, and a list of what is not a setting.
+ * `/admin/settings` — the one thing worth changing at runtime, and a list of what is not a setting.
  *
  * A settings screen is where an admin console does the most damage, so this one is built from one
  * rule (stated in `src/admin/settings.ts`): a control belongs here only if a route changes it at
- * runtime *and* changing it is an operational decision rather than a deployment one. Two things
- * pass — the poster renderer's circuit breaker and a member's storage ceiling — and everything else
- * is listed as refused, with where it actually lives.
+ * runtime *and* changing it is an operational decision rather than a deployment one. One thing
+ * passes — a member's storage ceiling — and everything else is listed as refused, with where it
+ * actually lives.
  *
  * Listing the refusals is not padding. An operator who cannot find the concurrency cap should be
  * told it is a deploy-time var matched to `max_instances: 1` in `wrangler.jsonc`, not left to
@@ -20,16 +20,15 @@
  * context than the first.
  */
 
+import { DEFAULT_POSTER_PRESET_VERSION } from '@aat/plot-spec'
 import { hasCapability } from '@aat/shared'
-import { useCallback, useState } from 'react'
+import { useCallback } from 'react'
 import { formatBytes } from '../admin/format.ts'
-import { CLIENT_POSTER_PRESET_VERSION } from '../admin/renderer.ts'
 import { DEPLOY_TIME_SETTINGS, OPERATIONAL_SETTINGS, SOURCE_BACKUP_POLICY } from '../admin/settings.ts'
 import { useAdminResource } from '../admin/useAdminResource.ts'
 import { prevailingQuotaLimit } from '../admin/users.ts'
-import { fetchRendererBreaker, fetchStorageReport } from '../cloud/gateway.ts'
-import { AdminBreakerControl } from '../components/AdminBreakerControl.tsx'
-import { AdminCapabilityNotice, AdminFrame } from '../components/AdminFrame.tsx'
+import { fetchStorageReport } from '../cloud/gateway.ts'
+import { AdminFrame } from '../components/AdminFrame.tsx'
 import { AdminResourceNotice } from '../components/AdminResourceNotice.tsx'
 import { Link } from '../router/Router.tsx'
 import { useSession } from '../session/SessionProvider.tsx'
@@ -37,13 +36,7 @@ import { useSession } from '../session/SessionProvider.tsx'
 export function AdminSettingsScreen(): React.JSX.Element {
   const session = useSession()
   const canManageQuota = hasCapability(session.capabilities, 'quota:manage')
-  const [notice, setNotice] = useState<string | null>(null)
 
-  const breaker = useAdminResource(
-    useCallback(() => fetchRendererBreaker(), []),
-    'renderer',
-    canManageQuota,
-  )
   const storage = useAdminResource(
     useCallback(() => fetchStorageReport(), []),
     'storage',
@@ -58,38 +51,6 @@ export function AdminSettingsScreen(): React.JSX.Element {
       title="設定"
       description="実行中に変更できる設定はここにあるものだけです。それ以外はデプロイ時の設定で、変更にはデプロイが必要です。理由とともに下に列挙します。"
     >
-      {notice === null ? null : (
-        <div className="notice notice--error" role="alert">
-          <span className="notice__body">{notice}</span>
-          <button type="button" className="button button--flat" onClick={() => setNotice(null)}>
-            閉じる
-          </button>
-        </div>
-      )}
-
-      <section className="panel panel--framed" aria-label="ポスター生成の停止と再開">
-        <div className="panel__header">
-          <h2 className="panel__title">ポスター生成（サーキットブレーカー）</h2>
-          <Link to="/admin/renderer" className="button button--flat">
-            レンダラーの状態を見る
-          </Link>
-        </div>
-        {!canManageQuota ? <AdminCapabilityNotice capability="quota:manage" /> : null}
-        <AdminResourceNotice
-          resource={breaker.resource}
-          label="レンダラーの状態"
-          enabled={canManageQuota}
-          onRetry={breaker.reload}
-        />
-        {breaker.resource.kind === 'ready' ? (
-          <AdminBreakerControl
-            state={breaker.resource.value.circuitBreaker}
-            onChanged={(state) => breaker.set({ circuitBreaker: state })}
-            onFailure={setNotice}
-          />
-        ) : null}
-      </section>
-
       <section className="panel panel--framed" aria-label="保存容量の上限">
         <div className="panel__header">
           <h2 className="panel__title">保存容量の上限</h2>
@@ -131,7 +92,7 @@ export function AdminSettingsScreen(): React.JSX.Element {
         <dl className="admin-facts">
           <div className="admin-facts__row">
             <dt>このビルドが送信する版</dt>
-            <dd>{CLIENT_POSTER_PRESET_VERSION}</dd>
+            <dd>{DEFAULT_POSTER_PRESET_VERSION}</dd>
           </div>
           <div className="admin-facts__row">
             <dt>変更できない理由</dt>

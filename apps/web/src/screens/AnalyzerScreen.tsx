@@ -33,7 +33,7 @@ import {
 import { type RangeStatisticsResult, rangeResultFor } from '../app/range-statistics.ts'
 import { loadConfig } from '../app/settings.ts'
 import type { PosterFigure } from '../cloud/gateway.ts'
-import { type CloudStatuses, INITIAL_STATUSES } from '../cloud/status.ts'
+import { type CloudStatuses, initialCloudStatuses } from '../cloud/status.ts'
 import { useTopmostDialogKeys } from '../components/Dialog.tsx'
 import { applyViewEvent, useNotices } from '../components/hooks.ts'
 import type { ChartGeometry } from '../graph/geometry.ts'
@@ -192,7 +192,7 @@ export function AnalyzerScreen(): React.JSX.Element {
   const [geometry, setGeometry] = useState<ChartGeometry | null>(null)
   const [canvas, setCanvas] = useState<HTMLCanvasElement | null>(null)
   const [gestureLayer, setGestureLayer] = useState<HTMLElement | null>(null)
-  const [statuses, setStatuses] = useState<CloudStatuses>(INITIAL_STATUSES)
+  const [statuses, setStatuses] = useState<CloudStatuses>(initialCloudStatuses)
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [customPosters, setCustomPosters] = useState<PosterFigure[]>([])
   const [onboarding, setOnboarding] = useState<OnboardingState>(loadOnboarding)

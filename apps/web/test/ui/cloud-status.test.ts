@@ -7,16 +7,21 @@
  * look busy, and a local result is never invalidated by a cloud failure.
  */
 
-import { describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
   analysisLabel,
   blocksInteraction,
   type CloudStatuses,
   INITIAL_STATUSES,
+  initialCloudStatuses,
   posterLabel,
   retryableLanes,
   syncLabel,
 } from '../../src/cloud/status.ts'
+
+afterEach(() => {
+  vi.unstubAllEnvs()
+})
 
 const READY: CloudStatuses = {
   analysis: { kind: 'ready', fromCache: false },
@@ -29,6 +34,23 @@ describe('independence', () => {
     expect(INITIAL_STATUSES.sync.kind).toBe('local-only')
     expect(syncLabel(INITIAL_STATUSES.sync).tone).toBe('neutral')
     expect(posterLabel(INITIAL_STATUSES.poster).tone).toBe('neutral')
+  })
+
+  it('starts with the sync lane disabled — also a normal state — when the cloud is compiled out', () => {
+    vi.stubEnv('VITE_AAT_CLOUD_ENABLED', 'false')
+    const initial = initialCloudStatuses()
+    expect(initial.sync.kind).toBe('disabled')
+    // The lane is hidden rather than labelled, but if it ever is labelled the
+    // answer must stay neutral: disabled is a build fact, not a failure.
+    expect(syncLabel(initial.sync).tone).toBe('neutral')
+    expect(blocksInteraction(initial)).toBe(false)
+    expect(retryableLanes(initial)).toEqual([])
+  })
+
+  it('keeps the enabled-build default when the flag is unset or anything but the literal "false"', () => {
+    expect(initialCloudStatuses().sync.kind).toBe('local-only')
+    vi.stubEnv('VITE_AAT_CLOUD_ENABLED', 'true')
+    expect(initialCloudStatuses().sync.kind).toBe('local-only')
   })
 
   it('never blocks the UI for cloud work', () => {

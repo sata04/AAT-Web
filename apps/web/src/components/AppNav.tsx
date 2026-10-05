@@ -41,15 +41,7 @@ const BASE_ITEMS: readonly NavItem[] = [
 const ADMIN_ITEM: NavItem = {
   to: '/admin',
   label: '管理',
-  routes: [
-    'admin',
-    'admin-users',
-    'admin-invitations',
-    'admin-runs',
-    'admin-renderer',
-    'admin-audit',
-    'admin-settings',
-  ],
+  routes: ['admin', 'admin-users', 'admin-invitations', 'admin-runs', 'admin-audit', 'admin-settings'],
 }
 
 export function AppNav(): React.JSX.Element | null {

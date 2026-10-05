@@ -67,11 +67,16 @@ export function CloudStatusBar(props: CloudStatusBarProps): React.JSX.Element {
       <div className="status-lane" role="status" aria-live="polite">
         <Lane name="解析" label={analysisLabel(statuses.analysis)} />
       </div>
-      <Lane
-        name={`クラウド同期${remoteSubject}`}
-        label={syncLabel(statuses.sync)}
-        hint="サインインした場合だけ、解析結果をクラウドへ保存します。ローカル解析とは独立しています。"
-      />
+      {/* `disabled` means the cloud half was compiled out of the build: the
+          lane is not labelled "off" but simply absent — there is nothing for
+          the label to be about. */}
+      {statuses.sync.kind === 'disabled' ? null : (
+        <Lane
+          name={`クラウド同期${remoteSubject}`}
+          label={syncLabel(statuses.sync)}
+          hint="サインインした場合だけ、解析結果をクラウドへ保存します。ローカル解析とは独立しています。"
+        />
+      )}
       <Lane
         name={`ポスター図${remoteSubject}`}
         label={posterLabel(statuses.poster)}
