@@ -1,9 +1,8 @@
 /**
  * The confirmation in front of an irreversible administrative action.
  *
- * Deleting a user removes their R2 objects and then cascades every row that references them; opening
- * the circuit breaker stops poster generation for the whole deployment; lowering a quota can leave
- * an account unable to upload. None of those is undone by pressing the button again, and a plain
+ * Deleting a user removes their R2 objects and then cascades every row that references them;
+ * lowering a quota can leave an account unable to upload. None of those is undone by pressing the button again, and a plain
  * "OK / Cancel" is not a decision — it is a reflex, and a reflex is exactly what fires when a dialog
  * appears under a cursor that was already moving.
  *

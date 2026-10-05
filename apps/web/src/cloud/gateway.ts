@@ -820,29 +820,6 @@ export function setUserQuota(
   })
 }
 
-export interface CircuitBreakerState {
-  /** True when the renderer is disabled and no container call may be made. */
-  open: boolean
-  reason: string | null
-  updatedAt: string | null
-}
-
-/** GET /api/v1/admin/renderer. */
-export function fetchRendererBreaker(): Promise<CloudOutcome<{ circuitBreaker: CircuitBreakerState }>> {
-  return request<{ circuitBreaker: CircuitBreakerState }>('/admin/renderer', { method: 'GET' })
-}
-
-/** PUT /api/v1/admin/renderer — the poster renderer's kill switch. */
-export function setRendererBreaker(
-  open: boolean,
-  reason: string | null,
-): Promise<CloudOutcome<{ circuitBreaker: CircuitBreakerState }>> {
-  return request<{ circuitBreaker: CircuitBreakerState }>('/admin/renderer', {
-    method: 'PUT',
-    ...jsonBody({ open, reason }),
-  })
-}
-
 export interface AuditEntry {
   id: string
   actorUserId: string | null

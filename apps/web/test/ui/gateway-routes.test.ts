@@ -234,8 +234,6 @@ async function callEveryEndpoint(): Promise<void> {
   await gateway.revokeInvitation('inv_1')
   await gateway.fetchStorageReport()
   await gateway.setUserQuota(userId, 1024)
-  await gateway.fetchRendererBreaker()
-  await gateway.setRendererBreaker(true, 'spend guard')
   await gateway.listAuditLog({ action: 'poster.render' })
 }
 
@@ -309,7 +307,6 @@ describe('gateway paths against the Worker router', () => {
       'deleteRun',
       'fetchMe',
       'fetchMyPasskeys',
-      'fetchRendererBreaker',
       'fetchRevision',
       'fetchRun',
       'fetchStorageReport',
@@ -324,7 +321,6 @@ describe('gateway paths against the Worker router', () => {
       'requestAutoPoster',
       'retryPoster',
       'revokeInvitation',
-      'setRendererBreaker',
       'setUserQuota',
       'updateAdminUser',
       'updateRun',

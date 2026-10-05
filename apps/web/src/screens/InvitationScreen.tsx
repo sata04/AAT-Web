@@ -27,7 +27,7 @@
  */
 
 import { useEffect, useRef, useState } from 'react'
-import { authClient } from '../auth/client.ts'
+import { getAuthClient } from '../auth/client.ts'
 import { type RegistrationContext, redeemInvitation, takeInvitationToken } from '../auth/invitation.ts'
 import { describePasskeyFailure, type PasskeyFailure, supportsWebAuthn } from '../auth/webauthn.ts'
 import { ScreenFrame } from '../components/ScreenFrame.tsx'
@@ -110,7 +110,7 @@ export function InvitationScreen(props: InvitationScreenProps): React.JSX.Elemen
   const register = async (context: RegistrationContext) => {
     setFailure(null)
     setPhase({ kind: 'registering', context })
-    const result = await authClient.passkey.addPasskey({ context: context.registrationContext })
+    const result = await getAuthClient().passkey.addPasskey({ context: context.registrationContext })
     if (result.error !== null) {
       // A cancelled or failed ceremony does not spend the context — the server
       // only consumes it on a verified registration — so the user can try again

@@ -32,15 +32,9 @@ import {
   summariseStorage,
   UNAVAILABLE_METRICS,
 } from '../admin/overview.ts'
-import { presentBreaker } from '../admin/renderer.ts'
 import { useAdminResource } from '../admin/useAdminResource.ts'
 import { countByRole, countDisabled, mergeAdminUsers, recordIdLabel } from '../admin/users.ts'
-import {
-  fetchRendererBreaker,
-  fetchStorageReport,
-  listAdminUsers,
-  listInvitations,
-} from '../cloud/gateway.ts'
+import { fetchStorageReport, listAdminUsers, listInvitations } from '../cloud/gateway.ts'
 import { AdminCapabilityNotice, AdminFrame } from '../components/AdminFrame.tsx'
 import { AdminQuotaMeter } from '../components/AdminQuotaMeter.tsx'
 import { AdminResourceNotice } from '../components/AdminResourceNotice.tsx'
@@ -83,11 +77,6 @@ export function AdminOverviewScreen(): React.JSX.Element {
     useCallback(() => listInvitations({ limit: 200 }), []),
     'invitations',
     canManageInvitations,
-  )
-  const renderer = useAdminResource(
-    useCallback(() => fetchRendererBreaker(), []),
-    'renderer',
-    canManageQuota,
   )
 
   const userRows =
@@ -212,17 +201,6 @@ export function AdminOverviewScreen(): React.JSX.Element {
               <dd>
                 {invitations.resource.kind === 'ready'
                   ? `${formatCount(countLiveInvitations(invitations.resource.value.invitations))} 件（未使用・受理中）`
-                  : '—'}
-              </dd>
-            </div>
-          ) : null}
-
-          {canManageQuota ? (
-            <div className="admin-facts__row">
-              <dt>ポスターレンダラー</dt>
-              <dd>
-                {renderer.resource.kind === 'ready'
-                  ? presentBreaker(renderer.resource.value.circuitBreaker).label
                   : '—'}
               </dd>
             </div>

@@ -31,7 +31,6 @@ import { RouterProvider, useRoute } from '../router/Router.tsx'
 import { AdminAuditScreen } from '../screens/AdminAuditScreen.tsx'
 import { AdminInvitationsScreen } from '../screens/AdminInvitationsScreen.tsx'
 import { AdminOverviewScreen } from '../screens/AdminOverviewScreen.tsx'
-import { AdminRendererScreen } from '../screens/AdminRendererScreen.tsx'
 import { AdminRunsScreen } from '../screens/AdminRunsScreen.tsx'
 import { AdminSettingsScreen } from '../screens/AdminSettingsScreen.tsx'
 import { AdminUsersScreen } from '../screens/AdminUsersScreen.tsx'
@@ -73,8 +72,6 @@ function CurrentScreen(): React.JSX.Element {
       return <AdminInvitationsScreen />
     case 'admin-runs':
       return <AdminRunsScreen />
-    case 'admin-renderer':
-      return <AdminRendererScreen />
     case 'admin-audit':
       return <AdminAuditScreen />
     case 'admin-settings':

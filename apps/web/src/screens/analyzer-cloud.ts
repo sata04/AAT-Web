@@ -8,6 +8,7 @@
 import type { AnalysisConfig } from '@aat/shared'
 import { type Dispatch, type SetStateAction, useCallback, useEffect, useRef, useState } from 'react'
 import type { Dataset } from '../app/dataset.ts'
+import { cloudEnabled } from '../cloud/enabled.ts'
 import type { CloudOutcome, PosterFigure } from '../cloud/gateway.ts'
 import type { CloudStatuses, PosterStatus } from '../cloud/status.ts'
 import { type CloudSyncResult, syncDataset } from '../cloud/sync.ts'
@@ -203,7 +204,12 @@ export function posterUnavailableReasonFor(
 ): string | null {
   if (posterContext !== null) return null
   if (sessionStatus === 'unavailable') {
-    return 'この環境ではクラウド機能を利用できません。解析・グラフ・統計・書き出しはこのまま利用できます。'
+    // A compiled-out cloud is not "the cloud is down" — nothing is missing,
+    // the build simply has no cloud half. Both answers name what still works;
+    // neither is an error, and neither is a call to action.
+    return cloudEnabled()
+      ? 'この環境ではクラウド機能を利用できません。解析・グラフ・統計・書き出しはこのまま利用できます。'
+      : 'このアプリはローカル専用の構成で提供されています。解析・グラフ・統計・書き出しはこのまま利用できます。'
   }
   if (sessionStatus === 'signed-out') {
     return 'サインインすると、解析結果を保存してデスクトップ版と同じ体裁のポスター図を作成できます。解析・グラフ・統計・書き出しはサインインなしで利用できます。'

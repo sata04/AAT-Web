@@ -12,6 +12,8 @@
  * analysis is pending because the cloud is pending".
  */
 
+import { cloudEnabled } from './enabled.ts'
+
 export type AnalysisStatus =
   | { kind: 'idle' }
   | { kind: 'running'; stage: string; percent: number }
@@ -22,6 +24,12 @@ export type AnalysisStatus =
 export type CloudSyncStatus =
   /** No session, or the user never signed in. Local-only is a normal state, not an error. */
   | { kind: 'local-only' }
+  /**
+   * The cloud half was compiled out of this build (`src/cloud/enabled.ts`).
+   * Also a normal state — quieter than `local-only`, because there is no cloud
+   * a sign-in could reach: the status bar hides this lane rather than label it.
+   */
+  | { kind: 'disabled' }
   | { kind: 'saving' }
   | { kind: 'saved'; revisionId: string; at: number }
   | { kind: 'failed'; message: string; retryable: boolean }
@@ -48,10 +56,21 @@ export interface CloudStatuses {
   poster: PosterStatus
 }
 
+/**
+ * The enabled-build default. Screens should take their initial value from
+ * {@link initialCloudStatuses} instead, which answers this but with the sync
+ * lane `disabled` when the cloud half is compiled out.
+ */
 export const INITIAL_STATUSES: CloudStatuses = {
   analysis: { kind: 'idle' },
   sync: { kind: 'local-only' },
   poster: { kind: 'unavailable' },
+}
+
+/** The statuses a screen starts with, honouring the build's cloud flag. */
+export function initialCloudStatuses(): CloudStatuses {
+  if (cloudEnabled()) return INITIAL_STATUSES
+  return { ...INITIAL_STATUSES, sync: { kind: 'disabled' } }
 }
 
 /**
@@ -108,6 +127,10 @@ export function analysisLabel(status: AnalysisStatus): StatusLabel {
 export function syncLabel(status: CloudSyncStatus): StatusLabel {
   switch (status.kind) {
     case 'local-only':
+    // `disabled` is rendered the same as the quietest local answer — it is a
+    // normal state, not an error — though the status bar hides the lane
+    // entirely, so this text is normally never shown.
+    case 'disabled':
       return { text: 'ローカルのみ', tone: 'neutral' }
     case 'saving':
       return { text: '保存中', tone: 'busy' }
