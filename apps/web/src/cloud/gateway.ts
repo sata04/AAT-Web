@@ -608,11 +608,14 @@ export function requestAutoPoster(
   revisionId: string,
   spec: PosterPlotSpec,
   pngBase64: string,
+  engineVersion?: string,
 ): Promise<CloudOutcome<{ poster: PosterFigure; created?: boolean }>> {
   // The PNG is a bulk-byte upload — the same timeout class as object moves.
+  // engineVersion is the drawing engine's self-report; the Worker stores it on
+  // the figure as renderer_version — provenance, nothing more.
   return request<{ poster: PosterFigure; created?: boolean }>(
     `/revisions/${id(revisionId)}/poster/auto`,
-    { method: 'POST', ...jsonBody({ spec, pngBase64 }) },
+    { method: 'POST', ...jsonBody({ spec, pngBase64, engineVersion }) },
     OBJECT_TIMEOUT_MS,
   )
 }
@@ -635,10 +638,11 @@ export function createCustomPoster(
   revisionId: string,
   spec: PosterPlotSpec,
   pngBase64: string,
+  engineVersion?: string,
 ): Promise<CloudOutcome<{ poster: PosterFigure }>> {
   return request<{ poster: PosterFigure }>(
     `/revisions/${id(revisionId)}/posters`,
-    { method: 'POST', ...jsonBody({ spec, pngBase64 }) },
+    { method: 'POST', ...jsonBody({ spec, pngBase64, engineVersion }) },
     OBJECT_TIMEOUT_MS,
   )
 }

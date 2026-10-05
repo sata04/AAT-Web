@@ -69,8 +69,10 @@ function boot(): Promise<PosterEngineHost> {
   if (bootError) return Promise.reject(bootError)
   hostPromise ??= bootPosterEngine({
     // Vendored at build/dev time under /pyodide/<version>/ — versioned so the URL is immutable
-    // and the service worker can treat it as cache-first-forever.
-    indexURL: `/pyodide/${pyodidePackage.version}/`,
+    // and the service worker can treat it as cache-first-forever. Resolved against the worker's
+    // own location into an absolute URL: Pyodide joins wheel names onto the index with
+    // `new URL(file, indexURL)`, which throws "Invalid base URL" on a root-relative string.
+    indexURL: new URL(`/pyodide/${pyodidePackage.version}/`, scope.location.href).href,
     onStatus: postStatus,
   }).then((host) => {
     const v = host.versions()
