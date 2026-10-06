@@ -59,6 +59,11 @@ function failPending(message: string): void {
     reject(new PosterEngineError('engine', 'POSTER_ENGINE_UNAVAILABLE', message))
   }
   pending.clear()
+  // A worker that failed once cannot be trusted to answer a later request —
+  // keeping it cached would strand every retry on a dead process. Terminate it
+  // so the next renderPosterPng call boots a fresh one.
+  worker?.terminate()
+  worker = null
 }
 
 function ensureWorker(): Worker {
@@ -112,7 +117,18 @@ export function renderPosterPng(spec: PosterPlotSpec): Promise<Uint8Array> {
   const id = nextRequestId++
   return new Promise<Uint8Array>((resolve, reject) => {
     pending.set(id, { resolve, reject })
-    spawned.postMessage({ type: 'render', id, spec })
+    try {
+      spawned.postMessage({ type: 'render', id, spec })
+    } catch (error) {
+      // postMessage throws only on a structured-clone failure or a dead worker;
+      // either way the request must settle rather than hang in `pending`.
+      pending.delete(id)
+      reject(
+        error instanceof Error
+          ? error
+          : new PosterEngineError('engine', 'POSTER_ENGINE_UNAVAILABLE', String(error)),
+      )
+    }
   })
 }
 

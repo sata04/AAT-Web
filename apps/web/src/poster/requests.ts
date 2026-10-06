@@ -32,10 +32,16 @@ import type { PosterPlotSpec } from '@aat/plot-spec'
 import { buildAutoPosterPlotSpec, buildPosterPlotSpec, type PosterPlotSpecBuildRequest } from '@aat/plot-spec'
 import type { Dataset } from '../app/dataset.ts'
 import { cloudEnabled } from '../cloud/enabled.ts'
-import { createCustomPoster, posterImageUrl, requestAutoPoster } from '../cloud/gateway.ts'
+import { createCustomPoster, requestAutoPoster } from '../cloud/gateway.ts'
 import type { PosterStatus } from '../cloud/status.ts'
 import { onPosterEngineStatus, posterEngineVersion, renderPosterPng } from './engine/renderer.ts'
-import { entryFromRender, entryWithFigure, type PosterEntry, pngToBase64 } from './entry.ts'
+import {
+  entryFromRender,
+  entryWithFigure,
+  localPosterRevisionId,
+  type PosterEntry,
+  pngToBase64,
+} from './entry.ts'
 import { describePosterSpecError, type PosterSpecAdvice } from './errors.ts'
 import { posterSourceFor } from './source.ts'
 
@@ -45,7 +51,7 @@ import { posterSourceFor } from './source.ts'
  *
  * `revisionId` is null when the analysis was never stored — signed out, offline,
  * or a deployment with no cloud half. The poster is still drawn and downloadable;
- * its spec records `local` as the revision and no upload is attempted.
+ * its spec records `local:<runCode>` as the revision and no upload is attempted.
  */
 export interface PosterContext {
   revisionId: string | null
@@ -76,9 +82,6 @@ export type CustomPosterRequest = Omit<
   'analysisRevisionId' | 'runCode' | 'source'
 >
 
-/** `spec.analysisRevisionId` for a poster the cloud will never see. */
-const LOCAL_REVISION_ID = 'local'
-
 /* ------------------------------------------------------------------------------------------- */
 /* Building                                                                                     */
 /* ------------------------------------------------------------------------------------------- */
@@ -92,7 +95,7 @@ const LOCAL_REVISION_ID = 'local'
  */
 export function buildAutoSpec(context: PosterContext): PosterPlotSpec {
   return buildAutoPosterPlotSpec({
-    analysisRevisionId: context.revisionId ?? LOCAL_REVISION_ID,
+    analysisRevisionId: context.revisionId ?? localPosterRevisionId(context.runCode),
     runCode: context.runCode,
     source: posterSourceFor(context.dataset),
   })
@@ -108,7 +111,7 @@ export function buildAutoSpec(context: PosterContext): PosterPlotSpec {
 export function buildCustomSpec(context: PosterContext, request: CustomPosterRequest): PosterPlotSpec {
   return buildPosterPlotSpec({
     ...request,
-    analysisRevisionId: context.revisionId ?? LOCAL_REVISION_ID,
+    analysisRevisionId: context.revisionId ?? localPosterRevisionId(context.runCode),
     runCode: context.runCode,
     source: posterSourceFor(context.dataset),
   })
@@ -182,7 +185,7 @@ async function renderAndMaybeStore(
   }
 
   const figure = stored.value.poster
-  const storedEntry = entryWithFigure(entry, figure, posterImageUrl(figure.posterId))
+  const storedEntry = entryWithFigure(entry, figure)
   report({ kind: 'ready', url: storedEntry.imageUrl, posterId: figure.posterId })
   return { ok: true, entry: storedEntry, uploaded: true }
 }

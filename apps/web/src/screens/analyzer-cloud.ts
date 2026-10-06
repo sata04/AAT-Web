@@ -11,7 +11,7 @@ import type { Dataset } from '../app/dataset.ts'
 import type { CloudOutcome } from '../cloud/gateway.ts'
 import type { CloudStatuses, PosterStatus } from '../cloud/status.ts'
 import { type CloudSyncResult, syncDataset } from '../cloud/sync.ts'
-import type { PosterEntry } from '../poster/entry.ts'
+import { localPosterRevisionId, type PosterEntry } from '../poster/entry.ts'
 import { generateAutoPoster, type PosterContext, type PosterRequestOutcome } from '../poster/requests.ts'
 
 interface CloudSyncDeps {
@@ -207,7 +207,9 @@ export function activePostersFor(
   posterContext: PosterContext | null,
 ): PosterEntry[] {
   if (posterContext === null) return []
-  const revisionId = posterContext.revisionId ?? 'local'
+  // Unsigned-in renders are filed under `local:<runCode>`, not one shared 'local' —
+  // two different experiments must not show each other's figures.
+  const revisionId = posterContext.revisionId ?? localPosterRevisionId(posterContext.runCode)
   return customPosters.filter((poster) => poster.analysisRevisionId === revisionId)
 }
 

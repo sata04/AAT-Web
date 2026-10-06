@@ -9,10 +9,21 @@
  */
 import type { PosterFigure } from '../cloud/gateway'
 
+/**
+ * `spec.analysisRevisionId` for a poster the cloud will never see.
+ *
+ * Scoped by the run code rather than one shared literal: two different unsigned-in
+ * experiments must not share a history bucket, and the run code is the experiment's
+ * own identity — the same key the cloud side files runs under.
+ */
+export function localPosterRevisionId(runCode: string): string {
+  return `local:${runCode}`
+}
+
 export interface PosterEntry {
   /** Server id, once this render is stored there; null for a local-only figure. */
   posterId: string | null
-  /** The revision the figure was stored under, or 'local' when it never left the machine. */
+  /** The revision the figure was stored under, or `local:<runCode>` when it never left the machine. */
   analysisRevisionId: string
   kind: 'auto' | 'custom'
   presetVersion: string
@@ -58,15 +69,39 @@ export function entryFromRender(input: {
 /**
  * Copy `figure`'s identity onto an entry rendered locally, after the bytes
  * were uploaded and the Worker assigned the canonical row.
+ *
+ * `imageUrl` deliberately stays the *local* one: the upload proves the bytes
+ * are stored, it does not make the already-rendered image need a network to
+ * display. An entry that switched to the API URL would break its own preview
+ * the moment the connection drops — the exact opposite of what the figure is
+ * for.
  */
-export function entryWithFigure(entry: PosterEntry, figure: PosterFigure, imageUrl: string): PosterEntry {
-  return { ...entry, posterId: figure.posterId, figure, imageUrl }
+export function entryWithFigure(entry: PosterEntry, figure: PosterFigure): PosterEntry {
+  return { ...entry, posterId: figure.posterId, figure }
+}
+
+/**
+ * Blob URLs minted by {@link pngToDisplayUrl}, still potentially displayed.
+ *
+ * `URL.revokeObjectURL` is never called per entry on purpose: the panel and the
+ * status lane can hold the same URL, and revoking on one drop would blank the
+ * other. They are released wholesale at screen unmount instead, when nothing
+ * can still be showing them.
+ */
+const liveDisplayUrls = new Set<string>()
+
+/** Revoke every live blob URL — called from the Analyzer screen's unmount. */
+export function releasePosterUrls(): void {
+  for (const url of liveDisplayUrls) globalThis.URL?.revokeObjectURL(url)
+  liveDisplayUrls.clear()
 }
 
 export function pngToDisplayUrl(png: Uint8Array): string {
   const URL_ = globalThis.URL
   if (typeof URL_?.createObjectURL === 'function') {
-    return URL_.createObjectURL(new Blob([png as BlobPart], { type: 'image/png' }))
+    const url = URL_.createObjectURL(new Blob([png as BlobPart], { type: 'image/png' }))
+    liveDisplayUrls.add(url)
+    return url
   }
   return `data:image/png;base64,${pngToBase64(png)}`
 }

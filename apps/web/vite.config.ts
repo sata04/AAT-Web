@@ -157,7 +157,12 @@ export default defineConfig({
         // untouched.
         runtimeCaching: [
           {
-            urlPattern: /^\/pyodide\//,
+            // A function matcher, not a RegExp: Workbox evaluates a RegExp
+            // against the request's href *starting at index 0* for same-origin
+            // requests, so `/^\/pyodide\//` can never match
+            // `https://<host>/pyodide/…` — the pattern must see the pathname.
+            urlPattern: ({ url }: { url: URL }) =>
+              url.origin === self.location.origin && url.pathname.startsWith('/pyodide/'),
             handler: 'CacheFirst',
             options: {
               cacheName: 'aat-poster-engine',

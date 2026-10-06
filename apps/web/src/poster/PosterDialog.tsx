@@ -181,24 +181,25 @@ interface PosterOutcomeSinks {
  * belongs to the user.
  */
 function settlePosterOutcome(outcome: PosterRequestOutcome, sinks: PosterOutcomeSinks): void {
+  // A rendered-but-unstored figure still exists locally: it joins the panel
+  // history like any other, so closing the dialog — before or after the render
+  // finished — never throws away a PNG the engine already drew.
+  const entry = outcome.ok ? outcome.entry : outcome.kind === 'cloud' ? outcome.entry : null
   if (!sinks.mounted.current) {
-    if (outcome.ok) sinks.onCreated(outcome.entry)
-    else sinks.onFailed?.(outcome.kind === 'spec' ? outcome.advice.message : outcome.message)
+    if (entry !== null) sinks.onCreated(entry)
+    if (!outcome.ok) sinks.onFailed?.(outcome.kind === 'spec' ? outcome.advice.message : outcome.message)
     return
   }
   sinks.setSubmitting(false)
-  if (outcome.ok) {
-    sinks.setCreated(outcome.entry)
-    sinks.onCreated(outcome.entry)
-    return
+  if (entry !== null) {
+    sinks.setCreated(entry)
+    sinks.onCreated(entry)
   }
+  if (outcome.ok) return
   if (outcome.kind === 'spec') {
     sinks.setAdvice(outcome.advice)
     return
   }
-  // A rendered-but-unstored figure still exists locally: show it alongside the
-  // failure so the PNG can be saved even though no cloud copy was made.
-  if (outcome.entry !== null) sinks.setCreated(outcome.entry)
   sinks.setCloudMessage(outcome.message)
 }
 

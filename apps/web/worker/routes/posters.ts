@@ -29,10 +29,11 @@
 
 import { type PosterPlotSpec, parsePosterPlotSpec, specHash } from '@aat/plot-spec'
 import { ApiError } from '@aat/shared'
-import { and, desc, eq, isNull } from 'drizzle-orm'
+import { and, desc, eq, isNull, ne, sql } from 'drizzle-orm'
 import { Hono } from 'hono'
 import { z } from 'zod'
 import { resolveConfig } from '../config.ts'
+import { rowsAffected } from '../db/client.ts'
 import { cloudObjects, posterFigures } from '../db/schema.ts'
 import { newId } from '../lib/ids.ts'
 import type { AppContext, AppEnv } from '../middleware/authorize.ts'
@@ -123,8 +124,15 @@ interface UploadBody {
  * request that then loses the auto-figure race still has its row — it describes an upload that was
  * genuinely made and discarded, which is what happened.
  *
- * Returns the stored object and how many figure rows the insert wrote (0 = the auto slot was
- * already taken).
+ * `upgradeFigureId` names an existing non-`ready` row to take over — a leftover from the
+ * container renderer, which claimed the (revision, preset) slot with `queued`/`rendering`/
+ * `failed` and then had its render path deleted. The PNG finishes what that row started: the
+ * row is updated in place, guarded by `status != 'ready'` so two concurrent upgrades cannot
+ * both win. The stored object still mints its own key id — reusing the row's would make a
+ * losing upgrade collide with the winner's R2 claim.
+ *
+ * Returns the stored object, the figure row's id, and whether the write committed
+ * (false = another request holds or took the auto slot — the caller unwinds and reads it back).
  */
 async function recordPosterUpload(
   context: AppContext,
@@ -132,16 +140,24 @@ async function recordPosterUpload(
   body: UploadBody,
   kind: 'auto' | 'custom',
   now: Date,
-): Promise<{ stored: StoredPosterObject; inserted: number; figureId: string }> {
+  upgradeFigureId?: string,
+): Promise<{ stored: StoredPosterObject; committed: boolean; figureId: string }> {
   const db = context.get('db')
   const actor = context.get('actor')
   const config = resolveConfig(context.env)
 
   const png = await decodePosterPng(body.pngBase64, config.maxPosterBytes)
   const hash = await specHash(body.spec)
-  const figureId = newId()
+  // The row id this upload is recorded under: the upgraded row's own id, or a fresh one.
+  const figureId = upgradeFigureId ?? newId()
 
-  const stored = await storePosterPng(db, context.env.AAT_OBJECTS, config, { figureId, revision, png }, now)
+  const stored = await storePosterPng(
+    db,
+    context.env.AAT_OBJECTS,
+    config,
+    { figureId: newId(), revision, png },
+    now,
+  )
 
   try {
     await writeAuditLog(db, {
@@ -154,29 +170,49 @@ async function recordPosterUpload(
       headers: context.req.raw.headers,
     })
 
-    const inserted = await insertPosterFigure(db, {
-      id: figureId,
-      analysisRevisionId: revision.id,
-      // The figure belongs to the measurement, not to whoever pressed the button — otherwise the
-      // one automatic poster per revision would have a different owner depending on which
-      // colleague happened to open the run first.
-      ownerUserId: revision.ownerUserId,
-      kind,
-      presetKey: 'aat-poster',
-      presetVersion: body.spec.posterPresetVersion,
-      specHash: hash,
-      rendererVersion: body.engineVersion ?? null,
-      // The PNG arrived already drawn: there is no queue to wait in and nothing to fail at, so a
-      // new row is only ever 'ready' and the attempt columns describe the upload itself.
-      status: 'ready',
-      objectId: stored.id,
-      attemptCount: 1,
-      startedAt: now,
-      completedAt: now,
-      createdAt: now,
-      updatedAt: now,
-    })
-    return { stored, inserted, figureId }
+    const committed =
+      upgradeFigureId !== undefined
+        ? rowsAffected(
+            await db
+              .update(posterFigures)
+              .set({
+                specHash: hash,
+                rendererVersion: body.engineVersion ?? null,
+                // The PNG arrived already drawn: the stale lifecycle row is now recorded the way
+                // any other committed upload is — 'ready', with the attempt columns describing it.
+                status: 'ready',
+                objectId: stored.id,
+                errorCode: null,
+                attemptCount: sql`${posterFigures.attemptCount} + 1`,
+                startedAt: now,
+                completedAt: now,
+                updatedAt: now,
+              })
+              // The `status != 'ready'` guard is what keeps two simultaneous upgrades from both
+              // winning: the first to commit flips the row and the second affects zero rows.
+              .where(and(eq(posterFigures.id, upgradeFigureId), ne(posterFigures.status, 'ready'))),
+          ) === 1
+        : (await insertPosterFigure(db, {
+            id: figureId,
+            analysisRevisionId: revision.id,
+            // The figure belongs to the measurement, not to whoever pressed the button — otherwise
+            // the one automatic poster per revision would have a different owner depending on
+            // which colleague happened to open the run first.
+            ownerUserId: revision.ownerUserId,
+            kind,
+            presetKey: 'aat-poster',
+            presetVersion: body.spec.posterPresetVersion,
+            specHash: hash,
+            rendererVersion: body.engineVersion ?? null,
+            status: 'ready',
+            objectId: stored.id,
+            attemptCount: 1,
+            startedAt: now,
+            completedAt: now,
+            createdAt: now,
+            updatedAt: now,
+          })) === 1
+    return { stored, committed, figureId }
   } catch (error) {
     // Everything after the reservation is the unwind-able section: an audit or insert failure
     // takes the object — row, bytes and charge — back with it.
@@ -205,21 +241,27 @@ posterRoutes.post(
     // after a timeout. The read first is the fast path that keeps a repeat call from uploading at
     // all; the constraint is what still holds when two requests both miss it.
     const existing = await findAutoPosterFigure(db, revision.id, spec.posterPresetVersion)
-    if (existing) {
+    if (existing?.status === 'ready') {
       return context.json({ poster: figureResponse(existing), created: false })
     }
 
-    const { stored, inserted, figureId } = await recordPosterUpload(
+    // A row in any other state is a leftover from the container renderer — `queued`, `rendering`
+    // or `failed`, with no PNG ever stored and the retry route gone with it. The upload finishes
+    // what that row claimed by upgrading it in place; without this, a previously failed
+    // automatic poster could never become renderable at all.
+    const { stored, committed, figureId } = await recordPosterUpload(
       context,
       revision,
       { ...body, spec },
       'auto',
       now,
+      existing?.id,
     )
 
-    if (inserted === 0) {
-      // A concurrent upload won the slot. Our figure id is fresh, so the key below the object is
-      // ours alone — unwinding it touches nothing of theirs.
+    if (!committed) {
+      // A concurrent upload won the slot (a fresh insert raced the index, or another upgrade
+      // flipped the row first). Our object key was minted fresh, so unwinding it touches
+      // nothing of theirs.
       await unwindUploadedObject(db, context.env.AAT_OBJECTS, stored, now)
       const winner = await findAutoPosterFigure(db, revision.id, spec.posterPresetVersion)
       if (!winner) throw new ApiError('INTERNAL')
@@ -247,14 +289,14 @@ posterRoutes.post(
     const spec = validateSpec(body.spec, revision.id, 'custom')
     const now = new Date()
 
-    const { stored, inserted, figureId } = await recordPosterUpload(
+    const { stored, committed, figureId } = await recordPosterUpload(
       context,
       revision,
       { ...body, spec },
       'custom',
       now,
     )
-    if (inserted === 0) {
+    if (!committed) {
       // Unreachable in practice — the auto constraint does not cover kind='custom' — but if a
       // future index ever makes the insert a no-op, the object must not be left behind.
       await unwindUploadedObject(db, context.env.AAT_OBJECTS, stored, now)

@@ -77,8 +77,13 @@ function strictBase64Decode(encoded: string): Uint8Array {
  * PNG never fails it, so a failure is a malformed request rather than a rendering problem.
  */
 export async function decodePosterPng(pngBase64: string, maxBytes: number): Promise<DecodedPosterPng> {
+  // Refuse on the *encoded* length first: base64 of N bytes is ceil(N/3)*4 chars, so an
+  // oversized upload is rejected without paying for a decode and a second copy of the body.
+  if (pngBase64.length > Math.ceil(maxBytes / 3) * 4) {
+    throw new ApiError('REQUEST_TOO_LARGE', { details: { maxBytes } })
+  }
   const bytes = strictBase64Decode(pngBase64)
-  if (bytes.length === 0 || bytes.length > maxBytes) {
+  if (bytes.length === 0) {
     throw new ApiError('REQUEST_TOO_LARGE', { details: { maxBytes } })
   }
   if (!PNG_SIGNATURE.every((byte, index) => bytes[index] === byte)) {

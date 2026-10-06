@@ -193,9 +193,12 @@ describe('the automatic poster', () => {
     expect(body?.spec?.analysisRevisionId).toBe(REVISION_ID)
     expect(body?.spec?.posterKind).toBe('auto')
     expect(body?.pngBase64).toBe(btoa(String.fromCharCode(...PNG)))
+    // The ready status carries the *local* URL even after upload — the stored
+    // figure's API URL is fetchable, but a preview that needs the network would
+    // break the moment the connection drops.
     expect(statuses.at(-1)).toEqual({
       kind: 'ready',
-      url: `/api/v1/posters/${POSTER_ID}/image`,
+      url: outcome.entry.imageUrl,
       posterId: POSTER_ID,
     })
   })
@@ -329,7 +332,7 @@ describe('a custom poster', () => {
     if (!outcome.ok) return
     expect(outcome.uploaded).toBe(false)
     expect(outcome.entry.posterId).toBeNull()
-    expect(outcome.entry.analysisRevisionId).toBe('local')
+    expect(outcome.entry.analysisRevisionId).toBe('local:260811a')
     expect(recorded).toHaveLength(0)
   })
 
