@@ -170,18 +170,8 @@ async function renderAndMaybeStore(
   report({ kind: 'uploading' })
   const stored =
     kind === 'auto'
-      ? await requestAutoPoster(
-          context.revisionId as string,
-          spec,
-          pngToBase64(png),
-          posterEngineVersion(),
-        )
-      : await createCustomPoster(
-          context.revisionId as string,
-          spec,
-          pngToBase64(png),
-          posterEngineVersion(),
-        )
+      ? await requestAutoPoster(context.revisionId as string, spec, pngToBase64(png), posterEngineVersion())
+      : await createCustomPoster(context.revisionId as string, spec, pngToBase64(png), posterEngineVersion())
 
   if (!stored.ok) {
     const retryable = stored.kind === 'unavailable' || stored.retryable
