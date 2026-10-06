@@ -187,7 +187,9 @@ async function renderAndMaybeStore(
   }
 
   const figure = stored.value.poster
-  if (stored.value.created === false) {
+  // `created` exists only on the auto endpoint's response shape; a custom upload always made its row.
+  const created = 'created' in stored.value ? stored.value.created : undefined
+  if (created === false) {
     // The slot already held this revision's figure — rendered by a different
     // engine build, so it is a *different image* from the bytes just drawn.
     // The stored row is the canonical one: show it (remote URL, no local copy)
