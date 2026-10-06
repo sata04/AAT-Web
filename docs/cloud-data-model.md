@@ -79,11 +79,11 @@ A `Float64Array` written to an object has no ordering question.
 | `analysis_revisions` | The immutable analysis records. |
 | `analysis_metrics` | Headline numbers denormalised out of the snapshot, one row per revision. |
 | `poster_presets` | The frozen preset registry: key, version, spec hash, renderer version. |
-| `poster_figures` | One row per rendered figure, with its lifecycle status. |
+| `poster_figures` | One row per rendered figure. New rows are always `ready` — the PNG arrives already drawn. |
 | `cloud_objects` | The index of everything in R2. |
 | `quota_usage`, `quota_reservations` | Per-user storage accounting. |
 | `audit_logs` | Append-only record of security-relevant actions. |
-| `system_flags` | Operational switches — currently the renderer circuit breaker. |
+| `system_flags` | Operational switches — a generic store, no keys currently in use. |
 | `rate_limits` | Fixed-window counters. |
 
 Every identifier is a ULID (`worker/lib/ids.ts`). Sequential integers would leak how many users
@@ -518,8 +518,8 @@ one run were charged to several accounts, then:
 
 None of those has a good resolution, and all of them are avoided by the artifact living with the
 run. The cost is the obvious one and it is accepted deliberately: **a researcher can spend a
-colleague's quota** by rendering posters on their runs. That is bounded by
-`AAT_MAX_POSTER_BYTES` per figure and by the per-user poster rate limit, it is attributed in the
+colleague's quota** by uploading posters on their runs. That is bounded by
+`AAT_MAX_POSTER_BYTES` per figure, it is attributed in the
 audit log with both parties, and it is reversible by deleting the figure's run. The alternative —
 protecting each researcher's quota from their colleagues — costs an incoherent deletion, which is
 not reversible at all.

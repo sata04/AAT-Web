@@ -176,7 +176,6 @@ function specFor(revisionId: string, kind: 'auto' | 'custom'): PosterPlotSpec {
 async function callEveryEndpoint(): Promise<void> {
   const revisionId = 'rev_01J000000000000000000000'
   const runId = 'run_01J000000000000000000000'
-  const posterId = 'pos_01J000000000000000000000'
   const userId = 'usr_01J000000000000000000000'
 
   await gateway.fetchMe()
@@ -215,9 +214,10 @@ async function callEveryEndpoint(): Promise<void> {
   })
 
   await gateway.listPosters(revisionId)
-  await gateway.requestAutoPoster(revisionId, specFor(revisionId, 'auto'))
-  await gateway.createCustomPoster(revisionId, specFor(revisionId, 'custom'))
-  await gateway.retryPoster(posterId, specFor(revisionId, 'auto'))
+  // Poster endpoints take the locally rendered PNG alongside the spec: the
+  // Worker stores bytes now, it does not draw them.
+  await gateway.requestAutoPoster(revisionId, specFor(revisionId, 'auto'), 'aVBORw0KGgo=')
+  await gateway.createCustomPoster(revisionId, specFor(revisionId, 'custom'), 'aVBORw0KGgo=')
 
   await gateway.listAdminUsers({ limit: 50 })
   await gateway.updateAdminUser(userId, { role: 'Researcher' })
@@ -234,8 +234,6 @@ async function callEveryEndpoint(): Promise<void> {
   await gateway.revokeInvitation('inv_1')
   await gateway.fetchStorageReport()
   await gateway.setUserQuota(userId, 1024)
-  await gateway.fetchRendererBreaker()
-  await gateway.setRendererBreaker(true, 'spend guard')
   await gateway.listAuditLog({ action: 'poster.render' })
 }
 
@@ -309,7 +307,6 @@ describe('gateway paths against the Worker router', () => {
       'deleteRun',
       'fetchMe',
       'fetchMyPasskeys',
-      'fetchRendererBreaker',
       'fetchRevision',
       'fetchRun',
       'fetchStorageReport',
@@ -322,9 +319,7 @@ describe('gateway paths against the Worker router', () => {
       'listRuns',
       'listWorkspaceRuns',
       'requestAutoPoster',
-      'retryPoster',
       'revokeInvitation',
-      'setRendererBreaker',
       'setUserQuota',
       'updateAdminUser',
       'updateRun',

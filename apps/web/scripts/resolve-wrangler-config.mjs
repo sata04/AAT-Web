@@ -1,20 +1,18 @@
 /**
- * Writes a deploy-time copy of `wrangler.jsonc` with the two account-scoped values filled in.
+ * Writes a deploy-time copy of `wrangler.jsonc` with the account-scoped value filled in.
  *
  * ## Why this exists
  *
- * Five of the seven things a deployment needs are Worker secrets, and those come from Doppler
+ * Most of what a deployment needs is Worker secrets, and those come from Doppler
  * cleanly: the deploy job reads them into an allowlisted JSON file and `wrangler deploy
- * --secrets-file` ships them with the code. The other two are not secrets and cannot travel that
- * way — they are structural fields of the configuration file itself:
+ * --secrets-file` ships them with the code. What cannot travel that way is a structural
+ * field of the configuration file itself:
  *
  *   - `d1_databases[0].database_id`, printed by `wrangler d1 create`
- *   - `containers[0].image`, whose registry path embeds the account id, and whose digest is only
- *     known after the image is pushed
  *
  * Wrangler performs no variable substitution inside its configuration file — verified against the
  * current documentation, not assumed — so `${CLOUDFLARE_ACCOUNT_ID}` in that file would be sent
- * literally. The committed file therefore keeps deliberately invalid placeholders, which is the
+ * literally. The committed file therefore keeps a deliberately invalid placeholder, which is the
  * right default (a mistaken deploy fails loudly instead of writing into some other account), and
  * this script produces the real configuration at deploy time from values Doppler holds.
  *
@@ -31,8 +29,6 @@ import { readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 
 const PLACEHOLDER_DATABASE_ID = '00000000-0000-0000-0000-000000000000'
-const PLACEHOLDER_ACCOUNT_IMAGE =
-  'registry.cloudflare.com/00000000000000000000000000000000/aat-poster-renderer:latest'
 
 const outputPath = process.argv[2]
 if (!outputPath) {
@@ -51,7 +47,6 @@ function required(name) {
 }
 
 const databaseId = required('AAT_D1_DATABASE_ID')
-const posterImage = required('POSTER_RENDERER_IMAGE')
 
 /**
  * Replace exactly one occurrence, or fail.
@@ -77,10 +72,9 @@ const configPath = join(import.meta.dirname, '..', 'wrangler.jsonc')
 let config = readFileSync(configPath, 'utf8')
 
 config = replaceExactlyOnce(config, PLACEHOLDER_DATABASE_ID, databaseId, 'D1 database id')
-config = replaceExactlyOnce(config, PLACEHOLDER_ACCOUNT_IMAGE, posterImage, 'container image')
 
 writeFileSync(outputPath, config)
 
-// The image reference carries a digest and the database id is not a secret, but neither is printed:
-// the deployment's account id is derivable from both, and this log is public on a public repository.
-console.log(`resolve-wrangler-config: wrote ${outputPath} with the D1 id and container image filled in`)
+// The database id is not a secret, but it is not printed: the deployment's account id is
+// derivable from it, and this log is public on a public repository.
+console.log(`resolve-wrangler-config: wrote ${outputPath} with the D1 id filled in`)

@@ -17,11 +17,11 @@ import { screen, waitFor, within } from '@testing-library/react'
 import { describe, expect, it, vi } from 'vitest'
 
 vi.mock('../../src/auth/client.ts', () => ({
-  authClient: {
+  getAuthClient: () => ({
     signIn: { passkey: () => Promise.resolve({ error: null }) },
     signOut: () => Promise.resolve({ error: null }),
     passkey: { listUserPasskeys: () => Promise.resolve({ data: [] }) },
-  },
+  }),
 }))
 
 import { AdminOverviewScreen } from '../../src/screens/AdminOverviewScreen.tsx'
@@ -126,8 +126,6 @@ const BASE = {
   'GET /api/v1/admin/storage': () => json(STORAGE),
   'GET /api/v1/admin/audit': () => json(AUDIT),
   'GET /api/v1/admin/invitations': () => json({ invitations: [], nextCursor: null }),
-  'GET /api/v1/admin/renderer': () =>
-    json({ circuitBreaker: { open: false, reason: null, updatedAt: null } }),
 }
 
 describe('admin overview — the gate', () => {

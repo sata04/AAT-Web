@@ -60,7 +60,11 @@ if (scriptHashes.length === 0) {
 
 const csp = [
   "default-src 'self'",
-  `script-src 'self' ${scriptHashes.join(' ')}`.trim(),
+  // 'wasm-unsafe-eval' is for Pyodide: the poster engine compiles WebAssembly inside a dedicated
+  // Web Worker, and WebAssembly.instantiate is governed by script-src. The keyword is deliberately
+  // narrower than 'unsafe-eval' — it permits WASM compilation only, not JavaScript eval — so the
+  // policy still refuses eval() while letting the pinned interpreter run.
+  `script-src 'self' 'wasm-unsafe-eval' ${scriptHashes.join(' ')}`,
   "style-src 'self' 'unsafe-inline'",
   "img-src 'self' data: blob:",
   "font-src 'self'",

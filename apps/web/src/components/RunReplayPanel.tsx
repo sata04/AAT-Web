@@ -370,7 +370,9 @@ export function RunReplayPanel(props: RunReplayPanelProps): React.JSX.Element {
           selection={selection}
           yRange={{ min: config.ylim_min, max: config.ylim_max }}
           onClose={() => setPosterOpen(false)}
-          onCreated={(poster) => props.onPosterRendered(poster)}
+          onCreated={(entry) => {
+            if (entry.figure !== undefined) props.onPosterRendered(entry.figure)
+          }}
         />
       ) : null}
     </div>

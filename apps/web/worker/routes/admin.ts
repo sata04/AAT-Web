@@ -42,7 +42,6 @@ import type { AppEnv } from '../middleware/authorize.ts'
 import { requireCapability, requireSession, withDatabase } from '../middleware/authorize.ts'
 import { validate } from '../middleware/validate.ts'
 import { writeAuditLog } from '../services/audit.ts'
-import { getCircuitBreaker, setCircuitBreaker } from '../services/flags.ts'
 import { ensureQuotaRow, setQuotaLimit } from '../services/quota.ts'
 import { consumeRateLimit, RATE_LIMITS, rateLimitKey } from '../services/rate-limit.ts'
 
@@ -531,42 +530,6 @@ adminRoutes.put(
     })
 
     return context.json({ quota: state })
-  },
-)
-
-/* ------------------------------------------------------------------------------------------- */
-/* Renderer circuit breaker                                                                     */
-/* ------------------------------------------------------------------------------------------- */
-
-adminRoutes.get('/renderer', requireCapability('quota:manage'), async (context) => {
-  return context.json({ circuitBreaker: await getCircuitBreaker(context.get('db')) })
-})
-
-const breakerSchema = z.object({
-  open: z.boolean(),
-  reason: z.string().max(200).nullable().optional(),
-})
-
-adminRoutes.put(
-  '/renderer',
-  requireCapability('quota:manage'),
-  validate('json', breakerSchema),
-  async (context) => {
-    const db = context.get('db')
-    const actor = context.get('actor')
-    const body = context.req.valid('json')
-
-    const state = await setCircuitBreaker(db, body.open, body.reason ?? null, actor.userId)
-    await writeAuditLog(db, {
-      actorUserId: actor.userId,
-      action: 'renderer.circuit_breaker',
-      targetType: 'system_flag',
-      targetId: 'poster.renderer.circuit_breaker',
-      details: { open: body.open, reason: body.reason ?? null },
-      headers: context.req.raw.headers,
-    })
-
-    return context.json({ circuitBreaker: state })
   },
 )
 

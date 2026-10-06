@@ -4,29 +4,29 @@
  * Two things this component deliberately does *not* do.
  *
  * It never starts a render. Everything it shows is a read — the automatic poster's lane state,
- * which the sync path already produced, and `<img src>` against `GET /posters/:id/image`, which
- * streams a stored PNG through the Worker. Looking at a poster, scrolling past it, or React
- * re-rendering the panel for an unrelated state change costs a container nothing. The only request
- * that can start a render is behind a button a human presses, or the once-per-revision automatic
- * request that the completed cloud sync makes.
+ * which the sync path already produced, and an `<img>` of a finished figure, whether its PNG came
+ * back from the Worker or was drawn by the local engine a moment ago. Looking at a poster,
+ * scrolling past it, or re-rendering the panel for an unrelated state change draws nothing. The
+ * only path that can start a render is behind a button a human presses, or the once-per-revision
+ * automatic request that the completed cloud sync makes.
  *
- * And it never implies that a poster is part of the analysis. The panel is empty and quiet when
- * there is no account, no network, or no cloud half deployed; the graph, the statistics, the range
- * selection and the Excel export are all finished and usable in exactly that state. What the panel
- * says in that case is what is true — a formal figure needs the renderer — and not "sign in to
- * continue".
+ * And it never implies that a poster is part of the analysis. The figure is drawn on this machine
+ * — no account, network or cloud half is needed for that — so the panel stays quiet and usable
+ * in exactly those states; the cloud copy is an upload of a finished local image, not the way the
+ * image comes to be. What it still says honestly is what is true: a formal figure is built from a
+ * run's identity, so a filename that cannot yield a run code gets no poster.
  */
 
 import { useState } from 'react'
-import type { PosterFigure } from '../cloud/gateway.ts'
-import { posterImageUrl } from '../cloud/gateway.ts'
-import { type PosterStatus, posterLabel } from '../cloud/status.ts'
+import type { PosterStatus } from '../cloud/status.ts'
+import { posterLabel } from '../cloud/status.ts'
 import type { SelectionRange } from '../graph/selection.ts'
+import type { PosterEntry } from './entry.ts'
 import { PosterDialog } from './PosterDialog.tsx'
 import type { PosterContext } from './requests.ts'
 
 export interface PosterPanelProps {
-  /** Null until an analysis has been stored in the cloud; the poster is drawn from a revision. */
+  /** Null only when the active file's name cannot yield a run code. */
   context: PosterContext | null
   /** Why there is no context, phrased for a researcher. Null while there is one. */
   unavailableReason: string | null
@@ -42,11 +42,26 @@ export interface PosterPanelProps {
    */
   yRange: { min: number; max: number }
   onRetryAuto: () => void
-  /** Custom figures created in this session, newest first. History lives on the server too. */
-  customPosters: readonly PosterFigure[]
-  onCustomCreated: (poster: PosterFigure) => void
+  /** Figures created in this session, newest first. History also lives on the server when stored. */
+  customPosters: readonly PosterEntry[]
+  onCustomCreated: (poster: PosterEntry) => void
   /** A custom render that failed after its dialog was closed — routed to the notice stack. */
   onCustomFailed?: ((message: string) => void) | undefined
+}
+
+/** What the in-flight lane is doing, one honest sentence per state. */
+function progressHint(status: PosterStatus): string | null {
+  switch (status.kind) {
+    case 'loading':
+      // The Pyodide runtime is tens of MB on first use; saying so beats a silent wait.
+      return '描画エンジンを読み込んでいます。初回のみ数十MBの取得が入ります。'
+    case 'rendering':
+      return 'ポスター図を生成しています。'
+    case 'uploading':
+      return '作成した図をクラウドに保存しています。'
+    default:
+      return null
+  }
 }
 
 export function PosterPanel(props: PosterPanelProps): React.JSX.Element {
@@ -55,6 +70,7 @@ export function PosterPanel(props: PosterPanelProps): React.JSX.Element {
 
   const label = posterLabel(status)
   const canCreate = context !== null
+  const progress = progressHint(status)
 
   return (
     <section className="panel" aria-label="ポスター図">
@@ -66,13 +82,21 @@ export function PosterPanel(props: PosterPanelProps): React.JSX.Element {
       {context === null ? (
         <p className="panel__hint">
           {props.unavailableReason ??
-            '解析結果をクラウドに保存すると、デスクトップ版と同じ体裁のポスター図を作成できます。'}
+            'ファイルを開くと、デスクトップ版と同じ体裁のポスター図を作成できます。'}
         </p>
       ) : (
         <>
           <p className="panel__hint">
-            自動ポスター図は解析1件につき1枚だけ作られます。表示しても再生成はされません。
+            {context.revisionId === null
+              ? 'ポスター図はこのブラウザで描画され、PNG として保存できます。サインインして解析結果をクラウドに保存すると、図もそこに記録されます。'
+              : '自動ポスター図は解析1件につき1枚だけ作られます。表示しても再生成はされません。'}
           </p>
+
+          {progress === null ? null : (
+            <p className="panel__hint" role="status">
+              {progress}
+            </p>
+          )}
 
           {status.kind === 'ready' ? (
             <>
@@ -84,6 +108,10 @@ export function PosterPanel(props: PosterPanelProps): React.JSX.Element {
               <p className="panel__hint">
                 <a href={status.url} target="_blank" rel="noreferrer">
                   元のサイズで開く
+                </a>
+                {'　'}
+                <a href={status.url} download={`${context.runCode}_poster.png`}>
+                  PNG を保存
                 </a>
               </p>
             </>
@@ -123,16 +151,14 @@ export function PosterPanel(props: PosterPanelProps): React.JSX.Element {
           <h3 className="panel__title">作成した図</h3>
           <ul className="dataset-list">
             {props.customPosters.map((poster) => (
-              <li className="dataset-list__item" key={poster.posterId}>
-                <a
-                  className="dataset-list__name"
-                  href={posterImageUrl(poster.posterId)}
-                  target="_blank"
-                  rel="noreferrer"
-                >
+              <li className="dataset-list__item" key={poster.posterId ?? poster.createdAt}>
+                <a className="dataset-list__name" href={poster.imageUrl} target="_blank" rel="noreferrer">
                   {new Date(poster.createdAt).toLocaleString('ja-JP')}
                 </a>
-                <span className="panel__hint">{poster.presetVersion}</span>
+                <span className="panel__hint">
+                  {poster.presetVersion}
+                  {poster.posterId === null ? '（未保存）' : ''}
+                </span>
               </li>
             ))}
           </ul>

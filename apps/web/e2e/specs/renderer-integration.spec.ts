@@ -1,5 +1,5 @@
 /**
- * Browser-built plot spec → Worker validation → the real Python renderer → PNG bytes.
+ * Browser-built plot spec → the in-browser Python renderer → Worker validation → PNG bytes stored.
  *
  * This is the integration the rest of the poster machinery is built on, and it is the one place it
  * is asserted end to end with nothing faked in the middle:
@@ -7,25 +7,24 @@
  *  - the spec is the one `@aat/plot-spec` built in the browser from the analysis's full-resolution
  *    arrays. It is captured off the wire rather than reconstructed here, so the bytes tested are
  *    the bytes the application sends.
- *  - the Worker validates it with the same Zod schema it deploys with, and refuses a spec that
- *    breaks the contract *before* a container is ever started — asserted below with a real refusal,
- *    because "the Worker validates" is only meaningful if something is actually rejected.
- *  - the renderer is `poster-renderer/Dockerfile` built and run under Docker: pinned base image,
- *    hash-pinned wheels, Matplotlib Agg. The Durable Object that would drive a Cloudflare Container
- *    in production forwards to it over HTTP (see `e2e/worker/entry.ts`); everything on the AAT side
- *    of that boundary is the deployed code.
+ *  - the renderer is the real Python render core (`poster-renderer/src/poster_renderer`) running
+ *    under Pyodide in a Web Worker inside the page under test — the same code the container used
+ *    to run, pinned by the vendored Pyodide build the app ships. Nothing about the picture is
+ *    produced in Node or stubbed.
+ *  - the Worker validates the spec with the same Zod schema it deploys with, and refuses one that
+ *    breaks the contract — asserted below with a real refusal, because "the Worker validates" is
+ *    only meaningful if something is actually rejected. The PNG is uploaded with it, so the stored
+ *    figure is exactly what the browser drew.
  *  - the PNG is read back through `GET /api/v1/posters/:id/image`, and its header is parsed. A
  *    stub returning a 1×1 pixel would pass a "did we get bytes" check and fails this one: the image
  *    has to be the preset's 10.6 × 3.4 inches at 300 dpi, and its `Software` text chunk has to name
  *    the renderer build that drew it.
- *
- * If the container is not available the test is skipped loudly rather than passing against nothing.
  */
 
 import { readFileSync } from 'node:fs'
 import path from 'node:path'
 import { openCsv, RUN_FIXTURE, registerWithInvitation, statusLane, waitForAnalysis } from '../harness/app.ts'
-import { expect, rendererAvailable, test } from '../harness/fixtures.ts'
+import { expect, test } from '../harness/fixtures.ts'
 import { REPO_ROOT } from '../harness/stack.ts'
 
 const PNG_MAGIC = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])
@@ -33,9 +32,9 @@ const PNG_MAGIC = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])
 /**
  * `RENDERER_VERSION`, read from the renderer's own source rather than restated here.
  *
- * The property under test is "the stored record and the PNG both name the build that drew them",
- * not "the renderer is currently at version X". Pinning the literal tests the second thing, and
- * `RENDERER_VERSION` is a constant *designed to move* — it is bumped on every dependency update
+ * The property under test is "the stored figure and the PNG both name the render code that drew
+ * them", not "the renderer is currently at version X". Pinning the literal tests the second thing,
+ * and `RENDERER_VERSION` is a constant *designed to move* — it is bumped on every dependency update
  * that can shift a byte (`poster-renderer/README.md`, "Why the versions are pinned"). A pinned
  * literal therefore turns a correct bump into a red E2E run, and the obvious way to make that run
  * green again is to edit the literal without checking whether the two values still agree — which
@@ -62,12 +61,11 @@ function pngSize(bytes: Buffer): { width: number; height: number } {
 }
 
 test.describe('real poster renderer', () => {
-  test.skip(
-    !rendererAvailable,
-    'The poster renderer container is not running. Build it with `docker build -t aat-poster-renderer:ci poster-renderer` and re-run; the suite starts and stops it itself.',
-  )
-
-  test('draws the browser’s plot spec and returns a real PNG', async ({ page, harness, authenticator }) => {
+  test('draws the browser’s plot spec in the page and stores the PNG it drew', async ({
+    page,
+    harness,
+    authenticator,
+  }) => {
     void authenticator
 
     let specBody: string | null = null
@@ -89,9 +87,11 @@ test.describe('real poster renderer', () => {
     await openCsv(page, RUN_FIXTURE, '260815a_data.csv')
     await waitForAnalysis(page)
     await expect(statusLane(page, 'クラウド同期')).toHaveText('保存済み', { timeout: 60_000 })
-    await expect(statusLane(page, 'ポスター図')).toHaveText('生成済み', { timeout: 120_000 })
+    // The engine has to boot Pyodide and render before the upload happens; the lane reports the
+    // finished figure, so this wait covers the whole in-page pipeline.
+    await expect(statusLane(page, 'ポスター図')).toHaveText('生成済み', { timeout: 240_000 })
 
-    /* ---------------------------------------- what the browser actually sent to be drawn */
+    /* ---------------------------------------- what the browser actually sent to be stored */
 
     expect(specBody).not.toBeNull()
     const sent = JSON.parse(specBody ?? '{}') as {
@@ -104,6 +104,8 @@ test.describe('real poster renderer', () => {
         figureHeight: number
         data: { inner?: { time: { length: number } } }
       }
+      pngBase64: string
+      engineVersion?: string
     }
     expect(sent.spec.runCode).toBe('260815a')
     expect(sent.spec.posterKind).toBe('auto')
@@ -114,7 +116,19 @@ test.describe('real poster renderer', () => {
     // Full resolution, not the decimated series the screen draws.
     expect(sent.spec.data.inner?.time.length ?? 0).toBeGreaterThan(1000)
 
-    /* ------------------------------------------------------------------ the bytes back */
+    /* ---------------------------------------------------- the bytes the browser produced */
+
+    expect(sent.pngBase64).toBeTruthy()
+    const uploaded = Buffer.from(sent.pngBase64, 'base64')
+    expect(pngSize(uploaded)).toEqual({ width: EXPECTED_WIDTH, height: EXPECTED_HEIGHT })
+    // Matplotlib writes the metadata the renderer asked it to — this is the byte-level fingerprint
+    // of the real render core, and no stub in this repository produces it.
+    expect(uploaded.toString('latin1')).toContain(`AAT poster-renderer ${RENDERER_VERSION}`)
+    expect(uploaded.toString('latin1')).toContain('(aat-poster-v1)')
+    // Several hundred kilobytes of line plot, not a placeholder.
+    expect(uploaded.byteLength).toBeGreaterThan(20_000)
+
+    /* ------------------------------------------------------------------ the record, and back */
 
     const figure = await harness.one<{ id: string; renderer_version: string; preset_version: string }>(
       `SELECT pf.id AS id, pf.renderer_version AS renderer_version, pf.preset_version AS preset_version
@@ -125,24 +139,21 @@ test.describe('real poster renderer', () => {
       ['260815a'],
     )
     expect(figure?.preset_version).toBe('aat-poster-v1')
-    // The record names the build that drew it: the container reported this through
-    // `X-Poster-Renderer-Version`, and it has to be the version the image was actually built from.
-    expect(figure?.renderer_version).toBe(RENDERER_VERSION)
+    // The record names the engine that drew it, which the browser reported with the upload.
+    expect(figure?.renderer_version).toBeTruthy()
+    if (sent.engineVersion !== undefined) {
+      expect(figure?.renderer_version).toBe(sent.engineVersion)
+    }
 
     const image = await page.request.get(`/api/v1/posters/${figure?.id}/image`)
     expect(image.status()).toBe(200)
     expect(image.headers()['content-type']).toContain('image/png')
 
     const bytes = Buffer.from(await image.body())
-    expect(pngSize(bytes)).toEqual({ width: EXPECTED_WIDTH, height: EXPECTED_HEIGHT })
-    // Matplotlib writes the metadata the renderer asked it to. This is the byte-level fingerprint
-    // of the pinned image: no stub in this repository produces it.
-    expect(bytes.toString('latin1')).toContain(`AAT poster-renderer ${RENDERER_VERSION}`)
-    expect(bytes.toString('latin1')).toContain('(aat-poster-v1)')
-    // Several hundred kilobytes of line plot, not a placeholder.
-    expect(bytes.byteLength).toBeGreaterThan(20_000)
+    // What comes back out is what the browser sent in — byte for byte.
+    expect(bytes.equals(uploaded)).toBe(true)
 
-    /* ------------------------------- the Worker refuses a bad spec before the container runs */
+    /* ----------------------------------- the Worker refuses a bad spec on the upload itself */
 
     const before = await harness.one<{ n: number }>('SELECT count(*) AS n FROM poster_figures')
 
@@ -160,7 +171,7 @@ test.describe('real poster renderer', () => {
       error: { code: 'INVALID_ANALYSIS_CONFIG', details: { reason: 'invalid_plot_spec' } },
     })
 
-    // Nothing was claimed, so nothing was drawn: validation happens before any container work.
+    // Nothing was stored: validation happens before any object write.
     const after = await harness.one<{ n: number }>('SELECT count(*) AS n FROM poster_figures')
     expect(after?.n).toBe(before?.n)
   })

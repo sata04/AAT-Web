@@ -31,7 +31,7 @@
  *    unclassified, which is the signal to add a rule here;
  *  - anything that could plausibly reach a job is routed to it, even when the
  *    connection is indirect (`poster-renderer/**` reaches the end-to-end suite
- *    because the browser sends a plot spec through the Worker to that renderer);
+ *    because the browser loads that exact Python render core under Pyodide);
  *  - pushes to `main` ignore this file entirely and run the full matrix, so a
  *    rule that is wrong is caught at the merge rather than never.
  *
@@ -73,8 +73,8 @@ const NONE = []
  *   web        lint, typecheck, the Node/DOM/workerd suites, the client build,
  *              the wrangler dry run and the Worker bundle-size gate.
  *   numerical  the vendored Python reference and `generate_golden.py --check`.
- *   poster     the renderer's pytest suite, the container build, and the suite
- *              again inside the image.
+ *   poster     the renderer's pytest suite, including the reference-image
+ *              check the browser-side Pyodide engine is held to.
  *   e2e        Playwright against a real local stack.
  */
 export const RULES = [
@@ -192,11 +192,12 @@ export const RULES = [
   { category: 'csv-fixtures', jobs: ['web', 'numerical', 'e2e'], match: /^tests\/fixtures\// },
 
   // -------------------------------------------------------------------------
-  // The poster renderer.
+  // The poster render core.
   //
   // Reaches the E2E suite because `renderer-integration.spec.ts` drives this
-  // exact image through the Worker — a change to the renderer's HTTP contract
-  // breaks that and nothing in the renderer's own pytest suite would notice.
+  // exact Python code inside the browser under test — a change to what it
+  // draws breaks that spec and nothing in the renderer's own pytest suite
+  // would notice.
   // -------------------------------------------------------------------------
   { category: 'poster-renderer', jobs: ['poster', 'e2e'], match: /^poster-renderer\// },
 ]

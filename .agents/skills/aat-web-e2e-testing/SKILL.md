@@ -1,6 +1,6 @@
 ---
 name: aat-web-e2e-testing
-description: How to E2E-test AAT-Web (analyzer) in a real browser on macOS — dev server, real OS-level file drags from Finder, keyboard-nav quirks, held-modifier gestures, and known pitfalls.
+description: How to E2E-test AAT-Web (analyzer) in a real browser — dev server, real OS-level file drags from Finder (macOS) or CDP/console fallbacks (Linux), Pyodide poster rendering, offline/cloud-disabled builds, and known pitfalls.
 ---
 
 # AAT-Web E2E testing on macOS
@@ -57,3 +57,55 @@ Before calling it an app bug, verify the hit target:
 
 ## Bad-data fixtures
 tests/fixtures/csv contains intentional edge cases: missing_sync_point / non_monotonic_time / non_numeric_mixed all import but stack WARNING notices (fallbacks announced, not errors). Useful for the notice stack; hard errors are hard to trigger from fixtures.
+
+---
+
+# Linux VM notes (Devin sessions)
+
+Verified on the Linux VM while testing the in-browser Pyodide poster engine.
+
+## App button handlers are pointerdown, not click
+
+Analyzer buttons (正式ポスター図を作成, 選択を解除, toolbar actions) run on `pointerdown`/`pointerup` handlers. A synthetic `el.click()` in the console does **not** trigger them. To drive one programmatically (e.g. a small target defeats coordinates), dispatch the full sequence:
+
+```js
+for (const t of ['pointerdown','pointerup','click'])
+  el.dispatchEvent(t === 'click'
+    ? new MouseEvent('click', {bubbles:true})
+    : new PointerEvent(t, {bubbles:true}));
+```
+
+## Selector traps
+
+- `section[aria-label="ポスター図"] button` selects the real poster-section button. Searching the whole document for the text `正式ポスター図` can match the toolbar **PNGを保存** button — its tooltip/title contains that string.
+- Small sidebar buttons (~24px) need exact coordinates; verify with `document.elementFromPoint(x,y)` and mark the target first with `el.style.outline='3px solid lime'` before committing a click.
+
+## DevTools console pitfalls
+
+- **Literal Japanese in typed console code gets mangled** (IME/clipboard) → SyntaxError. Always use `\uXXXX` escapes in selectors/strings (e.g. `'\u4f5c\u6210'` for 作成).
+- Page clicks steal DevTools console focus — re-click the console input line before typing.
+- `document.title = '...'` is a reliable one-line readout channel when you can't read console return values.
+
+## Relaunched Chrome loses CDP
+
+If Chrome is closed and relaunched without `--remote-debugging-port=9222`, `browser_console`/`read_dom` stop working. Either relaunch with the flag or fall back to DevTools-console typing + `document.title` readouts + screenshots.
+
+## Poster-engine specifics (Pyodide in a worker)
+
+- First render takes ~15–20s cold (Pyodide boot + wheel load); console logs `Loading Pillow, contourpy, …` then `Loaded …`.
+- Runtime cache: `/pyodide/` assets land in the **`aat-poster-engine`** Cache Storage bucket after one online render (≈14 entries). Check via `caches.keys()` / `(await (await caches.open('aat-poster-engine')).keys()).length` — expect the entries to be `Request` objects keyed on the full URL.
+- Expected benign console noise when signed out: `404 /api/v1/me` probes, and `ERR_FILE_NOT_FOUND` for stale blob: URLs left over from a pre-reload session. Anything mentioning CSP, `wasm-unsafe-eval`, worker creation failure, or "Invalid base URL" is a real failure.
+- PNG-save verification: real clicks on the `PNG を保存` link are easy to miss; `document.querySelector('a[download]').click()` works — check `~/Downloads/*_poster.png` (`ls -lt`).
+
+## Offline / service-worker testing
+
+- The **dev server emits no SW** — offline verification needs the production build: `pnpm --filter @aat/web build` then `pnpm --filter @aat/web exec vite preview --port 4173`.
+- Stronger than the DevTools offline checkbox: actually **kill the preview server** (`curl` → 000) so every fetch must come from SW precache or runtime cache. Then reload — the app shell comes from precache, `/pyodide/*` from `aat-poster-engine`.
+
+## Cloud-disabled build
+
+`VITE_AAT_CLOUD_ENABLED=false pnpm --filter @aat/web exec vite --port 5174`. Expected: footer loses the クラウド同期 lane, no サインイン text anywhere, and cloud-only routes (`/sign-in` etc.) do not render their screens — observed behavior: they land on the analyzer. The poster engine still works fully (cloud-out only removes cloud modules).
+
+## Devin secrets needed
+
+None — all flows above work signed-out (local-first).

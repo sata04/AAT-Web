@@ -1,17 +1,20 @@
 # poster-renderer
 
-The canonical formal-poster renderer for AAT Web: a small Python + Matplotlib service that turns
+The canonical formal-poster renderer for AAT Web: a Python + Matplotlib package that turns
 an already-analysed numeric series and a declarative plot specification into a PNG.
 
-It runs as a Cloudflare Container. It performs **no analysis** — every number it draws was
-computed by `packages/analysis-core` in the browser, bit-for-bit compatibly with the desktop
-application (see `docs/numerical-compatibility.md`). Its one job is to be the *only* place in AAT
+It runs inside the browser under Pyodide (CPython compiled to WASM), in a dedicated Web Worker —
+see `apps/web/src/poster/engine/`. The HTTP service and container image it used to ship as have
+been removed. It performs **no analysis** — every number it draws was computed by
+`packages/analysis-core` in the browser, bit-for-bit compatibly with the desktop application
+(see `docs/numerical-compatibility.md`). Its one job is to be the *only* place in AAT
 Web where a formal research figure is drawn, so that figure looks the same today, next year, and
 on every machine.
 
+Running the contract suite still only needs a pinned virtualenv:
+
 ```
-POST /render    application/json  ->  image/png
-GET  /health                      ->  application/json
+poster-renderer/.venv/bin/python -m pytest poster-renderer/tests
 ```
 
 ---
@@ -72,53 +75,55 @@ places. So:
   `The Gravity Level <name>`, because a formal poster's title format is part of what makes it
   formal.
 
-This is the one place where the container's reading of `packages/plot-spec` is an interpretation
+This is the one place where the render core's reading of `packages/plot-spec` is an interpretation
 rather than a transcription. It is isolated in `PosterPlotSpec.display_name` so that reconciling
-it with the Worker is a one-line change.
+it with the client is a one-line change.
 
 ---
 
 ## 2. Why the versions are pinned
 
-| Pinned thing | Where | Why it moves pixels |
+Two stacks matter now, pinned in two places:
+
+| Stack | Pinned where | Why it moves pixels |
 | --- | --- | --- |
-| Base image | `Dockerfile`, by **digest** | Ships zlib and libpng; a rebuild can change PNG bytes |
-| Python 3.14 | base image | Float formatting and stdlib behaviour feed tick labels |
-| matplotlib 3.11.1 | `requirements.txt` | The layout engine and the entire drawing stack |
-| numpy 2.5.1 | `requirements.txt` | Tick locators, and the arrays being drawn |
-| Pillow 12.3.0 | `requirements.txt` | Since Matplotlib 3.3 the PNG encoder itself |
-| FreeType | inside the Matplotlib wheel | Glyph rasterisation and hinting |
-| DejaVu Sans | inside the Matplotlib wheel | The glyphs |
+| **Pyodide wheels** — matplotlib, numpy, pillow, inside the Pyodide build | the `pyodide` npm package in `pnpm-lock.yaml`; each wheel's sha256 in its `pyodide-lock.json`, verified by `apps/web/scripts/vendor-poster-assets.mjs` | What the browser actually draws with |
+| **Native reference** — matplotlib, numpy, pillow | `requirements.txt`, `--require-hashes` | The desktop-parity oracle this suite compares against |
 
-matplotlib 3.11.1 and numpy 2.5.1 are what `/home/user/AAT/uv.lock` resolves for Python >= 3.12 —
-the desktop application's own versions. That equality is the whole point.
+The native pins track what the desktop application's `uv.lock` resolves for Python >= 3.12 —
+that equality is the whole point of keeping them. The Pyodide wheels are whatever the pinned
+Pyodide release bundles, which is *not* the same set; `docs/poster-renderer.md` covers what
+that divergence means for the reference tolerances and for `RENDERER_VERSION`.
 
-Note the last two rows: FreeType and the font are *not* separate dependencies. They are compiled
-and bundled into the Matplotlib manylinux wheel, which is why the image installs no system font
-package and why `--only-binary=:all:` matters — a locally built Matplotlib would link a different
-FreeType and render different glyphs.
+FreeType and the font are *not* separate dependencies in either stack. They are compiled
+and bundled into each Matplotlib wheel — manylinux on the native side, Pyodide's own wheel on
+the browser side — which is why `--only-binary=:all:` matters: a locally built Matplotlib would
+link a different FreeType and render different glyphs.
 
-> **`requirements.txt` requires Python >= 3.12.** numpy 2.5.1 publishes no cp311 wheels.
+> **`requirements.txt` requires Python >= 3.12.** numpy 2.5.x publishes no cp311 wheels.
 
 ### Changing the contract
 
-**Python, Matplotlib, NumPy, Pillow, FreeType, the font stack and the base image are
+**Python, Matplotlib, NumPy, Pillow, FreeType, the font stack and the Pyodide build are
 visual-contract changes. They must never be auto-merged.**
 
-`renovate.json5` labels `poster-renderer/**` updates `visual-contract` / `needs-visual-review` and
-excludes them from auto-merge at every update type, including patch (see `docs/supply-chain.md`).
-A patch bump that moves a tick label by one pixel silently invalidates the guarantee this whole
-container exists to provide.
+`renovate.json5` labels `poster-renderer/**` updates — and the `pyodide` npm package —
+`visual-contract` / `needs-visual-review` and excludes them from auto-merge at every update
+type, including patch (see `docs/supply-chain.md`). A patch bump that moves a tick label by one
+pixel silently invalidates the guarantee this whole component exists to provide.
 
 The review procedure:
 
 1. Take the update on a branch.
 2. Run the suite: `poster-renderer/.venv/bin/python -m pytest poster-renderer/tests`.
-3. If `test_reference_image.py` fails, **look at the two images**. Render the new one with
+3. Run the engine suite: `pnpm --filter @aat/web test test/ui/poster-engine.test.ts`. For an
+   intended Pyodide bump, regenerate the browser baseline with
+   `node apps/web/scripts/generate-poster-fixture.mjs`.
+4. If `test_reference_image.py` fails, **look at the two images**. Render the new one with
    `--update-reference`, open both, and decide whether the difference is acceptable.
-4. If it is, and only then, commit the regenerated reference *with* the dependency bump in the
-   same commit, so the pixel change and its cause are inseparable in the history.
-5. If the *contract itself* is meant to change — a new colour, a new layout — that is not an
+5. If it is, and only then, commit the regenerated reference/fixture *with* the dependency bump
+   in the same commit, so the pixel change and its cause are inseparable in the history.
+6. If the *contract itself* is meant to change — a new colour, a new layout — that is not an
    edit to `aat-poster-v1`. It is a new preset version, so posters already stored keep rendering
    the way they always have. The exception is a preset that was **wrong about the desktop**: that
    is a defect in `v1`, not an alternative style, and it is fixed in place.
@@ -133,71 +138,39 @@ safeguard in this directory.
 
 ---
 
-## 3. The service
+## 3. The render core
 
-### `POST /render`
+The package is a pure spec-in / bytes-out module with no I/O of its own. The browser's Web Worker
+(`apps/web/src/poster/engine/`) loads these sources into Pyodide and calls one entry point,
+`render_spec_json`, exposed by `entry.py` on the engine side: a spec JSON document in, PNG bytes
+out.
 
-Body: the poster plot spec defined by `packages/plot-spec/src/spec.ts`. Numeric series arrive as
+Input: the poster plot spec defined by `packages/plot-spec/src/spec.ts`. Numeric series arrive as
 base64 of little-endian float64 (`wire.ts`), because JSON has no NaN — and `NaN` in a `values`
 array is the documented "gap" marker, drawn as a break in the line.
 
-Response: `image/png`, with `X-Poster-Renderer-Version` and `X-Poster-Preset-Version`.
-
 Validation is a from-scratch reimplementation of the Zod schema, in
 [`src/poster_renderer/validation.py`](src/poster_renderer/validation.py), with every limit in
-[`src/poster_renderer/limits.py`](src/poster_renderer/limits.py). The Worker has already validated
-the request; the container validates it again because a container must never treat its caller as
-trusted. Enforced: 8 MiB payload cap (checked against `Content-Length` before the body is read),
-200,000 points per array, equal `time`/`values` lengths, finite ordered axis bounds, finite `time`
-samples, no `±Infinity` anywhere, title <= 120 characters with no control characters, the series /
-`posterKind` / preset enums, `dpi` in 72..600, figure dimensions in 2..20 inches, and **no unknown
-keys anywhere**.
+[`src/poster_renderer/limits.py`](src/poster_renderer/limits.py). The client has already validated
+the spec; the render core validates it again because a render core must never treat its caller as
+trusted — the same document also arrives in the upload body from any client of the Worker's API.
+Enforced: 8 MiB payload cap, 200,000 points per array, equal `time`/`values` lengths, finite
+ordered axis bounds, finite `time` samples, no `±Infinity` anywhere, title <= 120 characters with
+no control characters, the series / `posterKind` / preset enums, `dpi` in 72..600, figure
+dimensions in 2..20 inches, and **no unknown keys anywhere**.
 
 Two mirrors of one contract can drift, so `test_validation.py` asserts each constant by value
 against `spec.ts`. It also closes two gaps where Python is laxer than JavaScript: `json.loads`
 accepts the literals `NaN`/`Infinity` (rejected here), and Python's `\d` matches Unicode digits
 (the run-code pattern is compiled with `re.ASCII`).
 
-### `GET /health`
+### Errors
 
-Readiness plus build identity: renderer version, desktop baseline version (the watermark's),
-preset version,
-and whether the render worker is warm. Used by the Docker `HEALTHCHECK`.
-
-### Concurrency and backpressure
-
-One render at a time. The waiting room is bounded (`POSTER_MAX_QUEUED`, default **0**), and a
-request that finds it full is rejected immediately with **429 `POSTER_BUSY`** rather than queued.
-An unbounded queue would convert a burst into a slow, memory-hungry meltdown instead of a fast,
-retryable "no", and the API's poster endpoint is idempotent by design
-(`docs/web-architecture.md`), so retrying is always safe.
-
-Renders run in a persistent `spawn`ed subprocess. That is what makes the per-request deadline
-truthful: a Matplotlib render is a long call into C and cannot be interrupted in-process, so when
-the deadline expires the process is killed and its memory really is released. The same isolation
-means a segfault in Agg or FreeType costs one request, not the service; the next request gets a
-fresh worker. The worker is persistent, so the Matplotlib import is paid once at startup, not per
-request.
-
-### Error codes
-
-Only the Worker talks to this container, so these codes are an internal contract; the Worker maps
-them onto the localised taxonomy in `packages/shared/src/errors.ts`.
-
-| Code | HTTP | Meaning | Shared taxonomy |
-| --- | --- | --- | --- |
-| `POSTER_BUSY` | 429 | Render slot and waiting room full | `POSTER_BUSY` (forwarded) |
-| `POSTER_RENDER_FAILED` | 500 | Rendering raised | `POSTER_RENDER_FAILED` (forwarded) |
-| `POSTER_RENDER_TIMEOUT` | 504 | Deadline exceeded, worker killed | `POSTER_RENDER_FAILED` |
-| `POSTER_SPEC_INVALID` | 400 | Body is not a valid spec | `INTERNAL` — the Worker validated first, so this is a Worker bug |
-| `POSTER_PAYLOAD_TOO_LARGE` | 413 | Body exceeds the transport cap | `EXPORT_TOO_LARGE` |
-| `POSTER_UNSUPPORTED_MEDIA_TYPE` | 415 | Not `application/json` | `INTERNAL` |
-| `POSTER_LENGTH_REQUIRED` | 411 | Chunked or missing `Content-Length` | `INTERNAL` |
-| `POSTER_METHOD_NOT_ALLOWED` | 405 | Wrong method | `INTERNAL` |
-| `POSTER_NOT_FOUND` | 404 | Unknown path | `INTERNAL` |
-
-Error bodies are `{"code", "message", "field?"}` and **never quote client input** — nothing
-client-controlled is reflected into a response, a header, or a log line.
+`errors.py` raises `RendererError` subclasses that the bridge serialises as
+`{"code", "message", "field?"}` — never quoting client input, so nothing client-controlled is
+reflected back. `POSTER_SPEC_INVALID` means the spec failed validation; everything else surfaces
+as `POSTER_RENDER_FAILED`. The client maps those onto the localised taxonomy in
+`packages/shared/src/errors.ts`, plus `POSTER_ENGINE_UNAVAILABLE` for a worker that never booted.
 
 ### What the renderer cannot do
 
@@ -208,33 +181,9 @@ client-controlled is reflected into a response, a header, or a log line.
   constructs a filesystem path and never spawns a shell. A run legitimately named
   `../../etc/passwd` renders as text and does nothing else — `test_hostile_titles_are_inert`.
 * No interactive backend, and above all never WebAgg (which would open a socket). `MPLBACKEND=Agg`
-  is forced in the package's `__init__` before Matplotlib is imported, and again in the image.
-* No outbound network. Nothing is fetched at runtime. CI runs the image with `--network none`.
-
-### Configuration
-
-All from the environment, never from a request. Invalid values fail at startup rather than
-producing surprising behaviour later.
-
-| Variable | Default | Purpose |
-| --- | --- | --- |
-| `POSTER_HOST` | `0.0.0.0` | Bind address |
-| `POSTER_PORT` | `8080` | Bind port |
-| `POSTER_RENDER_TIMEOUT_SECONDS` | `30` | Per-render deadline |
-| `POSTER_STARTUP_TIMEOUT_SECONDS` | `60` | Worker readiness deadline |
-| `POSTER_MAX_QUEUED` | `0` | Extra requests allowed to wait for the render slot |
-| `POSTER_SOCKET_TIMEOUT_SECONDS` | `30` | Per-connection read/write timeout |
-| `POSTER_MAX_CONCURRENT_REQUESTS` | `8` | Requests concurrently parsing bodies |
-
-The payload cap is deliberately not configurable: it is one half of a contract with
-`packages/plot-spec`.
-
-### Why the standard library
-
-Two endpoints, one content type, one client. A web framework would add a dependency tree to a
-container whose entire value is that its dependency set is pinned, auditable, and never changes
-without a visual-regression review. What a framework would buy — routing, body parsing,
-validation — is three lines, one line, and the thing this service most needs to do by hand.
+  is forced in the package's `__init__` before Matplotlib is imported.
+* No network. The worker's `connect-src 'self'` CSP and same-origin vendored assets make the
+  runtime fetch nothing it did not ship with.
 
 ---
 
@@ -246,17 +195,18 @@ A pinned virtualenv lives at `poster-renderer/.venv`.
 # Run the suite (also how CI runs it, from the repository root)
 poster-renderer/.venv/bin/python -m pytest poster-renderer/tests
 
-# Serve locally
-POSTER_PORT=8080 PYTHONPATH=poster-renderer/src poster-renderer/.venv/bin/python -m poster_renderer
+# Exercise the real engine — Pyodide in Node — against its committed baseline
+pnpm --filter @aat/web test test/ui/poster-engine.test.ts
 
-# Build and test the image exactly as CI does
-docker build -t aat-poster-renderer:dev poster-renderer
-docker run --rm --network none aat-poster-renderer:dev python -m pytest /app/tests -q
+# Regenerate the browser-side baseline after an intended stack change
+node apps/web/scripts/generate-poster-fixture.mjs
 ```
 
-On macOS or Windows, use the virtualenv. `requirements.txt` pins Linux wheels only, on purpose: it
-is the container's lock file, not a cross-platform one, and it lists no sdists so an unsupported
-platform fails loudly instead of building a subtly different binary.
+`requirements.txt` pins Linux wheels only, on purpose: it is the native reference stack's lock
+file, not a cross-platform one, and it lists no sdists so an unsupported platform fails loudly
+instead of building a subtly different binary. The `.venv` is provisioned with a managed
+Python >= 3.12 (e.g. `uv python install 3.13 && uv venv .venv --python 3.13`) plus
+`uv pip install --require-hashes -r requirements.txt`.
 
 ### Reference images
 
@@ -282,8 +232,10 @@ Two guarantees, and the difference between them matters:
 
 Byte equality against the committed reference is available but **opt-in**, via
 `POSTER_STRICT_REFERENCE_BYTES=1`, because the committed file was produced on one machine.
-Enable it when the reference was regenerated inside the image you are testing in — then it becomes
-the strictest visual-regression gate available.
+Enable it when the reference was regenerated in the exact environment you are testing in — then
+it becomes the strictest visual-regression gate available. The browser side has its own byte-exact
+anchor: `apps/web/test/fixtures/poster-aat-poster-v1-72dpi-pyodide.png`, asserted unconditionally
+because WASM CPython is byte-deterministic across boots.
 
 ---
 
@@ -291,7 +243,8 @@ the strictest visual-regression gate available.
 
 * `packages/plot-spec/` — the spec schema and the TypeScript mirror of the preset
 * `docs/supply-chain.md` — why these dependencies never auto-merge
-* `docs/web-architecture.md` — where the renderer sits, and poster idempotency
+* `docs/poster-renderer.md` — the engine's place in the system and the review procedure
+* `docs/web-architecture.md` — where the engine sits, and poster idempotency
 * `docs/numerical-compatibility.md` — the bit-equality guarantee for the numbers being drawn
 * `/home/user/AAT/gui/plot_controller.py`, `/home/user/AAT/gui/styles.py`,
   `/home/user/AAT/tests/gui/test_export_graph_invariance.py` — the originals

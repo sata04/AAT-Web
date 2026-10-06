@@ -36,7 +36,14 @@
  * Worker that no longer exists — and the only way to guarantee agreement is to
  * have one source.
  *
- * Usage: AAT_PAGES_PROJECT=<name> node scripts/resolve-pages-config.mjs [output-path]
+ * ## The cloud-disabled case
+ *
+ * With `AAT_CLOUD_ENABLED=false` the deploy job ships a static Pages site and no Worker at all,
+ * so the generated config carries no `services` entry. The Function still deploys — it answers
+ * every `/api/*` with the documented 404 that means "this deployment has no cloud half" — but it
+ * must never be handed a binding that names a script that does not exist.
+ *
+ * Usage: AAT_PAGES_PROJECT=<name> [AAT_CLOUD_ENABLED=false] node scripts/resolve-pages-config.mjs [output-path]
  */
 
 import { readFileSync, writeFileSync } from 'node:fs'
@@ -73,6 +80,9 @@ if (!projectName) {
   process.exit(1)
 }
 
+/** 'false' means: static site only — no Worker to bind to. */
+const cloudEnabled = process.env.AAT_CLOUD_ENABLED !== 'false'
+
 const worker = parseJsonc(readFileSync(WORKER_CONFIG, 'utf8'))
 
 for (const [field, value] of Object.entries({
@@ -90,12 +100,14 @@ for (const [field, value] of Object.entries({
  * The Function has to be able to reach the Worker, and a Worker that still
  * serves its own assets would mean the migration is half-done: two public
  * origins, two WebAuthn origins, and a second unauthenticated path to D1 and R2.
+ * Skipped when the cloud is off — the Worker's configuration may carry
+ * bindings the disabled deployment never resolves, and none of it ships.
  */
-if (worker.assets !== undefined) {
+if (cloudEnabled && worker.assets !== undefined) {
   console.error(`${WORKER_CONFIG} still declares "assets". Pages serves the client now; remove it.`)
   process.exit(1)
 }
-if (worker.workers_dev !== false) {
+if (cloudEnabled && worker.workers_dev !== false) {
   console.error(`${WORKER_CONFIG} must set "workers_dev": false — the API Worker has no public origin.`)
   process.exit(1)
 }
@@ -155,7 +167,7 @@ const config = {
   pages_build_output_dir: '../dist/client',
   compatibility_date: worker.compatibility_date,
   compatibility_flags: worker.compatibility_flags,
-  services: [{ binding: SERVICE_BINDING, service: worker.name }],
+  ...(cloudEnabled ? { services: [{ binding: SERVICE_BINDING, service: worker.name }] } : {}),
 }
 
 const outputPath = process.argv[2] ?? DEFAULT_OUTPUT
@@ -163,6 +175,9 @@ writeFileSync(outputPath, `${JSON.stringify(config, null, 2)}\n`)
 
 // The project name is the public hostname; it is not printed.
 console.log(
-  `Wrote ${outputPath}: binding ${SERVICE_BINDING} -> ${worker.name}, ` +
+  `Wrote ${outputPath}: ` +
+    (cloudEnabled
+      ? `binding ${SERVICE_BINDING} -> ${worker.name}, `
+      : 'no service binding (cloud disabled), ') +
     `compatibility ${worker.compatibility_date} [${worker.compatibility_flags.join(', ')}]`,
 )

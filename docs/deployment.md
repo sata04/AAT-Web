@@ -20,9 +20,7 @@ cost money, and the step that sets `AAT_RP_ID` is effectively irreversible — s
 | Holds Doppler / OIDC capability | no | yes |
 | Runs `pnpm install` scripts, linters, tests | yes | install only |
 | Runs `pnpm build` | yes | **no** |
-| Runs `docker build` | yes | **no** |
-| Reads `poster-renderer/Dockerfile` | yes | **no** |
-| Produces the client bundle and container image | yes | consumes them as artefacts |
+| Produces the client bundle | yes | consumes it as an artefact |
 
 The threat model is "the repository itself is hostile" — a compromised dependency, or a commit
 nobody read closely enough. `id-token: write` can only be granted per job, and GitHub injects the
@@ -31,10 +29,9 @@ code that runs in `deploy` can therefore mint an OIDC token and read the entire 
 config. There is no way to fence that off from inside, so the response is to run as little as
 possible there.
 
-Concretely: `verify` builds and tests the container image and uploads it as an artefact, and
-`deploy` pushes that artefact. Wrangler's convenient "build my Dockerfile during deploy" path is
-deliberately unused, because it would put a Dockerfile — and everything it can `RUN` — inside the
-credentialled job.
+Concretely: `verify` builds the client bundle and uploads it as an artefact, and `deploy` pushes
+that artefact. There is no image step any more: the poster renderer runs inside the browser under
+Pyodide, so the only build output a deployment consumes is the client bundle.
 
 The accepted residual risk is `wrangler` itself, which runs in `deploy` and does have that reach.
 It is already trusted with the Cloudflare token and the Worker secrets, so the marginal exposure is
@@ -45,18 +42,19 @@ this reason. See [supply-chain.md](./supply-chain.md).
 
 ## Required Cloudflare resources
 
-Everything below lives in one Cloudflare account on the **Workers Paid** plan. Containers are not
-available on the free plan. See [cost-controls.md](./cost-controls.md) for what each of these bills
-and why the guards exist.
+Everything below lives in one Cloudflare account. The Workers Paid plan is no longer forced on
+us — it was required by Cloudflare Containers, and the poster renderer now runs inside the
+browser — but check D1/R2/Workers usage limits against expected traffic before downgrading a
+paid account. See [cost-controls.md](./cost-controls.md) for what each of these bills and why the
+guards exist.
 
 | Resource | Name | Created by |
 | --- | --- | --- |
-| Workers Paid subscription | — | dashboard |
 | Worker | `aat-web` | first `wrangler deploy` |
 | D1 database | `aat-db` | `wrangler d1 create aat-db` |
 | R2 bucket (private) | `aat-objects` | `wrangler r2 bucket create aat-objects` |
-| Container application | `aat-poster-renderer` | first deploy with the `containers` binding |
-| Custom domain | the production hostname | the `Ensure custom domain` step |
+| Pages project | the production hostname | `AAT_PAGES_PROJECT`, first Pages deploy |
+| Custom domain | the production hostname | dashboard |
 
 The R2 bucket must stay private. There is no public R2 URL and no signed-URL issuance anywhere in
 this codebase: every read goes through the Worker so ownership is checked on the way out
@@ -64,26 +62,22 @@ this codebase: every read goes through the Worker so ownership is checked on the
 
 ### Placeholders that must be replaced
 
-Two account-scoped identifiers are committed as invalid placeholders. They are not secrets — they
-appear in `wrangler.jsonc`, which is in version control — but a wrong value must fail loudly rather
+One account-scoped identifier is committed as an invalid placeholder. It is not a secret — it
+appears in `wrangler.jsonc`, which is in version control — but a wrong value must fail loudly rather
 than write to some other account:
 
 | Location | Placeholder | Filled in from |
 | --- | --- | --- |
 | `d1_databases[0].database_id` | `00000000-0000-0000-0000-000000000000` | Doppler `AAT_D1_DATABASE_ID` (the id printed by `wrangler d1 create aat-db`) |
-| `containers[0].image` | `registry.cloudflare.com/000…0/aat-poster-renderer:latest` | the digest the deploy step captures after pushing the image |
 
 **The committed file is never the file that is deployed, and it stays invalid on purpose.** Wrangler
 performs no variable substitution inside its own configuration, so
-`apps/web/scripts/resolve-wrangler-config.mjs` produces a deploy-time copy with these two values
+`apps/web/scripts/resolve-wrangler-config.mjs` produces a deploy-time copy with this value
 filled in, and every step that reads configuration — the D1 migration and the deploy itself — is
-passed that copy with `--config`. The script asserts each placeholder matched exactly once, so an
-edit that moves or renames one fails the deploy instead of shipping a placeholder.
+passed that copy with `--config`. The script asserts the placeholder matched exactly once, so an
+edit that moves or renames it fails the deploy instead of shipping a placeholder.
 
 A deploy attempted from a developer machine without that step therefore fails, which is the intent.
-
-Wrangler also refuses an image whose account id is not the account being deployed to, so even a
-resolution that produced the wrong account fails closed rather than pulling a stranger's image.
 
 ## Secrets
 
@@ -136,10 +130,10 @@ rather than failing. There is no `CLOUDFLARE_ZONE_ID`: the public origin is the 
 hostname, which is not in a zone this account controls, so there is no zone to name — and, as
 `docs/security-scanning.md` records, no zone-scoped WAF or rate limiting either.
 
-The Cloudflare API token needs: Workers Scripts edit, D1 edit, R2 edit, and Containers/Cloudchamber
-edit. Scope it to the one account; do not use a global API key. It does **not** need Workers Domains
-— the deploy stopped touching the Workers Domains API when the public origin moved to Pages, and
-granting a scope nothing uses only widens what a leaked token could do.
+The Cloudflare API token needs: Workers Scripts edit, D1 edit, R2 edit, and Pages edit. Scope it
+to the one account; do not use a global API key. It does **not** need Workers Domains — the deploy
+stopped touching the Workers Domains API when the public origin moved to Pages, and granting a
+scope nothing uses only widens what a leaked token could do.
 
 On the Doppler side, constrain the OIDC identity with claim rules on `aud`, `sub`, `ref` and
 `job_workflow_ref` so that only this job, on `main`, in this repository qualifies. Without those
@@ -226,16 +220,8 @@ and redeem it immediately.
 > export CLOUDFLARE_API_TOKEN=$(doppler secrets get CF_DEPLOY_TOKEN_VALUE --project aat-web --config prd --plain)
 > export CLOUDFLARE_ACCOUNT_ID=$(doppler secrets get CLOUDFLARE_ACCOUNT_ID --project aat-web --config prd --plain)
 > AAT_D1_DATABASE_ID=$(doppler secrets get AAT_D1_DATABASE_ID --project aat-web --config prd --plain) \
-> POSTER_RENDERER_IMAGE="registry.cloudflare.com/${CLOUDFLARE_ACCOUNT_ID}/aat-poster-renderer:latest" \
 >   node scripts/resolve-wrangler-config.mjs wrangler.local.jsonc
 > ```
->
-> `POSTER_RENDERER_IMAGE` is never read by a `d1 execute`, but wrangler validates
-> the whole configuration before running any command. A placeholder such as
-> `unused` is rejected — "does not appear to be a valid path to a Dockerfile, or a
-> valid image registry path" — and one naming another account is refused too. The
-> value above is syntactically valid and belongs to this account, which is all the
-> validator asks of it.
 >
 > Then pass `--config wrangler.local.jsonc` to every command in this section, and
 > delete the file afterwards — it is gitignored, but it names the account.
@@ -287,11 +273,12 @@ product and must work for a signed-out visitor with no network.
    address bar afterwards.
 6. **Sign out and sign back in** with the passkey.
 7. **A full cloud round trip.** Analyse a file, confirm the revision is saved, confirm exactly one
-   automatic poster is produced and reaches `ready`, and confirm the Run Gallery shows it.
-8. **The container slept.** Wait past the sleep-after timeout and confirm no instance is still
-   running. A container that stays warm is a container being billed.
+   automatic poster is produced and reaches `ready`, and confirm the Run Gallery shows it. The
+   poster is drawn in the browser itself — the upload is what reaches R2.
+8. **Posters work offline too.** With the network disabled, generate a formal poster; the render
+   happens entirely in the page under Pyodide.
 9. **Quota and audit.** Confirm the Admin console reports non-zero storage for the run just created
-   and that the audit log contains the registration and the poster render.
+   and that the audit log contains the registration and the poster upload.
 
 ## Rollback
 
@@ -301,10 +288,10 @@ There are three independent things that can be rolled back, and they are not equ
 `wrangler rollback` / `wrangler deployments` for an immediate revert to the previous version. This
 is the fast path and is safe as long as the schema has not moved under it.
 
-**The container image.** `containers[0].image` references an immutable digest once deployed, so
-rolling the Worker back also rolls back the renderer. A poster rendered by an older image may
-differ from one rendered by the newer image — that is precisely what the frozen visual contract and
-`posterPresetVersion` exist to make visible rather than silent. See
+**The renderer.** There is no image to roll back — the render core ships inside the client bundle,
+so rolling the Pages deployment back also rolls back the renderer. A poster drawn by an older
+bundle may differ from one drawn by the newer one — that is precisely what the frozen visual
+contract and `posterPresetVersion` exist to make visible rather than silent. See
 [poster-renderer.md](./poster-renderer.md).
 
 **D1 migrations do not roll back.** `wrangler d1 migrations apply` only rolls forward, and there is
@@ -322,8 +309,29 @@ object delete; once the object is gone it is gone.
 
 It does not deploy anything, and it does not ask a contributor to supply production credentials in
 order to develop or test. Every suite in this repository runs against local fixtures, a local D1
-with the committed migrations applied, and a locally built container image. If a test appears to
+with the committed migrations applied, and the in-browser renderer. If a test appears to
 need production credentials, that is a bug in the test.
+
+## Disabling the cloud half
+
+`AAT_CLOUD_ENABLED` is one switch that turns a deployment into a purely local application. Set it
+to `'false'` in two places, because the two halves of the switch are decided in different stages:
+
+- **Doppler `aat-web/prd` → `AAT_CLOUD_ENABLED=false`** — the deploy job reads this and skips the
+  D1-id resolution, the migrations and the Worker deploy entirely. The Pages configuration is
+  generated without an `AAT_API` service binding, so the still-deployed `/api/*` Function answers
+  every request with the documented 404 that means "this deployment has no cloud half" — the
+  client's gateway already reads that as local-only, and no auth/D1 secrets are required by the
+  validation step.
+- **GitHub Actions variable `AAT_CLOUD_ENABLED=false`** (vars, not secrets — it is a posture, not
+  a credential) — the verify job builds the client with `VITE_AAT_CLOUD_ENABLED=false`, which
+  compiles the cloud lanes out of the bundle: no sign-in routes, no sync status, no admin
+  surface, no session probing.
+
+Set both or neither. A bundle built with the lanes but no Worker behind them shows a broken
+everything; a Worker behind a bundle with no lanes is invisible dead weight. When disabled, the
+deployment needs no secrets beyond the Cloudflare deploy credentials, and a signed-out user gets
+the complete local-first product — analysis and poster rendering included.
 
 ## Related documents
 
@@ -331,5 +339,5 @@ need production credentials, that is a bug in the test.
 - [auth-security.md](./auth-security.md) — passkeys, invitations, sessions, recovery
 - [cloud-data-model.md](./cloud-data-model.md) — D1, R2, revisions, quotas
 - [cost-controls.md](./cost-controls.md) — what bills, and every guard against it
-- [poster-renderer.md](./poster-renderer.md) — the container and the frozen visual contract
+- [poster-renderer.md](./poster-renderer.md) — the pinned render core and the frozen visual contract
 - [supply-chain.md](./supply-chain.md) — dependency policy and release-age gates

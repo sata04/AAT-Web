@@ -51,7 +51,7 @@ read statistics, compare datasets and export Excel. See
 | `packages/plot-spec` | The validated poster specification and frozen presets. |
 | `apps/web/src` | React application. |
 | `apps/web/worker` | Cloudflare Worker: auth, authorization, D1, R2, quotas. |
-| `poster-renderer` | Pinned Python + Matplotlib container. |
+| `poster-renderer` | Pinned Python + Matplotlib render core — runs in the browser under Pyodide (WASM). |
 | `reference/python/core` | Vendored desktop core — the numerical oracle. Read-only. |
 
 ## Commands
@@ -90,7 +90,9 @@ intended failure direction, not a bug to tune away.
 - **The poster style** (`poster-renderer/src/poster_renderer/preset.py`,
   `packages/plot-spec/src/presets.ts`) is frozen to the desktop export. Changing
   a colour, width or offset changes every published figure. Renovate is
-  configured never to auto-merge anything under `poster-renderer/`.
+  configured never to auto-merge anything under `poster-renderer/`. The same
+  core runs under Pyodide in the browser; the pinned Pyodide/Matplotlib build
+  is part of that contract.
 - **`reference/python/core/**`** is a verbatim copy of the desktop application.
 
 ## Known deliberate difference from the desktop app

@@ -1,8 +1,8 @@
 /**
  * The two API calls the admin console needs that `src/cloud/gateway.ts` does not yet expose.
  *
- * Everything else the console talks to — users, invitations, storage, quotas, the renderer's
- * circuit breaker — is already typed in the gateway and is imported from there. This module exists
+ * Everything else the console talks to — users, invitations, storage, quotas — is already typed in
+ * the gateway and is imported from there. This module exists
  * for the two routes that arrived after those clients were written:
  *
  *  - `GET /api/v1/admin/audit` grew `targetOwnerUserId` and `crossUserOnly` filters, and its rows

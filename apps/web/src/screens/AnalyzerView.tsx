@@ -4,7 +4,6 @@ import type { ColumnMapping, OpenedSource } from '../analysis/protocol.ts'
 import type { Dataset } from '../app/dataset.ts'
 import { openedSourceForDataset } from '../app/dataset.ts'
 import type { RangeStatisticsResult } from '../app/range-statistics.ts'
-import type { PosterFigure } from '../cloud/gateway.ts'
 import type { CloudStatuses } from '../cloud/status.ts'
 import { CloudStatusBar } from '../components/CloudStatusBar.tsx'
 import { csvFilesFrom, FileDropZone } from '../components/FileDropZone.tsx'
@@ -20,6 +19,7 @@ import type { SelectionRange } from '../graph/selection.ts'
 import type { GraphPalette } from '../graph/theme.ts'
 import { type ChartViewport, UPlotChart } from '../graph/UPlotChart.tsx'
 import { isComparing, type ViewMode } from '../graph/view-mode.ts'
+import type { PosterEntry } from '../poster/entry.ts'
 import { PosterPanel } from '../poster/PosterPanel.tsx'
 import type { PosterContext } from '../poster/requests.ts'
 import { AnalyzerDialogs } from './AnalyzerDialogs.tsx'
@@ -46,7 +46,7 @@ interface AnalyzerViewState {
   notices: readonly NoticeItem[]
   posterContext: PosterContext | null
   posterUnavailableReason: string | null
-  activeCustomPosters: readonly PosterFigure[]
+  activeCustomPosters: readonly PosterEntry[]
   pendingColumns: PendingColumnChoice | null
   settingsOpen: boolean
   helpOpen: boolean
@@ -94,7 +94,7 @@ interface AnalyzerViewActions {
   dismissNotice: (id: number) => void
   retrySync: () => void
   retryPoster: () => void
-  addCustomPoster: (poster: PosterFigure) => void
+  addCustomPoster: (poster: PosterEntry) => void
   notify: (tone: NoticeItem['tone'], text: string) => void
   setPendingColumns: Dispatch<SetStateAction<PendingColumnChoice | null>>
   /** Resolve the column dialog and continue any queued batch of files. */
@@ -435,7 +435,7 @@ function AnalyzerSidebar({
 export function AnalyzerView(props: AnalyzerViewProps): React.JSX.Element {
   const { state, actions } = props
   const hasDatasets = state.datasets.length > 0
-  const addCustomPoster = (poster: PosterFigure) => {
+  const addCustomPoster = (poster: PosterEntry) => {
     actions.addCustomPoster(poster)
     actions.notify('info', 'ポスター図を作成しました。')
   }

@@ -16,9 +16,6 @@
    *   - a real local D1 with the committed migrations applied, and a real local R2 bucket.
    *
    * What differs, and why:
-   *   - the container binding is a plain Durable Object that proxies to a poster-renderer image
-   *     running under Docker (see `e2e/worker/entry.ts`), because `workerd` outside Cloudflare has
-   *     no `ctx.container`;
    *   - `/__e2e__/*` is reached on this Worker's own port, not through Pages. Cloudflare Pages
    *     excludes paths beginning with `_` from Functions routing, so a `functions/__e2e__/`
    *     directory is never invoked and the request falls through to the static pipeline. The
@@ -62,26 +59,6 @@
     }
   ],
 
-  /*
-   * No `containers` block. Declaring one would make `wrangler dev` try to resolve and start a
-   * Cloudflare Container image; the class below is an ordinary Durable Object that forwards to the
-   * renderer over HTTP instead, so the image is started by the harness with `docker run`.
-   */
-  "durable_objects": {
-    "bindings": [
-      {
-        "name": "POSTER_RENDERER",
-        "class_name": "PosterRendererContainer"
-      }
-    ]
-  },
-  "migrations": [
-    {
-      "tag": "v1",
-      "new_sqlite_classes": ["PosterRendererContainer"]
-    }
-  ],
-
   "vars": {
     /*
      * ---------------------------------------------------------------------------------------
@@ -113,8 +90,6 @@
     "AAT_MAX_SNAPSHOT_BYTES": "16777216",
     "AAT_MAX_SOURCE_BYTES": "33554432",
     "AAT_MAX_POSTER_BYTES": "8388608",
-    "AAT_MAX_CONCURRENT_RENDERS": "1",
-    "AAT_RENDER_STALE_SECONDS": "300",
     "AAT_RESERVATION_TTL_SECONDS": "900"
   },
 
