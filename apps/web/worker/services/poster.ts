@@ -83,7 +83,10 @@ export async function decodePosterPng(pngBase64: string, maxBytes: number): Prom
     throw new ApiError('REQUEST_TOO_LARGE', { details: { maxBytes } })
   }
   const bytes = strictBase64Decode(pngBase64)
-  if (bytes.length === 0) {
+  // …but the encoded ceiling is only a pre-filter: when `maxBytes` is not a multiple of three,
+  // base64's 4-char rounding admits one or two bytes over it, so the decoded length is checked
+  // exactly as well.
+  if (bytes.length === 0 || bytes.length > maxBytes) {
     throw new ApiError('REQUEST_TOO_LARGE', { details: { maxBytes } })
   }
   if (!PNG_SIGNATURE.every((byte, index) => bytes[index] === byte)) {

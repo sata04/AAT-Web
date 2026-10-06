@@ -58,7 +58,7 @@ import {
 } from '../graph/view-mode.ts'
 import { type DemoDataset, demoCsvFile, demoFilename } from '../onboarding/demo-data.ts'
 import { type TourDriver, type TourSnapshot, type TourView, tourViewOf } from '../onboarding/tour-driver.ts'
-import { type PosterEntry, releasePosterUrls } from '../poster/entry.ts'
+import { openPosterUrlRegistry, type PosterEntry, releasePosterUrls } from '../poster/entry.ts'
 import type { PosterContext } from '../poster/requests.ts'
 import { useSession } from '../session/SessionProvider.tsx'
 import { type AnalyzerHint, AnalyzerView } from './AnalyzerView.tsx'
@@ -199,8 +199,12 @@ export function AnalyzerScreen(): React.JSX.Element {
 
   // Poster blob URLs are held until the screen unmounts: the panel and the status lane can show
   // the same figure, so no per-entry revocation point is safe, and unmounting is the one moment
-  // nothing can still be displaying any of them.
-  useEffect(() => () => releasePosterUrls(), [])
+  // nothing can still be displaying any of them. Reopening on mount matters for the renders that
+  // finish *after* an unmount — their URLs are revoked at mint time while the registry is closed.
+  useEffect(() => {
+    openPosterUrlRegistry()
+    return () => releasePosterUrls()
+  }, [])
   // Doing the thing is the same as being taught it: a user who selects a
   // range or enters compare before the hint appears never needs to see it.
   useEffect(() => {

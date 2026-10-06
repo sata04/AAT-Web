@@ -7,7 +7,7 @@
  * one). Keeping one type lets panels and dialogs show both without caring
  * whether the cloud is reachable — or enabled at all.
  */
-import type { PosterFigure } from '../cloud/gateway'
+import { type PosterFigure, posterImageUrl } from '../cloud/gateway'
 
 /**
  * `spec.analysisRevisionId` for a poster the cloud will never see.
@@ -70,37 +70,81 @@ export function entryFromRender(input: {
  * Copy `figure`'s identity onto an entry rendered locally, after the bytes
  * were uploaded and the Worker assigned the canonical row.
  *
- * `imageUrl` deliberately stays the *local* one: the upload proves the bytes
- * are stored, it does not make the already-rendered image need a network to
- * display. An entry that switched to the API URL would break its own preview
- * the moment the connection drops — the exact opposite of what the figure is
- * for.
+ * `imageUrl` deliberately stays the *local* one — and this is only sound because the
+ * caller reaches this function exclusively when the upload *created* the row: the
+ * stored figure then holds these very bytes, so the preview and the id describe
+ * the same image. An idempotent `created: false` answer names a figure someone
+ * else rendered (possibly under a different engine build) — for that, see
+ * {@link entryFromFigure}, which shows the stored image rather than this one.
  */
 export function entryWithFigure(entry: PosterEntry, figure: PosterFigure): PosterEntry {
   return { ...entry, posterId: figure.posterId, figure }
 }
 
 /**
+ * Wrap a figure the server already held.
+ *
+ * The stored row is the canonical image — the API URL, not a locally rendered
+ * copy that may differ byte-for-byte under another engine build. `png` is null
+ * for exactly the reason `imageUrl` is the remote one: the bytes here are the
+ * figure's, not the client's.
+ */
+export function entryFromFigure(figure: PosterFigure): PosterEntry {
+  return {
+    posterId: figure.posterId,
+    analysisRevisionId: figure.analysisRevisionId,
+    kind: figure.kind,
+    presetVersion: figure.presetVersion,
+    createdAt: figure.createdAt,
+    imageUrl: posterImageUrl(figure.posterId),
+    png: null,
+    status: figure.status,
+    rendererVersion: figure.rendererVersion,
+    failureCode: figure.failureCode,
+    figure,
+  }
+}
+
+/**
  * Blob URLs minted by {@link pngToDisplayUrl}, still potentially displayed.
  *
- * `URL.revokeObjectURL` is never called per entry on purpose: the panel and the
- * status lane can hold the same URL, and revoking on one drop would blank the
- * other. They are released wholesale at screen unmount instead, when nothing
- * can still be showing them.
+ * Per-entry revocation is deliberately rare: the panel and the status lane can
+ * hold the same URL, so revoking on one drop would blank the other. It happens
+ * only for URLs proven never-displayed ({@link releasePosterUrl}); the rest are
+ * released wholesale at screen unmount, when nothing can still be showing them.
  */
 const liveDisplayUrls = new Set<string>()
+/**
+ * False once the Analyzer screen has unmounted: a render that completes late mints a URL
+ * nobody can display, so new mints are revoked on the spot rather than parked in the set.
+ * Reopened by the next mount.
+ */
+let registryOpen = true
+
+/** Reopen the registry — called from the Analyzer screen's mount effect. */
+export function openPosterUrlRegistry(): void {
+  registryOpen = true
+}
+
+/** Revoke one URL minted by {@link pngToDisplayUrl} — e.g. a render that was never displayed. */
+export function releasePosterUrl(url: string): void {
+  liveDisplayUrls.delete(url)
+  globalThis.URL?.revokeObjectURL?.(url)
+}
 
 /** Revoke every live blob URL — called from the Analyzer screen's unmount. */
 export function releasePosterUrls(): void {
-  for (const url of liveDisplayUrls) globalThis.URL?.revokeObjectURL(url)
+  for (const url of liveDisplayUrls) globalThis.URL?.revokeObjectURL?.(url)
   liveDisplayUrls.clear()
+  registryOpen = false
 }
 
 export function pngToDisplayUrl(png: Uint8Array): string {
   const URL_ = globalThis.URL
   if (typeof URL_?.createObjectURL === 'function') {
     const url = URL_.createObjectURL(new Blob([png as BlobPart], { type: 'image/png' }))
-    liveDisplayUrls.add(url)
+    if (registryOpen) liveDisplayUrls.add(url)
+    else URL_.revokeObjectURL(url)
     return url
   }
   return `data:image/png;base64,${pngToBase64(png)}`

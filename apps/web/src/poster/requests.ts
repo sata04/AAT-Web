@@ -36,11 +36,13 @@ import { createCustomPoster, requestAutoPoster } from '../cloud/gateway.ts'
 import type { PosterStatus } from '../cloud/status.ts'
 import { onPosterEngineStatus, posterEngineVersion, renderPosterPng } from './engine/renderer.ts'
 import {
+  entryFromFigure,
   entryFromRender,
   entryWithFigure,
   localPosterRevisionId,
   type PosterEntry,
   pngToBase64,
+  releasePosterUrl,
 } from './entry.ts'
 import { describePosterSpecError, type PosterSpecAdvice } from './errors.ts'
 import { posterSourceFor } from './source.ts'
@@ -185,6 +187,16 @@ async function renderAndMaybeStore(
   }
 
   const figure = stored.value.poster
+  if (stored.value.created === false) {
+    // The slot already held this revision's figure — rendered by a different
+    // engine build, so it is a *different image* from the bytes just drawn.
+    // The stored row is the canonical one: show it (remote URL, no local copy)
+    // and release the local render, which was never displayed anywhere.
+    releasePosterUrl(entry.imageUrl)
+    const storedEntry = entryFromFigure(figure)
+    report({ kind: 'ready', url: storedEntry.imageUrl, posterId: figure.posterId })
+    return { ok: true, entry: storedEntry, uploaded: true }
+  }
   const storedEntry = entryWithFigure(entry, figure)
   report({ kind: 'ready', url: storedEntry.imageUrl, posterId: figure.posterId })
   return { ok: true, entry: storedEntry, uploaded: true }
