@@ -8,8 +8,8 @@ workspace.**
 A researcher who is not logged in — or who has no network at all after the first
 visit — must still be able to do essentially the complete scientific workflow:
 load a CSV, analyse it, look at the graph, select a range, read the statistics,
-compare datasets, and export Excel. Everything the cloud adds is *history and
-collaboration*, not capability.
+compare datasets, draw the formal poster, and export Excel. Everything the
+cloud adds is *history and collaboration*, not capability.
 
 This is not a stylistic preference. It determines where every piece of code
 lives, and it is the reason Cloudflare must never become the numerical analysis
@@ -30,6 +30,8 @@ stops being reproducible the day the account lapses.
   │                         │  filtering                         │
   │  Excel / CSV / PNG      │  sliding-window statistics         │
   │  IndexedDB cache        │  G-quality sweep                   │
+  │  poster engine worker   │  Pyodide (WASM CPython) +          │
+  │  (spawned on demand)    │  Matplotlib Agg → formal PNG       │
   └──────────────────────────────────────────────────────────────┘
                                     │
                    optional, only when authenticated
@@ -41,18 +43,13 @@ stops being reproducible the day the account lapses.
   │  D1 (structured index)    │  R2 (private bulk objects)       │
   │  runs, revisions, metrics │  snapshots, posters, sources     │
   └───────────────────────────┴──────────────────────────────────┘
-                                    │
-                        formal poster request only
-                                    ▼
-  ┌──────────────────────────────────────────────────────────────┐
-  │  Cloudflare Container: Python + Matplotlib Agg               │
-  │  receives analysed series + a validated plot spec → PNG      │
-  └──────────────────────────────────────────────────────────────┘
 ```
 
-The container does **no analysis**. It receives numbers that were already
-computed in the browser and draws them. That is the whole of its job, and
-keeping it that narrow is what makes it cheap to run and safe to expose.
+The poster engine does **no analysis**. It receives numbers that were already
+computed in the browser and draws them — in the browser, under Pyodide, from
+the same vendored Python render core `poster-renderer/` carries. The figure
+never crosses the network until the finished PNG is uploaded for storage, and
+only when the user is signed in.
 
 ## Packages
 
@@ -62,7 +59,7 @@ keeping it that narrow is what makes it cheap to run and safe to expose.
 | `packages/shared` | Domain vocabulary shared by browser and Worker: error taxonomy, analysis config + hashing, run-code parsing, snapshot format, capabilities. | zod |
 | `packages/plot-spec` | The only thing the browser may send the poster renderer: a strictly validated declarative plot specification, plus the frozen preset definitions. | zod |
 | `apps/web` | The React application (`src/`) and the Cloudflare Worker (`worker/`). | the three above |
-| `poster-renderer` | The canonical Matplotlib renderer, pinned and containerised. | (Python) |
+| `poster-renderer` | The canonical Matplotlib render core — a pure Python package the browser runs under Pyodide. | (Python) |
 
 Analysis code never lives inside a React component. The boundary is enforced by
 the package split: `analysis-core` cannot import React because it does not
@@ -148,10 +145,10 @@ rather than by a client-side check, because a client-side check loses to a
 double-submit, a reload mid-request, or two devices.
 
 V1 deliberately does **not** use Cloudflare Queues or Workflows for this. The
-browser calls an idempotent endpoint after the revision and snapshot are
-persisted; the endpoint talks to the container and stores the PNG. An
-interrupted request is safe to retry. Adding a queue would add moving parts to
-a workload that is one render per analysis.
+browser draws the poster itself and calls an idempotent endpoint after the
+revision and snapshot are persisted; the endpoint validates the upload and
+stores the PNG. An interrupted request is safe to retry. Adding a queue would
+add moving parts to a workload that is one render per analysis.
 
 ## API surface
 
@@ -171,7 +168,7 @@ offline.
 - `docs/cloud-data-model.md` — D1 schema, R2 layout, revision semantics
 - `docs/auth-security.md` — passkey-first authentication, invitations, capabilities
 - `docs/poster-renderer.md` — the frozen visual contract
-- `docs/cost-controls.md` — quotas, container lifecycle, spend guards
+- `docs/cost-controls.md` — quotas and spend guards
 - `docs/supply-chain.md` — dependency policy
 - `docs/deployment.md` — the verify/deploy trust boundary
 - `docs/migration-from-desktop.md` — what happens to existing config and output

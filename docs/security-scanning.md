@@ -97,8 +97,8 @@ Same pinning discipline: version plus artefact checksum.
 | trigger | scope |
 | --- | --- |
 | pull request | only when a dependency manifest changed |
-| push to `main`, daily, manual | `pnpm-lock.yaml` and both `requirements.txt` |
-| weekly | the above, plus the renderer container image |
+| push to `main`, daily, manual | `pnpm-lock.yaml` and `poster-renderer/requirements.txt` |
+| weekly | the above |
 
 Whether a pull request touched a dependency manifest is decided by the same
 `scripts/detect-changes.mjs` that gates `ci.yml`, which is why that logic is
@@ -110,12 +110,9 @@ date, so a finding that is not in it fails the job. Never ignore a package —
 only ids. A package-level override would also hide the next advisory for that
 package, which is the finding the whole arrangement is built to surface.
 
-The container scan is currently **reporting only**, and says so in its job
-summary. The base image's Debian packages have never been triaged, and starting
-a weekly red badge with no path to green is how a red badge stops meaning
-anything. Making it blocking is one triage pass away: run it, record what it
-reports in `osv-scanner.toml` the way the lockfile findings are recorded, remove
-the `|| true`.
+The Pyodide wheels the poster engine draws with are not a separate manifest to
+scan: they come from the version-pinned `pyodide` npm package, so they are
+covered by the `pnpm-lock.yaml` scan like every other npm dependency.
 
 ## Static analysis: CodeQL, and nothing else
 
@@ -168,8 +165,8 @@ removed dependency, or a version that turns into a `git+https:` / `npm:` /
 shape a Renovate minor or patch update has after it auto-merges on green CI, and
 it is the only change class that ships unattended; anything else waits for a
 deliberate `workflow_dispatch`. Majors never arrive this way — `renovate.json5`
-refuses to auto-merge them — and the poster renderer's Python pins and Dockerfile
-are excluded outright as the visual contract.
+refuses to auto-merge them — and the poster renderer's Python pins are
+excluded outright as the visual contract.
 
 The gate reads the diff, not the author: a `renovate[bot]` check would trust a
 name any commit can carry. `docs/ci.md` describes the rule, and
@@ -213,7 +210,7 @@ Known vulnerabilities
 
 All eight are safe to require. The conditional ones report as successful when
 skipped, which is what makes a documentation-only pull request mergeable without
-running a container build.
+running the heavier jobs.
 
 Renovate auto-merges minor and patch updates on green, so these checks are also
 the entire review for those pull requests. That is intentional and is why
