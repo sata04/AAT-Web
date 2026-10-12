@@ -32,7 +32,7 @@ export interface AdminResourceHandle<T> {
    * Replace the loaded value without a round trip.
    *
    * Used after a mutation whose response already contains the new state — setting a quota returns
-   * the quota row, opening the breaker returns the breaker — so the screen shows what the server
+   * the quota row — so the screen shows what the server
    * said rather than what the client hoped, without a second request to find out.
    */
   set: (value: T) => void

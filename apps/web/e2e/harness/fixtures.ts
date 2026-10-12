@@ -8,9 +8,6 @@
  *  - `authenticator` — a Chromium virtual authenticator attached to the test's page, created
  *    lazily so a test that never touches authentication never pays for one.
  *  - a per-test reset of the rate-limit counters, for the reason given in `Harness.resetRateLimits`.
- *
- * `rendererAvailable` is exported rather than fixtured because it is decided once, in global setup,
- * and `test.skip` needs it at collection time.
  */
 
 import { test as base, expect } from '@playwright/test'
@@ -69,6 +66,3 @@ export const test = base.extend<AatFixtures>({
 })
 
 export { expect }
-
-/** Did global setup manage to start the real poster renderer container? */
-export const rendererAvailable = process.env.AAT_E2E_RENDERER === '1'

@@ -9,9 +9,7 @@
  * **A control belongs here only if there is a route that changes it at runtime, and only if
  * changing it is an operational decision rather than a deployment one.**
  *
- * Two routes pass that test. `PUT /api/v1/admin/renderer` opens and closes the poster renderer's
- * circuit breaker, which is precisely the lever you need *now* when spend or the container is
- * misbehaving and waiting for a deploy is the wrong shape. `PUT /api/v1/admin/quotas/:userId` moves
+ * One route passes that test. `PUT /api/v1/admin/quotas/:userId` moves
  * one member's storage ceiling, which is a judgement about a person's work rather than about the
  * system.
  *
@@ -34,13 +32,6 @@ export interface SettingDescription {
 
 /** Settings this console can change, with the route that changes them. */
 export const OPERATIONAL_SETTINGS: readonly SettingDescription[] = [
-  {
-    label: 'ポスターレンダラーのサーキットブレーカー',
-    meaning:
-      'ポスター生成を今すぐ停止・再開します。停止中はコンテナを一切呼び出さず、生成要求は POSTER_BUSY で拒否されます。',
-    location:
-      'PUT /api/v1/admin/renderer（system_flags）。この画面と「ポスターレンダラー」画面の両方から操作できます。',
-  },
   {
     label: '利用者ごとの保存容量の上限',
     meaning:

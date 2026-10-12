@@ -27,7 +27,7 @@
  */
 
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { authClient } from '../auth/client.ts'
+import { getAuthClient } from '../auth/client.ts'
 import { describePasskeyFailure, type PasskeyFailure, supportsWebAuthn } from '../auth/webauthn.ts'
 import { ScreenFrame } from '../components/ScreenFrame.tsx'
 import { Link, useNavigate } from '../router/Router.tsx'
@@ -60,7 +60,7 @@ export function SignInScreen(): React.JSX.Element {
     setFailure(null)
     setPending(true)
     try {
-      const result = await authClient.signIn.passkey()
+      const result = await getAuthClient().signIn.passkey()
       if (result.error !== null) {
         setFailure(describePasskeyFailure(result.error, 'authenticate'))
         return

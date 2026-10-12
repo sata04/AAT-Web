@@ -32,7 +32,7 @@
 
 import { getAuthenticatorName } from '@better-auth/passkey'
 import { useCallback, useEffect, useState } from 'react'
-import { authClient } from '../auth/client.ts'
+import { getAuthClient } from '../auth/client.ts'
 import { describePasskeyFailure, supportsWebAuthn } from '../auth/webauthn.ts'
 import { deleteMyPasskey, fetchMyPasskeys, type MyPasskey } from '../cloud/gateway.ts'
 import { ScreenFrame } from '../components/ScreenFrame.tsx'
@@ -81,7 +81,9 @@ export function SecurityScreen(): React.JSX.Element {
     }
     // Enrichment, so it is allowed to fail: losing it costs a provider name,
     // not the screen. The AAT route above is the one that must succeed.
-    const plugin = await authClient.passkey.listUserPasskeys().catch(() => ({ data: null }))
+    const plugin = await getAuthClient()
+      .passkey.listUserPasskeys()
+      .catch(() => ({ data: null }))
     const aaguids = new Map<string, string | undefined>(
       (plugin.data ?? []).map((entry) => [entry.id, entry.aaguid]),
     )
@@ -107,7 +109,7 @@ export function SecurityScreen(): React.JSX.Element {
     setBusy(true)
     setNotice(null)
     try {
-      const result = await authClient.passkey.addPasskey()
+      const result = await getAuthClient().passkey.addPasskey()
       if (result.error !== null) {
         const failure = describePasskeyFailure(result.error, 'register')
         setNotice({ tone: 'error', text: `${failure.summary}\n${failure.action}` })
@@ -123,7 +125,7 @@ export function SecurityScreen(): React.JSX.Element {
   const rename = async (id: string, name: string) => {
     setBusy(true)
     try {
-      const result = await authClient.passkey.updatePasskey({ id, name })
+      const result = await getAuthClient().passkey.updatePasskey({ id, name })
       if (result.error !== null) {
         setNotice({ tone: 'error', text: result.error.message ?? '名前を変更できませんでした。' })
         return
@@ -167,7 +169,7 @@ export function SecurityScreen(): React.JSX.Element {
   const revokeOtherSessions = async () => {
     setBusy(true)
     try {
-      const result = await authClient
+      const result = await getAuthClient()
         .revokeOtherSessions()
         .catch(() => ({ error: { message: 'セッションを無効化できませんでした。' } }))
       setNotice(

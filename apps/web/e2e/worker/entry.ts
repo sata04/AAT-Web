@@ -5,9 +5,9 @@
  *
  * The application Worker is imported and used **unmodified** — `worker/index.ts`'s own `fetch` is
  * what answers every `/api/*` request the browser makes, so the suite exercises the real routing,
- * the real Better Auth instance, the real authorization middleware and the real D1 statements. Two
- * things are added around it, both of which exist because a browser test needs a way in that
- * production deliberately does not have:
+ * the real Better Auth instance, the real authorization middleware and the real D1 statements. One
+ * thing is added around it, which exists because a browser test needs a way in that production
+ * deliberately does not have:
  *
  *  1. **`/__e2e__/sql`** — arbitrary SQL against the local D1, behind a per-run random token. This
  *     is the harness's stand-in for `wrangler d1 execute --local`, which cannot be used while
@@ -16,27 +16,16 @@
  *     what lets a test read the audit log back and assert on it. It is not mounted unless
  *     `E2E_HARNESS_TOKEN` is set, and that var only exists in `e2e/wrangler.e2e.jsonc`.
  *
- *  2. **`PosterRendererContainer`** — replaced with an HTTP proxy to a real poster-renderer
- *     container running under Docker on the host. The production class drives a Cloudflare
- *     Container through `ctx.container`, which `workerd` has no equivalent of outside Cloudflare's
- *     platform; everything on the AAT side of that boundary — `renderViaContainer`, the
- *     `POSTER_BUSY` translation, the R2 write, the `poster_figures` bookkeeping — is unchanged and
- *     is what the suite is testing. The bytes that come back are produced by the pinned Python +
- *     Matplotlib image, not by a fixture.
- *
  * Nothing here is bundled into a deployment: `wrangler.jsonc` still names `worker/index.ts`, and
  * this file is reached only through `e2e/wrangler.e2e.jsonc`.
  */
 
-import { DurableObject } from 'cloudflare:workers'
 import app from '../../worker/index.ts'
 
-/** The vars this entry adds on top of the application's `Env`. Both are injected per run. */
+/** The var this entry adds on top of the application's `Env`. Injected per run. */
 type HarnessEnv = Env & {
   /** Shared secret for `/__e2e__/*`. Absent in every configuration but the e2e one. */
   E2E_HARNESS_TOKEN?: string
-  /** Base URL of the poster renderer container, e.g. `http://127.0.0.1:8099`. */
-  POSTER_RENDERER_URL?: string
 }
 
 const HARNESS_PREFIX = '/__e2e__/'
@@ -77,17 +66,6 @@ async function handleHarness(request: Request, env: HarnessEnv): Promise<Respons
     return json({ ok: true })
   }
 
-  if (url.pathname === `${HARNESS_PREFIX}renderer`) {
-    // Reaches the renderer the way the application does — through the Durable Object stub — so the
-    // harness waits on the path it is about to test rather than on the container's published port.
-    const stub = env.POSTER_RENDERER.get(env.POSTER_RENDERER.idFromName('poster-renderer'))
-    const response = await stub.fetch('http://renderer/health')
-    return new Response(await response.arrayBuffer(), {
-      status: response.status,
-      headers: { 'content-type': response.headers.get('content-type') ?? 'application/json' },
-    })
-  }
-
   if (url.pathname === `${HARNESS_PREFIX}sql` && request.method === 'POST') {
     const body = (await request.json()) as SqlRequest
     if (typeof body.sql !== 'string' || body.sql.length === 0) {
@@ -112,52 +90,3 @@ export default {
     return app.fetch(request, env, ctx)
   },
 } satisfies ExportedHandler<HarnessEnv>
-
-/**
- * Stands in for the Cloudflare Container binding by talking to the same image over HTTP.
- *
- * The contract this must honour is the one `worker/services/poster.ts` depends on: `POST /render`
- * answers with PNG bytes plus `x-poster-renderer-version` and `x-poster-preset-version`, a 429 is
- * backpressure, and anything else is a render failure carrying a JSON `code`. Since the renderer
- * refuses a chunked request body outright (it enforces its size cap from `Content-Length` before
- * reading a byte), the body is buffered here rather than streamed — a streamed `request.body` would
- * be sent chunked and rejected with `LENGTH_REQUIRED`, which would look like a renderer fault.
- */
-export class PosterRendererContainer extends DurableObject<HarnessEnv> {
-  override async fetch(request: Request): Promise<Response> {
-    const url = new URL(request.url)
-    if (url.pathname !== '/render' && url.pathname !== '/health') {
-      return new Response('not found', { status: 404 })
-    }
-
-    const base = this.env.POSTER_RENDERER_URL
-    if (typeof base !== 'string' || base.length === 0) {
-      return new Response(JSON.stringify({ code: 'POSTER_RENDERER_UNAVAILABLE' }), {
-        status: 503,
-        headers: { 'content-type': 'application/json' },
-      })
-    }
-
-    const headers = new Headers()
-    const contentType = request.headers.get('content-type')
-    if (contentType !== null) headers.set('content-type', contentType)
-
-    const init: RequestInit = { method: request.method, headers }
-    if (request.method !== 'GET' && request.method !== 'HEAD') {
-      init.body = new Uint8Array(await request.arrayBuffer())
-    }
-
-    try {
-      const response = await fetch(`${base}${url.pathname}`, init)
-      // Rebuilt rather than returned directly so the body is a plain buffer: the DO boundary does
-      // not carry a streaming body back to the caller reliably in local dev.
-      const bytes = await response.arrayBuffer()
-      return new Response(bytes, { status: response.status, headers: response.headers })
-    } catch (error) {
-      return new Response(
-        JSON.stringify({ code: 'POSTER_RENDER_FAILED', reason: (error as Error).message }),
-        { status: 502, headers: { 'content-type': 'application/json' } },
-      )
-    }
-  }
-}

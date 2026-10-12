@@ -3,9 +3,9 @@
  *
  * A formal figure is not a screenshot, so this dialog is a review step rather than a menu command:
  * the researcher sees the exact range, the exact sensors, the exact title line and the exact
- * geometry before a container is asked to draw anything, and sees the result in the same place
- * afterwards. Rendering is charged against a quota and takes a cold container seconds to produce —
- * "press it and find out" is the wrong interaction for that.
+ * geometry before the engine is asked to draw anything, and sees the result in the same place
+ * afterwards. The first render pulls down the Pyodide runtime — tens of MB — so "press it and
+ * find out" is still the wrong interaction even though the draw itself is local.
  *
  * ## Every bounded choice comes from `@aat/plot-spec`
  *
@@ -53,11 +53,11 @@ import {
 } from '@aat/plot-spec'
 import { useMemo, useState } from 'react'
 import { formatFixed } from '../app/format.ts'
-import type { PosterFigure } from '../cloud/gateway.ts'
-import { posterImageUrl } from '../cloud/gateway.ts'
 import { Dialog } from '../components/Dialog.tsx'
 import { useMountedRef } from '../components/hooks.ts'
+import { saveBlob } from '../exporting/client.ts'
 import type { SelectionRange } from '../graph/selection.ts'
+import type { PosterEntry } from './entry.ts'
 import type { PosterRangeAction, PosterSpecAdvice } from './errors.ts'
 import {
   type CustomPosterRequest,
@@ -81,11 +81,11 @@ export interface PosterDialogProps {
    */
   yRange?: { min: number; max: number }
   onClose: () => void
-  /** Called for every figure that reaches `ready`, so the panel can keep the history. */
-  onCreated: (poster: PosterFigure) => void
+  /** Called for every figure that finishes rendering, so the panel can keep the history. */
+  onCreated: (poster: PosterEntry) => void
   /**
    * Called when a submit fails *after the dialog has closed* — the render
-   * poll can outlive the dialog by minutes, and a failure then must land in
+   * can outlive the dialog, and a failure then must land in
    * the notice stack rather than in a form nobody is looking at.
    */
   onFailed?: ((message: string) => void) | undefined
@@ -166,10 +166,10 @@ function posterRequestFor(form: PosterFormValues, defaults: PosterFormDefaults):
 /** Where a settled submit writes back. */
 interface PosterOutcomeSinks {
   mounted: { readonly current: boolean }
-  onCreated: (poster: PosterFigure) => void
+  onCreated: (poster: PosterEntry) => void
   onFailed: ((message: string) => void) | undefined
   setSubmitting: (submitting: boolean) => void
-  setCreated: (poster: PosterFigure | null) => void
+  setCreated: (poster: PosterEntry | null) => void
   setAdvice: (advice: PosterSpecAdvice | null) => void
   setCloudMessage: (message: string | null) => void
 }
@@ -181,17 +181,21 @@ interface PosterOutcomeSinks {
  * belongs to the user.
  */
 function settlePosterOutcome(outcome: PosterRequestOutcome, sinks: PosterOutcomeSinks): void {
+  // A rendered-but-unstored figure still exists locally: it joins the panel
+  // history like any other, so closing the dialog — before or after the render
+  // finished — never throws away a PNG the engine already drew.
+  const entry = outcome.ok ? outcome.entry : outcome.kind === 'cloud' ? outcome.entry : null
   if (!sinks.mounted.current) {
-    if (outcome.ok) sinks.onCreated(outcome.poster)
-    else sinks.onFailed?.(outcome.kind === 'spec' ? outcome.advice.message : outcome.message)
+    if (entry !== null) sinks.onCreated(entry)
+    if (!outcome.ok) sinks.onFailed?.(outcome.kind === 'spec' ? outcome.advice.message : outcome.message)
     return
   }
   sinks.setSubmitting(false)
-  if (outcome.ok) {
-    sinks.setCreated(outcome.poster)
-    sinks.onCreated(outcome.poster)
-    return
+  if (entry !== null) {
+    sinks.setCreated(entry)
+    sinks.onCreated(entry)
   }
+  if (outcome.ok) return
   if (outcome.kind === 'spec') {
     sinks.setAdvice(outcome.advice)
     return
@@ -235,7 +239,7 @@ export function PosterDialog(props: PosterDialogProps): React.JSX.Element {
   const [submitting, setSubmitting] = useState(false)
   const [advice, setAdvice] = useState<PosterSpecAdvice | null>(null)
   const [cloudMessage, setCloudMessage] = useState<string | null>(null)
-  const [created, setCreated] = useState<PosterFigure | null>(null)
+  const [created, setCreated] = useState<PosterEntry | null>(null)
 
   const setBound = (key: keyof Bounds, value: string) => {
     setBounds((current) => ({ ...current, [key]: value }))
@@ -337,6 +341,7 @@ export function PosterDialog(props: PosterDialogProps): React.JSX.Element {
         cloudMessage={cloudMessage}
         created={created}
         titlePreview={titlePreview}
+        filenameBase={runCode}
         onApplyAdvice={applyAdviceAction}
       />
     </Dialog>
@@ -563,11 +568,12 @@ function FormatSection(props: {
 function PosterOutcome(props: {
   advice: PosterSpecAdvice | null
   cloudMessage: string | null
-  created: PosterFigure | null
+  created: PosterEntry | null
   titlePreview: string
+  filenameBase: string
   onApplyAdvice: () => void
 }): React.JSX.Element {
-  const { advice, cloudMessage, created, titlePreview, onApplyAdvice } = props
+  const { advice, cloudMessage, created, titlePreview, filenameBase, onApplyAdvice } = props
   return (
     <>
       {advice === null ? null : (
@@ -594,17 +600,41 @@ function PosterOutcome(props: {
         <section className="dialog__section">
           <h3 className="panel__title">作成したポスター図</h3>
           <p className="panel__hint">
-            この図は履歴として残ります。設定を変えて作成すると、上書きではなく別の図として追加されます。
+            {created.posterId === null
+              ? 'この図はブラウザ上で描画されました。サーバには保存されていないため、必要なら PNG を保存してください。'
+              : 'この図は履歴として残ります。設定を変えて作成すると、上書きではなく別の図として追加されます。'}
           </p>
           <img
-            src={posterImageUrl(created.posterId)}
+            src={created.imageUrl}
             alt={`${titlePreview} のポスター図`}
             style={{ maxWidth: '100%', height: 'auto', background: '#ffffff' }}
           />
           <p className="panel__hint">
-            <a href={posterImageUrl(created.posterId)} target="_blank" rel="noreferrer">
+            <a href={created.imageUrl} target="_blank" rel="noreferrer">
               元のサイズで開く
             </a>
+            {created.png === null ? null : (
+              <>
+                {'　'}
+                <a
+                  href={created.imageUrl}
+                  download={`${filenameBase}_poster.png`}
+                  onClick={(event) => {
+                    // A data URL (jsdom, or a revoked blob URL) downloads fine, but
+                    // keeping the bytes authoritative costs nothing — re-mint the blob.
+                    if (created.png !== null && created.imageUrl.startsWith('blob:')) {
+                      event.preventDefault()
+                      saveBlob(
+                        new Blob([created.png as BlobPart], { type: 'image/png' }),
+                        `${filenameBase}_poster.png`,
+                      )
+                    }
+                  }}
+                >
+                  PNG を保存
+                </a>
+              </>
+            )}
           </p>
         </section>
       )}

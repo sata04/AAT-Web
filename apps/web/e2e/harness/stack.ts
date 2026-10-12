@@ -1,22 +1,23 @@
 /**
  * The local stack the end-to-end suite runs against.
  *
- * Four processes, started in this order and torn down in reverse:
+ * Three processes, started in this order and torn down in reverse:
  *
  *   1. `vite build`            — the real client bundle, into `dist/client`.
  *   2. `wrangler d1 migrations apply --local` — the committed migrations, against an empty
  *      database. The state directory is deleted first, so every run starts from nothing and a
  *      migration that no longer applies fails the suite immediately rather than being papered over
  *      by yesterday's database.
- *   3. `docker run aat-poster-renderer` — the pinned Python + Matplotlib renderer, published on a
- *      loopback port. Optional: without it the poster specs report the container as missing rather
- *      than silently passing against a fake.
- *   4. `wrangler dev --local`  — `workerd` serving the static assets, the real Worker, a local D1
+ *   3. `wrangler dev --local`  — `workerd` serving the static assets, the real Worker, a local D1
  *      and a local R2.
  *
+ * Posters render inside the browser under test (Pyodide/WASM running the same Python render
+ * core as everywhere else), so there is no renderer process to orchestrate: the poster specs
+ * drive the page itself and only the upload path crosses the Worker.
+ *
  * Nothing here reaches Cloudflare. `--local` keeps every binding in-process, the auth values are
- * the development-only ones committed in `wrangler.e2e.jsonc`, and the two per-run values
- * (`E2E_HARNESS_TOKEN`, `POSTER_RENDERER_URL`) are injected with `--var` so they never appear in a
+ * the development-only ones committed in `wrangler.e2e.jsonc`, and the one per-run value
+ * (`E2E_HARNESS_TOKEN`) is injected with `--var` so it never appears in a
  * committed file at all.
  */
 
@@ -52,11 +53,6 @@ export const BASE_URL = `http://localhost:${PORT}`
  * where to find it.
  */
 export const API_PORT = 8787
-
-/** Loopback-only publish of the renderer container's 8080. */
-export const RENDERER_PORT = 8099
-const RENDERER_IMAGE = process.env.AAT_E2E_RENDERER_IMAGE ?? 'aat-poster-renderer:ci'
-const RENDERER_CONTAINER = 'aat-web-e2e-poster-renderer'
 
 const WRANGLER = path.join(APP_ROOT, 'node_modules/wrangler/bin/wrangler.js')
 const VITE = path.join(APP_ROOT, 'node_modules/vite/bin/vite.js')
@@ -98,8 +94,8 @@ const API_BINDING = 'AAT_API'
 const COMPATIBILITY_DATE = '2026-07-30'
 
 /**
- * The sandbox this repository is developed in exports HTTP(S)_PROXY. Wrangler, Vite and — more
- * importantly — the Worker's own outbound `fetch` to the renderer must not be sent through it.
+ * The sandbox this repository is developed in exports HTTP(S)_PROXY. Wrangler, Vite and the
+ * Worker's own outbound `fetch` must not be sent through it.
  */
 const NO_PROXY_ENV = { NO_PROXY: '127.0.0.1,localhost', no_proxy: '127.0.0.1,localhost' }
 
@@ -108,8 +104,6 @@ export interface Stack {
   /** The private Worker's port. Only the harness's SQL endpoint uses it; the browser never does. */
   apiUrl: string
   harnessToken: string
-  /** False when Docker or the renderer image was unavailable; the poster specs say so and skip. */
-  rendererAvailable: boolean
   stop: () => Promise<void>
 }
 
@@ -169,49 +163,6 @@ async function waitFor(
   }
 }
 
-async function startRenderer(): Promise<boolean> {
-  if (process.env.AAT_E2E_SKIP_RENDERER === '1') return false
-
-  // A machine with no docker at all reports itself the same way a broken
-  // daemon does — spawn failing is "Docker is not usable", not a stack crash.
-  const images = await run('docker', ['images', '-q', RENDERER_IMAGE], 'docker images').catch(
-    (error: Error) => ({ code: -1, output: error.message }),
-  )
-  if (images.code !== 0) {
-    process.stderr.write(
-      `[e2e] Docker is not usable (${images.output.trim()}). The real-renderer specs will report it.\n`,
-    )
-    return false
-  }
-  if (images.output.trim() === '') {
-    process.stderr.write(
-      `[e2e] The image ${RENDERER_IMAGE} is not present. Build it with ` +
-        '`docker build -t aat-poster-renderer:ci poster-renderer`. The real-renderer specs will report it.\n',
-    )
-    return false
-  }
-
-  await run('docker', ['rm', '-f', RENDERER_CONTAINER], 'docker rm')
-  await mustRun(
-    'docker',
-    [
-      'run',
-      '--detach',
-      '--name',
-      RENDERER_CONTAINER,
-      // The renderer takes its input in the request body and needs no outbound network of its own;
-      // production runs it with `enableInternet: false`, and CI with `--network none`. It still
-      // needs its published port here, so the network is left in place but nothing is reachable
-      // from it that the container asks for.
-      '--publish',
-      `127.0.0.1:${RENDERER_PORT}:8080`,
-      RENDERER_IMAGE,
-    ],
-    'docker run',
-  )
-  return true
-}
-
 export async function startStack(): Promise<Stack> {
   const harnessToken = randomBytes(24).toString('base64url')
 
@@ -227,8 +178,6 @@ export async function startStack(): Promise<Stack> {
     [WRANGLER, 'd1', 'migrations', 'apply', DATABASE, '--local', '-c', CONFIG, '--persist-to', PERSIST],
     'd1 migrations apply',
   )
-
-  const rendererAvailable = await startRenderer()
 
   const log: string[] = []
   const worker: ChildProcess = spawn(
@@ -256,8 +205,6 @@ export async function startStack(): Promise<Stack> {
       'info',
       '--var',
       `E2E_HARNESS_TOKEN:${harnessToken}`,
-      '--var',
-      `POSTER_RENDERER_URL:http://127.0.0.1:${RENDERER_PORT}`,
     ],
     {
       cwd: APP_ROOT,
@@ -349,17 +296,8 @@ export async function startStack(): Promise<Stack> {
      * every test raced a 503 the suite would report as a product bug.
      */
     await waitFor('the Pages front door', 120_000, frontDoorReady, () => log.join(''))
-    if (rendererAvailable) {
-      // Through the Durable Object, which is the path a poster render actually takes.
-      await waitFor(
-        'the poster renderer',
-        120_000,
-        async () => (await harnessFetch('/__e2e__/renderer')).ok,
-        () => log.join(''),
-      )
-    }
   } catch (error) {
-    await stopAll([pages, worker], rendererAvailable, pagesRoot)
+    await stopAll([pages, worker], pagesRoot)
     throw error
   }
 
@@ -367,8 +305,7 @@ export async function startStack(): Promise<Stack> {
     baseUrl: BASE_URL,
     apiUrl,
     harnessToken,
-    rendererAvailable,
-    stop: () => stopAll([pages, worker], rendererAvailable, pagesRoot),
+    stop: () => stopAll([pages, worker], pagesRoot),
   }
 }
 
@@ -385,11 +322,8 @@ async function end(child: ChildProcess): Promise<void> {
  * Torn down in the order given — Pages before the Worker, the reverse of
  * startup, so nothing is left holding a binding to a process that has gone.
  */
-async function stopAll(children: ChildProcess[], rendererStarted: boolean, pagesRoot: string): Promise<void> {
+async function stopAll(children: ChildProcess[], pagesRoot: string): Promise<void> {
   for (const child of children) await end(child)
-  if (rendererStarted) {
-    await run('docker', ['rm', '-f', RENDERER_CONTAINER], 'docker rm')
-  }
   // `force` so a crashed run cannot leave the next one unable to start.
   await rm(pagesRoot, { recursive: true, force: true })
 }

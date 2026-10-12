@@ -12,6 +12,8 @@
  * analysis is pending because the cloud is pending".
  */
 
+import { cloudEnabled } from './enabled.ts'
+
 export type AnalysisStatus =
   | { kind: 'idle' }
   | { kind: 'running'; stage: string; percent: number }
@@ -22,6 +24,12 @@ export type AnalysisStatus =
 export type CloudSyncStatus =
   /** No session, or the user never signed in. Local-only is a normal state, not an error. */
   | { kind: 'local-only' }
+  /**
+   * The cloud half was compiled out of this build (`src/cloud/enabled.ts`).
+   * Also a normal state — quieter than `local-only`, because there is no cloud
+   * a sign-in could reach: the status bar hides this lane rather than label it.
+   */
+  | { kind: 'disabled' }
   | { kind: 'saving' }
   | { kind: 'saved'; revisionId: string; at: number }
   | { kind: 'failed'; message: string; retryable: boolean }
@@ -29,16 +37,19 @@ export type CloudSyncStatus =
 /**
  * The automatic poster's lane.
  *
- * `posterId` is optional throughout because the figure may not have one yet: the request that would
- * have created it can be refused before a row exists (the renderer shedding load, a rate limit, an
- * unreachable Worker). When it *is* present it is what makes a retry precise — a failed figure is
- * re-attempted through `POST /posters/:posterId/retry`, which is conditional on the figure still
- * being failed, rather than by asking for the automatic poster again.
+ * The figure is drawn by the local engine, so the in-flight states mirror its
+ * lifecycle rather than a remote queue's: `loading` is the first-run runtime
+ * fetch (tens of MB — the only slow step, and only once), `rendering` is the
+ * actual draw, and `uploading` is the optional cloud copy of a finished local
+ * image. `failed` means either the draw or the upload failed; `posterId` is
+ * attached once the figure exists server-side, and a retry simply renders and
+ * uploads again — there is no remote render to re-attempt.
  */
 export type PosterStatus =
   | { kind: 'unavailable' }
-  | { kind: 'queued'; posterId?: string }
-  | { kind: 'rendering'; posterId?: string }
+  | { kind: 'loading' }
+  | { kind: 'rendering' }
+  | { kind: 'uploading' }
   | { kind: 'ready'; url: string; posterId?: string }
   | { kind: 'failed'; message: string; retryable: boolean; posterId?: string }
 
@@ -48,10 +59,21 @@ export interface CloudStatuses {
   poster: PosterStatus
 }
 
+/**
+ * The enabled-build default. Screens should take their initial value from
+ * {@link initialCloudStatuses} instead, which answers this but with the sync
+ * lane `disabled` when the cloud half is compiled out.
+ */
 export const INITIAL_STATUSES: CloudStatuses = {
   analysis: { kind: 'idle' },
   sync: { kind: 'local-only' },
   poster: { kind: 'unavailable' },
+}
+
+/** The statuses a screen starts with, honouring the build's cloud flag. */
+export function initialCloudStatuses(): CloudStatuses {
+  if (cloudEnabled()) return INITIAL_STATUSES
+  return { ...INITIAL_STATUSES, sync: { kind: 'disabled' } }
 }
 
 /**
@@ -108,6 +130,10 @@ export function analysisLabel(status: AnalysisStatus): StatusLabel {
 export function syncLabel(status: CloudSyncStatus): StatusLabel {
   switch (status.kind) {
     case 'local-only':
+    // `disabled` is rendered the same as the quietest local answer — it is a
+    // normal state, not an error — though the status bar hides the lane
+    // entirely, so this text is normally never shown.
+    case 'disabled':
       return { text: 'ローカルのみ', tone: 'neutral' }
     case 'saving':
       return { text: '保存中', tone: 'busy' }
@@ -122,10 +148,12 @@ export function posterLabel(status: PosterStatus): StatusLabel {
   switch (status.kind) {
     case 'unavailable':
       return { text: '未生成', tone: 'neutral' }
-    case 'queued':
-      return { text: '待機中', tone: 'busy' }
+    case 'loading':
+      return { text: '準備中', tone: 'busy' }
     case 'rendering':
       return { text: '生成中', tone: 'busy' }
+    case 'uploading':
+      return { text: 'アップロード中', tone: 'busy' }
     case 'ready':
       return { text: '生成済み', tone: 'good' }
     case 'failed':

@@ -78,16 +78,20 @@ from someone silencing a real alarm.
 
 ## The poster renderer is a visual contract
 
-Matplotlib, NumPy, FreeType, the font stack and the Python base image all change
+Matplotlib, NumPy, FreeType, the font stack and the Pyodide build itself all change
 rendered pixels. A patch bump can move a tick label by a pixel and quietly
-invalidate the compatibility guarantee that is the entire reason the container
+invalidate the compatibility guarantee that is the entire reason the render core
 exists — the desktop application and AAT Web are supposed to produce the same
 research figure.
 
-So `poster-renderer/**` updates are labelled `visual-contract` /
+So `poster-renderer/**` updates — and the `pyodide` npm package, which decides
+which Matplotlib wheel the browser draws with — are labelled `visual-contract` /
 `needs-visual-review` and never auto-merge. The review procedure is in
 `docs/poster-renderer.md`: run the visual regression suite, look at the
-rendered diff, and only then merge.
+rendered diff, and only then merge. Vendoring under
+`apps/web/scripts/vendor-poster-assets.mjs` verifies every wheel's sha256
+against the pinned `pyodide-lock.json`, so a Pyodide bump is a lockfile change
+the dependency scanner already sees.
 
 ## GitHub Actions
 

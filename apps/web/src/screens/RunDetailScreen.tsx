@@ -486,7 +486,7 @@ function AutoPosterControls({
   busy: boolean
   canGeneratePoster: boolean
   onGenerate: () => void
-  onRetry: (posterId: string) => void
+  onRetry: () => void
 }): React.JSX.Element {
   const openFirst = replayReady ? undefined : '先にスナップショットを開いてください'
   return (
@@ -508,7 +508,7 @@ function AutoPosterControls({
           className="button"
           disabled={busy || !replayReady}
           title={openFirst}
-          onClick={() => onRetry(autoPoster.posterId)}
+          onClick={onRetry}
         >
           生成をやり直す
         </button>
@@ -567,7 +567,7 @@ function PostersSection({
   busy: boolean
   canGeneratePoster: boolean
   onGenerate: () => void
-  onRetry: (posterId: string) => void
+  onRetry: () => void
 }): React.JSX.Element {
   const autoPoster = pickAutoPoster(posters)
   const customPosters = posters.filter((poster) => poster.kind === 'custom')
@@ -593,7 +593,9 @@ function PostersSection({
         onGenerate={onGenerate}
         onRetry={onRetry}
       />
-      {autoPosterStatus.kind === 'queued' || autoPosterStatus.kind === 'rendering' ? (
+      {autoPosterStatus.kind === 'loading' ||
+      autoPosterStatus.kind === 'rendering' ||
+      autoPosterStatus.kind === 'uploading' ? (
         <p className="panel__hint" role="status">
           {posterLabel(autoPosterStatus).text}
         </p>
@@ -756,8 +758,8 @@ export function RunDetailScreen(): React.JSX.Element {
   /* --------------------------------------------------------------- actions */
 
   const openSnapshot = (revision: RevisionSummary) => openSnapshotFor(mounted, revision, setReplay)
-  const runAutoPoster = (posterId: string | null) =>
-    runAutoPosterFor({ mounted, replay, run, notify, setBusy, setAutoPosterStatus, setPosters }, posterId)
+  const runAutoPoster = () =>
+    runAutoPosterFor({ mounted, replay, run, notify, setBusy, setAutoPosterStatus, setPosters })
   const getSource = () => getSourceFor({ mounted, run, runId, setSource })
   const removeRun = () => removeRunFor({ runId, setBusy, setConfirmingDelete, notify, navigate })
 
@@ -829,8 +831,8 @@ export function RunDetailScreen(): React.JSX.Element {
         replayReady={replay.kind === 'ready'}
         busy={busy}
         canGeneratePoster={canGeneratePoster}
-        onGenerate={() => void runAutoPoster(null)}
-        onRetry={(posterId) => void runAutoPoster(posterId)}
+        onGenerate={() => void runAutoPoster()}
+        onRetry={() => void runAutoPoster()}
       />
 
       <SourceSection source={source} canDownload={canDownloadSource} onDownload={() => void getSource()} />

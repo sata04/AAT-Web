@@ -23,7 +23,7 @@ on:
     # Daily, dependencies. An advisory published today affects a lockfile nobody
     # edited, so this is the only trigger that would ever find it.
     - cron: "37 16 * * *"
-    # Weekly, everything, including the whole git history and the container image.
+    # Weekly, everything, including the whole git history.
     - cron: "37 17 * * 1"
   workflow_dispatch:
 
@@ -208,59 +208,6 @@ jobs:
             --lockfile pnpm-lock.yaml \
             --lockfile reference/python/requirements.txt \
             --lockfile poster-renderer/requirements.txt
-
-  container:
-    name: Renderer image vulnerabilities
-    # Weekly and on demand only. It builds the image, which is two minutes that
-    # buy nothing on a pull request the poster-renderer job already covers.
-    if: github.event_name == 'workflow_dispatch' || github.event.schedule == '37 17 * * 1'
-    runs-on: ubuntu-latest
-    timeout-minutes: 25
-    permissions:
-      contents: read
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-
-      - name: Install osv-scanner
-        working-directory: ${{ runner.temp }}
-        run: |
-          curl --fail --silent --show-error --location \
-            --output osv-scanner \
-            "https://github.com/google/osv-scanner/releases/download/v${OSV_VERSION}/osv-scanner_linux_amd64"
-          echo "${OSV_SHA256}  osv-scanner" | sha256sum --check --strict -
-          chmod +x osv-scanner
-
-      - name: Build the image
-        run: docker build -t aat-poster-renderer:scan poster-renderer
-
-      # The layer the lockfile scan cannot see: Debian packages in the pinned
-      # base image, which is where a poster renderer that installs no system
-      # font package and runs no server framework still inherits CVEs.
-      #
-      # REPORTING ONLY, and honestly labelled as such. The base image is pinned
-      # by digest and Renovate never auto-merges a poster-renderer change, so a
-      # finding here does not have a one-click fix — it has a visual-contract
-      # review behind it. Nobody has triaged this layer yet, so failing the job
-      # on its first run would mean starting a weekly red badge with no path to
-      # green, which is how a red badge stops meaning anything.
-      #
-      # To make it blocking: run it once, triage what it reports into
-      # osv-scanner.toml the way the lockfile findings are recorded there, and
-      # delete the `|| true`.
-      - name: Scan the image
-        run: |
-          {
-            echo '## Renderer base image — OSV report'
-            echo
-            echo 'Informational. See the comment in .github/workflows/security.yml.'
-            echo
-            echo '```'
-            "${RUNNER_TEMP}/osv-scanner" scan image aat-poster-renderer:scan \
-              --config osv-scanner.toml 2>&1 || true
-            echo '```'
-          } >> "$GITHUB_STEP_SUMMARY"
 
       # The scanners are pinned by digest, which is the right trade for
       # reproducibility and the wrong one for rule freshness — gitleaks ships its

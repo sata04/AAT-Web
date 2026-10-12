@@ -485,10 +485,10 @@ export const posterFigures = sqliteTable(
       .notNull()
       .references(() => analysisRevisions.id, { onDelete: 'cascade' }),
     /**
-     * The owner of the revision this figure draws — not the member who asked for the render. A
+     * The owner of the revision this figure draws — not the member who uploaded the PNG. A
      * figure belongs to the measurement, so that the auto-poster uniqueness constraint means the
-     * same thing whoever triggered it and so the PNG is reclaimed with the run. Who rendered it is
-     * recorded in `audit_logs`, which is where an actor belongs.
+     * same thing whoever triggered it and so the PNG is reclaimed with the run. Who uploaded it
+     * is recorded in `audit_logs`, which is where an actor belongs.
      */
     ownerUserId: text('owner_user_id')
       .notNull()
@@ -497,22 +497,24 @@ export const posterFigures = sqliteTable(
     kind: text('kind').notNull(),
     presetKey: text('preset_key').notNull(),
     presetVersion: text('preset_version').notNull(),
-    /** SHA-256 of the canonical plot spec that was sent to the renderer. */
+    /** SHA-256 of the canonical plot spec the figure was drawn from. */
     specHash: text('spec_hash').notNull(),
     rendererVersion: text('renderer_version'),
     /**
      * 'queued' | 'rendering' | 'ready' | 'failed' — the vocabulary in `@aat/plot-spec`'s
-     * `PosterFigureStatusSchema`, which is what `services/poster.ts` writes and what the client
-     * parses. One vocabulary spans browser, Worker and database on purpose.
+     * `PosterFigureStatusSchema`, which is what the client parses. One vocabulary spans browser,
+     * Worker and database on purpose. Since rendering moved into the browser the Worker only
+     * ever writes 'ready' here — a PNG arrives already drawn — so the other values appear only
+     * on rows from before the container renderer was removed.
      */
     status: text('status').notNull(),
     objectId: text('object_id'),
     errorCode: text('error_code'),
     attemptCount: integer('attempt_count').notNull().default(0),
     /**
-     * Which claim currently owns the render. Every claim or takeover writes a fresh token, and
-     * markRendered/markFailed run under `render_attempt = ?` — so a render superseded by a
-     * stale-claim takeover can never publish its PNG under the new attempt's specHash.
+     * Which render attempt owned the row when the Worker ran the render queue. Uploads carry no
+     * attempt token, so new rows leave it NULL; kept so databases from before the renderer's
+     * removal still read.
      */
     renderAttempt: text('render_attempt'),
     createdAt: integer('created_at', { mode: 'timestamp' }).notNull(),
@@ -681,7 +683,7 @@ export const auditLogs = sqliteTable(
 
 /**
  * Small key/value store for operational switches that must survive a restart and be changeable
- * without a deploy — currently the poster renderer's circuit breaker.
+ * without a deploy — a generic store, with no keys currently in use.
  */
 export const systemFlags = sqliteTable('system_flags', {
   key: text('key').primaryKey(),

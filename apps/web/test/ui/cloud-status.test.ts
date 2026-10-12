@@ -7,16 +7,21 @@
  * look busy, and a local result is never invalidated by a cloud failure.
  */
 
-import { describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
   analysisLabel,
   blocksInteraction,
   type CloudStatuses,
   INITIAL_STATUSES,
+  initialCloudStatuses,
   posterLabel,
   retryableLanes,
   syncLabel,
 } from '../../src/cloud/status.ts'
+
+afterEach(() => {
+  vi.unstubAllEnvs()
+})
 
 const READY: CloudStatuses = {
   analysis: { kind: 'ready', fromCache: false },
@@ -31,8 +36,25 @@ describe('independence', () => {
     expect(posterLabel(INITIAL_STATUSES.poster).tone).toBe('neutral')
   })
 
+  it('starts with the sync lane disabled — also a normal state — when the cloud is compiled out', () => {
+    vi.stubEnv('VITE_AAT_CLOUD_ENABLED', 'false')
+    const initial = initialCloudStatuses()
+    expect(initial.sync.kind).toBe('disabled')
+    // The lane is hidden rather than labelled, but if it ever is labelled the
+    // answer must stay neutral: disabled is a build fact, not a failure.
+    expect(syncLabel(initial.sync).tone).toBe('neutral')
+    expect(blocksInteraction(initial)).toBe(false)
+    expect(retryableLanes(initial)).toEqual([])
+  })
+
+  it('keeps the enabled-build default when the flag is unset or anything but the literal "false"', () => {
+    expect(initialCloudStatuses().sync.kind).toBe('local-only')
+    vi.stubEnv('VITE_AAT_CLOUD_ENABLED', 'true')
+    expect(initialCloudStatuses().sync.kind).toBe('local-only')
+  })
+
   it('never blocks the UI for cloud work', () => {
-    // A poster container starting up must not look like the application being
+    // A poster drawing or uploading must not look like the application being
     // busy — that is the specific failure this model exists to prevent.
     const busyCloud: CloudStatuses = {
       ...READY,
@@ -40,6 +62,8 @@ describe('independence', () => {
       poster: { kind: 'rendering' },
     }
     expect(blocksInteraction(busyCloud)).toBe(false)
+    expect(blocksInteraction({ ...busyCloud, poster: { kind: 'loading' } })).toBe(false)
+    expect(blocksInteraction({ ...busyCloud, poster: { kind: 'uploading' } })).toBe(false)
   })
 
   it('blocks only while the local analysis is actually running', () => {
@@ -103,5 +127,14 @@ describe('labels', () => {
 
   it('falls back to a generic label for an unknown stage rather than showing a key', () => {
     expect(analysisLabel({ kind: 'running', stage: 'future-stage', percent: 5 }).text).toBe('解析中 5%')
+  })
+
+  it('labels every poster lane state in Japanese', () => {
+    expect(posterLabel({ kind: 'unavailable' }).text).toBe('未生成')
+    expect(posterLabel({ kind: 'loading' }).text).toBe('準備中')
+    expect(posterLabel({ kind: 'rendering' }).text).toBe('生成中')
+    expect(posterLabel({ kind: 'uploading' }).text).toBe('アップロード中')
+    expect(posterLabel({ kind: 'ready', url: '/p.png' }).text).toBe('生成済み')
+    expect(posterLabel({ kind: 'failed', message: 'x', retryable: true }).text).toBe('失敗')
   })
 })

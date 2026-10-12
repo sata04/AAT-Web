@@ -266,41 +266,13 @@ jobs:
       - name: Renderer tests
         run: python3 -m pytest poster-renderer/tests -q
 
-      # Building the image here, in a job with no credentials, is half of the
-      # deployment trust boundary: deploy.yml consumes an image that was already
-      # built and tested, and never builds from repository source itself.
-      #
-      # Deliberately no build cache. A registry or Actions cache would be a
-      # mutable input to the one artefact in this repository whose entire value
-      # is that it is reproducible from pinned inputs — and the build is pinned
-      # so thoroughly (base image by digest, every wheel by hash,
-      # --only-binary=:all:) that there is little for a cache to save beyond the
-      # wheel download. The Dockerfile cannot be given a BuildKit cache mount
-      # either: its runtime stage has to stay byte-for-byte what deploy.yml
-      # ships. See docs/supply-chain.md.
-      - name: Build container image
-        run: docker build -t aat-poster-renderer:ci poster-renderer
-
-      # POSTER_STRICT_REFERENCE_BYTES=1 upgrades the reference-image check from
-      # "perceptually indistinguishable" to "byte-identical", and this is the one
-      # place it can honestly be demanded. tests/test_reference_image.py keeps it
-      # opt-in because the committed PNG was produced on one machine and FreeType
-      # or zlib built differently elsewhere moves bytes without moving anything a
-      # reader could see — but inside this image none of that is free to vary:
-      # the base is pinned by digest and every wheel by hash, so the renderer,
-      # the glyph rasteriser and the PNG encoder are the exact ones that produced
-      # the reference. Its docstring names precisely this situation.
-      #
-      # The host run above stays tolerant, so a runner image change still reports
-      # as a visual diff rather than a byte diff. If this step ever fails while
-      # that one passes, the pinned stack moved — which is the signal worth
-      # having, and the reason poster-renderer updates never auto-merge.
-      - name: Renderer tests inside the image
-        run: |
-          docker run --rm --network none \
-            --env POSTER_STRICT_REFERENCE_BYTES=1 \
-            aat-poster-renderer:ci \
-            python -m pytest /app/tests -q
+      # The renderer runs inside the browser now (Pyodide/WASM), so there is no
+      # container image to build here. Byte-identity is asserted where it can
+      # honestly be demanded: within the pinned Pyodide build the renderer ships
+      # with. The committed reference PNG is still enforced here with the
+      # pixel-tolerance suite, which is the guarantee that must hold across
+      # operating systems and library builds — see poster-renderer/README.md and
+      # docs/poster-renderer.md.
 
   e2e:
     name: End-to-end (Playwright)
@@ -336,23 +308,6 @@ jobs:
       - name: Install Chromium
         run: pnpm --filter @aat/web exec playwright install --with-deps chromium
 
-      # The renderer image the harness starts with `docker run`.
-      #
-      # Without this the suite still passes — and that is the problem.
-      # `e2e/harness/stack.ts` reports the container as missing and
-      # `renderer-integration.spec.ts` and `custom-poster.spec.ts` skip
-      # themselves, so the one test that proves a browser-built plot spec
-      # reaches the real Python renderer would report green having never run.
-      # A skip is only honest when a human is watching the output; in CI it is
-      # indistinguishable from a pass.
-      #
-      # This duplicates the build in the `poster-renderer` job above rather than
-      # taking its image as an artefact, because `needs:` would serialise the
-      # two into one long chain for the sake of a build that costs a couple of
-      # minutes and runs alongside it anyway.
-      - name: Build the poster renderer image
-        run: docker build -t aat-poster-renderer:ci poster-renderer
-
       # The suite is a separate TypeScript programme (e2e/tsconfig.json) that
       # `tsc -b` in apps/web does not include, and Playwright transpiles without
       # checking. Nothing else typechecks these files.
@@ -365,8 +320,8 @@ jobs:
       #
       # This is the only job that exercises the passkey ceremony end to end — registration through a
       # virtual authenticator, the invitation token being scrubbed from the URL, sign-out and
-      # sign-in — and the only one that sends a browser-built plot spec through the Worker to the
-      # real Python renderer.
+      # sign-in — and the only one that drives the browser-side poster engine (Pyodide + the same
+      # Python render core the container used to run) through a real figure.
       - name: Run E2E suite
         run: pnpm --filter @aat/web exec playwright test
 

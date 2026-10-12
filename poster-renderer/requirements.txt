@@ -26,8 +26,7 @@
 # all. That is a property of the pinned NumPy, not of this list.
 #
 # Hashes cover linux x86_64 and aarch64 wheels for CPython 3.12-3.14 (manylinux and musllinux),
-# plus pure-Python wheels. That is CI (ubuntu-latest) and the container image (python:3.14-slim,
-# Debian bookworm, glibc 2.36). It is deliberately NOT a cross-platform lock file: for local work
+# plus pure-Python wheels. That is CI (ubuntu-latest). It is deliberately NOT a cross-platform lock file: for local work
 # on macOS or Windows use the checked-in virtualenv (see README.md) rather than this file. No
 # sdists are listed, so a platform without a matching wheel fails loudly instead of building a
 # subtly different binary.
@@ -428,9 +427,7 @@ six==1.17.0 \
 
 # --- Test-only -------------------------------------------------------------------------------
 #
-# The image installs these too, because CI runs the visual-contract suite *inside* the built
-# image (see .github/workflows/ci.yml: `docker run ... python -m pytest /app/tests`). Testing the
-# artefact that ships, rather than a re-created approximation of it, is worth ~2 MB of image size.
+# CI runs the native visual-contract suite with these (see .github/workflows/ci.yml).
 
 pytest==9.1.1 \
     --hash=sha256:37a86b45efb9a47a61a36449063e8e18d0cab3161329fc099eb21783169c4f0c

@@ -16,6 +16,14 @@
  * sign-in link is useful) and `unavailable` (there is nothing to sign in to — so
  * offering one would be a dead end). One probe at start-up decides which.
  *
+ * A build with the cloud compiled out (`src/cloud/enabled.ts`) takes the
+ * `unavailable` answer *without* probing: a Worker that cannot exist cannot
+ * answer, and "no cloud half" is literally what `unavailable` already means.
+ * Every consumer treats it as quiet local mode — no banner, no sign-in offer —
+ * so a separate `disabled` status would add plumbing for no user-visible
+ * distinction. The auth client is also never constructed: it is created lazily
+ * on first use (`src/auth/client.ts`), and nothing runs that code path.
+ *
  * `refresh` exists for the two moments the answer legitimately changes without a
  * reload: completing a passkey sign-in, and completing an invitation
  * registration. `signOut` goes through Better Auth so the session cookie is
@@ -24,7 +32,8 @@
 
 import type { Capability, Role } from '@aat/shared'
 import { createContext, useCallback, useContext, useEffect, useMemo, useState } from 'react'
-import { authClient } from '../auth/client.ts'
+import { getAuthClient } from '../auth/client.ts'
+import { cloudEnabled } from '../cloud/enabled.ts'
 import { fetchMe } from '../cloud/gateway.ts'
 
 export type SessionStatus =
@@ -65,6 +74,14 @@ export function SessionProvider(props: SessionProviderProps): React.JSX.Element 
   const [capabilities, setCapabilities] = useState<readonly Capability[]>(NO_CAPABILITIES)
 
   const refresh = useCallback(async () => {
+    // No probe when the cloud is compiled out: the answer is `unavailable` by
+    // construction, and a request that can only fail is not worth sending.
+    if (!cloudEnabled()) {
+      setUser(null)
+      setCapabilities(NO_CAPABILITIES)
+      setStatus('unavailable')
+      return
+    }
     const outcome = await fetchMe()
     if (outcome.ok) {
       setUser(outcome.value.user)
@@ -87,10 +104,15 @@ export function SessionProvider(props: SessionProviderProps): React.JSX.Element 
   }, [refresh])
 
   const signOut = useCallback(async () => {
+    // Nothing can be signed in when the cloud is compiled out — and nothing
+    // should construct the auth client to find that out.
+    if (!cloudEnabled()) return
     // A sign-out that could not reach the server still clears this tab: leaving
     // the UI claiming a session that the user has asked to end is the worse
     // failure, and the cookie expires on its own regardless.
-    await authClient.signOut().catch(() => undefined)
+    await getAuthClient()
+      .signOut()
+      .catch(() => undefined)
     setUser(null)
     setCapabilities(NO_CAPABILITIES)
     // Still `signed-out` rather than `unavailable`: the cloud answered a moment

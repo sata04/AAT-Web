@@ -8,8 +8,9 @@
  * overwritten. A conference poster and the paper it came from are two figures, and being able to
  * say which one was published is the whole reason both are kept.
  *
- * The PNG here comes from the real renderer container. Nothing about a custom poster is worth
- * testing against a fake image: the point of the frozen preset is what Matplotlib actually draws.
+ * The PNG here is drawn by the real render core under Pyodide in the page itself, then uploaded.
+ * Nothing about a custom poster is worth testing against a fake image: the point of the frozen
+ * preset is what Matplotlib actually draws.
  */
 
 import {
@@ -20,7 +21,7 @@ import {
   statusLane,
   waitForAnalysis,
 } from '../harness/app.ts'
-import { expect, rendererAvailable, test } from '../harness/fixtures.ts'
+import { expect, test } from '../harness/fixtures.ts'
 
 test.describe('custom poster', () => {
   test('renders a chosen range and keeps it alongside the automatic figure', async ({
@@ -28,10 +29,6 @@ test.describe('custom poster', () => {
     harness,
     authenticator,
   }) => {
-    test.skip(
-      !rendererAvailable,
-      'The poster renderer container is not running; see the suite report for how to start it.',
-    )
     void authenticator
 
     const { token } = await harness.createInvitation({
@@ -43,7 +40,7 @@ test.describe('custom poster', () => {
     await openCsv(page, RUN_FIXTURE, '260814a_data.csv')
     await waitForAnalysis(page)
     await expect(statusLane(page, 'クラウド同期')).toHaveText('保存済み', { timeout: 60_000 })
-    await expect(statusLane(page, 'ポスター図')).toHaveText('生成済み', { timeout: 120_000 })
+    await expect(statusLane(page, 'ポスター図')).toHaveText('生成済み', { timeout: 240_000 })
 
     const revision = await harness.one<{ id: string }>(
       'SELECT ar.id AS id FROM analysis_revisions ar JOIN runs r ON r.id = ar.run_id WHERE r.run_code = ?',
@@ -73,8 +70,8 @@ test.describe('custom poster', () => {
     await dialog.getByLabel('図の名前').fill('微小重力区間')
     await dialog.getByRole('button', { name: '作成' }).click()
 
-    // The dialog shows the figure it just made, streamed from R2 through the Worker.
-    await expect(dialog.getByRole('img', { name: /のポスター図$/ })).toBeVisible({ timeout: 120_000 })
+    // The dialog shows the figure it just made, rendered in the page and uploaded to R2.
+    await expect(dialog.getByRole('img', { name: /のポスター図$/ })).toBeVisible({ timeout: 240_000 })
 
     /* ------------------------------------------------ history, not replacement */
 

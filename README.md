@@ -42,7 +42,7 @@ Governing principle は「**local analysis is the product; the cloud is an optio
 - **Optional Cloud Workspace**
   - Passkeyを中心とした招待制の認証（Better Auth）
   - 解析履歴のクラウド保存（D1 / R2）
-  - Cloudflare Container上のPython/Matplotlibによる、デスクトップ版と画素単位で一致する高品質グラフレンダリング
+  - ブラウザ内のPyodide (WASM) 上で動くPython/Matplotlibによる、デスクトップ版と画素単位で一致する高品質グラフレンダリング（オフライン・未ログインでも利用可能）
 
 ## Architecture
 
@@ -57,18 +57,19 @@ flowchart TD
         worker --> gravity[Gravity conversion]
         worker --> filter[Filtering]
         worker --> stats[Statistics / G-quality]
+        ui --> poster[Poster Renderer — Pyodide / Matplotlib]
     end
 
-    worker -. optional: auth, sync, poster export .-> cf
+    worker -. optional: auth, sync .-> cf
+    poster -. optional: upload the rendered PNG .-> cf
 
     subgraph cloudflare [Cloudflare]
         cf[Worker — Hono + Better Auth] --> d1[(D1 · metadata)]
-        cf --> r2[(R2 · snapshots)]
-        cf --> poster[Poster Renderer — Python / Matplotlib]
+        cf --> r2[(R2 · snapshots & posters)]
     end
 ```
 
-ブラウザ側の解析エンジン（`packages/analysis-core`）が数値計算の正本です。クラウド側は認証・データ保存・高品質な画像生成などを担当し、Poster Rendererはブラウザ側ですでに算出済みの数値データを描画するだけで、解析そのものは一切行いません。
+ブラウザ側の解析エンジン（`packages/analysis-core`）が数値計算の正本です。ポスター描画もブラウザ内で完結します（Pyodide上のPython/Matplotlibが描画済みのPNGを生成）。クラウド側は認証とデータ保存だけを担当し、解析・描画そのものは一切行いません。
 
 詳しい設計については [`docs/web-architecture.md`](docs/web-architecture.md) を参照してください。
 
@@ -138,7 +139,7 @@ AAT-Web/
 │   ├── analysis-core/ # The numerical engine. No DOM, no React.
 │   ├── plot-spec/ # The validated poster specification and frozen presets.
 │   └── shared/ # Errors, config + hashing, run codes, snapshot format, capabilities.
-├── poster-renderer/ # Pinned Python + Matplotlib container
+├── poster-renderer/ # Pinned Python + Matplotlib render core (runs in-browser under Pyodide)
 ├── reference/
 │   └── python/
 │       └── core/ # Vendored desktop AAT core. Read-only numerical oracle.

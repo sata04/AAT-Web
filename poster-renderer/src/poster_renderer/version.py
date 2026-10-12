@@ -9,8 +9,8 @@ from __future__ import annotations
 # The AAT release whose gravity-level figure this renderer reproduces, stamped into the watermark
 # as "AAT v11.1.0".
 #
-# NOT the version of any program that is running. This container is part of AAT Web, whose own
-# version is 1.0.0 (`apps/web/src/app/version.ts`), and it is built and deployed on its own
+# NOT the version of any program that is running. This renderer is part of AAT Web, whose own
+# version is 1.0.0 (`apps/web/src/app/version.ts`), and it is built and shipped on its own
 # schedule under `RENDERER_VERSION` below. The number here is a **conformance claim about the
 # figure**: these are AAT 11.1.0's numbers, AAT 11.1.0's framing and AAT 11.1.0's style. Both
 # implementations that satisfy that definition stamp the same string, which is precisely what
@@ -37,9 +37,9 @@ from __future__ import annotations
 # Bumping it is a visual-contract change: see README.md, "Changing the contract".
 DESKTOP_BASELINE_VERSION = "11.1.0"
 
-# Build identity of this container image — the version that *does* answer "which program drew
-# this?". Reported by GET /health and in the X-Poster-Renderer-Version response header so a stored
-# PosterFigureRecord can record exactly which renderer produced its PNG. It is NOT drawn into the
+# Build identity of this renderer — the version that *does* answer "which program drew
+# this?". Reported by the engine (`posterEngineVersion()`) so a stored PosterFigureRecord can
+# record exactly which renderer produced its PNG. It is NOT drawn into the
 # figure, so bumping it does not change any pixel — only the PNG's `Software` metadata text chunk,
 # which is intentionally decoupled from the pixel contract.
 #
@@ -51,6 +51,10 @@ DESKTOP_BASELINE_VERSION = "11.1.0"
 #   1.1.0  a spec that omits yMin/yMax is now drawn in the preset's -1 .. 1 G frame instead of
 #          being autoscaled to its own data. Specs that state their bounds are byte-identical to
 #          1.0.0's output (tests/test_reference_image.py, POSTER_STRICT_REFERENCE_BYTES=1).
-RENDERER_VERSION = "aat-poster-renderer/1.1.0"
+#   1.2.0  the renderer moved from the container service into the browser: it now runs under
+#          Pyodide, whose bundled Matplotlib/NumPy/Pillow are not the requirements.txt pins, so
+#          the same spec produces different PNG bytes (measured: mean abs diff 4.90 vs the
+#          1.1.0 reference at 72 dpi — the version bump exists precisely for this).
+RENDERER_VERSION = "aat-poster-renderer/1.2.0"
 
 __all__ = ["DESKTOP_BASELINE_VERSION", "RENDERER_VERSION"]

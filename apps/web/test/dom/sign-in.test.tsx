@@ -20,11 +20,11 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 const signInPasskey = vi.fn()
 
 vi.mock('../../src/auth/client.ts', () => ({
-  authClient: {
+  getAuthClient: () => ({
     signIn: { passkey: () => signInPasskey() },
     signOut: () => Promise.resolve({ error: null }),
     passkey: { listUserPasskeys: () => Promise.resolve({ data: [] }) },
-  },
+  }),
 }))
 
 import { SignInScreen } from '../../src/screens/SignInScreen.tsx'

@@ -1,7 +1,7 @@
 /**
  * The admin console's own navigation, as data.
  *
- * The seven sections are a fixed table rather than JSX scattered through a component for the same
+ * The six sections are a fixed table rather than JSX scattered through a component for the same
  * reason `src/router/Router.tsx` keeps `ROUTES` as a table: which screens exist, which route each
  * one answers, and what capability each one needs are three facts that must agree, and they only
  * stay in agreement if they are written down once. A link rendered without its capability, or a
@@ -48,12 +48,6 @@ export const ADMIN_SECTIONS: readonly AdminSection[] = [
     capability: 'invitation:manage',
   },
   { route: 'admin-runs', path: '/admin/runs', label: '実験と保存容量', capability: 'quota:manage' },
-  {
-    route: 'admin-renderer',
-    path: '/admin/renderer',
-    label: 'ポスターレンダラー',
-    capability: 'quota:manage',
-  },
   { route: 'admin-audit', path: '/admin/audit', label: '監査ログ', capability: 'audit:read' },
   { route: 'admin-settings', path: '/admin/settings', label: '設定', capability: 'quota:manage' },
 ]

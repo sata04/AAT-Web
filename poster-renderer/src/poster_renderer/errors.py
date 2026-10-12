@@ -1,17 +1,17 @@
 """The renderer's error taxonomy.
 
-Only the Cloudflare Worker ever talks to this container, so these codes are an *internal*
-contract, not a user-facing one. They are English and machine-first; the Worker maps them onto
-the localised, user-facing taxonomy in `packages/shared/src/errors.ts` (which is Japanese-first,
-matching the desktop application's `core/exceptions.py`). The mapping is documented in README.md.
+The renderer runs inside the browser under Pyodide (CPython on WASM), in a dedicated Web Worker.
+The engine's Python bridge serialises these codes across the JS/Python boundary, so they are an
+*internal* contract, not a user-facing one. They are English and machine-first; the app's poster
+error surface (`apps/web/src/poster/errors.ts`) maps them onto the localised, user-facing
+`PosterSpecAdvice` taxonomy, which is Japanese-first, matching the desktop application's
+`core/exceptions.py`.
 
-Two codes are deliberately spelled the same as the shared taxonomy's, because they mean exactly
-the same thing on both sides of the boundary and are forwarded rather than translated:
+`POSTER_RENDER_FAILED` is deliberately spelled the same as the shared taxonomy's code in
+`packages/shared/src/errors.ts`, because it means exactly the same thing on both sides of the
+boundary and is forwarded rather than translated.
 
-  * ``POSTER_BUSY``           -> shared POSTER_BUSY (HTTP 429)
-  * ``POSTER_RENDER_FAILED``  -> shared POSTER_RENDER_FAILED (HTTP 500)
-
-Error bodies never echo client input back. A rejected title or run code is described by field
+Error payloads never echo client input back. A rejected title or run code is described by field
 path and rule, never quoted, so no client-controlled bytes can be reflected into a response, a
 log line, or anything downstream that renders one.
 """
@@ -22,11 +22,10 @@ import json
 from typing import Any
 
 
-class RenderServiceError(Exception):
-    """Base class for every error this service converts into an HTTP response."""
+class RendererError(Exception):
+    """Base class for every error the engine bridge serialises into a response payload."""
 
     code = "POSTER_RENDER_FAILED"
-    http_status = 500
 
     def __init__(self, message: str, *, field: str | None = None) -> None:
         super().__init__(message)
@@ -44,63 +43,15 @@ class RenderServiceError(Exception):
         return json.dumps(self.to_payload(), sort_keys=True, separators=(",", ":")).encode("utf-8")
 
 
-class SpecValidationError(RenderServiceError):
-    """The request body is not a valid poster plot spec.
+class SpecValidationError(RendererError):
+    """The spec is not a valid poster plot spec.
 
-    The Worker validates with Zod first, so reaching this means the Worker sent something the
-    shared schema would have rejected: from the Worker's point of view it is an internal error,
-    not something to show a user.
+    The app validates the spec with Zod before it is ever handed to the engine, so reaching this
+    means something upstream sent a spec the shared schema would have rejected — an
+    engine-internal fault, not something a user caused.
     """
 
     code = "POSTER_SPEC_INVALID"
-    http_status = 400
 
 
-class PayloadTooLargeError(RenderServiceError):
-    """The request body exceeds the transport cap (checked before the body is read)."""
-
-    code = "POSTER_PAYLOAD_TOO_LARGE"
-    http_status = 413
-
-
-class BusyError(RenderServiceError):
-    """A render is already in flight and the waiting room is full. Safe to retry."""
-
-    code = "POSTER_BUSY"
-    http_status = 429
-
-
-class RenderTimeoutError(RenderServiceError):
-    """A render exceeded its deadline and its worker process was killed."""
-
-    code = "POSTER_RENDER_TIMEOUT"
-    http_status = 504
-
-
-class RenderFailedError(RenderServiceError):
-    """Rendering raised. The spec validated, so this is a renderer fault, not a client fault."""
-
-    code = "POSTER_RENDER_FAILED"
-    http_status = 500
-
-
-class MethodNotAllowedError(RenderServiceError):
-    code = "POSTER_METHOD_NOT_ALLOWED"
-    http_status = 405
-
-
-class NotFoundError(RenderServiceError):
-    code = "POSTER_NOT_FOUND"
-    http_status = 404
-
-
-class UnsupportedMediaTypeError(RenderServiceError):
-    code = "POSTER_UNSUPPORTED_MEDIA_TYPE"
-    http_status = 415
-
-
-class LengthRequiredError(RenderServiceError):
-    """No usable ``Content-Length``. Chunked bodies are refused rather than streamed."""
-
-    code = "POSTER_LENGTH_REQUIRED"
-    http_status = 411
+__all__ = ["RendererError", "SpecValidationError"]

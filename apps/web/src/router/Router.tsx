@@ -31,9 +31,16 @@
  * scrub in `src/auth/invitation-token.ts` needs exactly that: it must rewrite
  * the URL synchronously, and it must tell this module, or the router's snapshot
  * would go on holding a query string the address bar no longer shows.
+ *
+ * Routes marked `cloudOnly` are matched only when the cloud half is part of the
+ * build (`src/cloud/enabled.ts`). Without it they fall through to `not-found` —
+ * the same answer an unknown path gets, and deliberately so: a compiled-out
+ * screen should behave exactly like one that was never written, not like a
+ * bookmark that redirects somewhere else.
  */
 
 import { createContext, useContext, useMemo, useSyncExternalStore } from 'react'
+import { cloudEnabled } from '../cloud/enabled.ts'
 
 /** Every screen this application can be at. `not-found` is the answer for anything else. */
 export type RouteName =
@@ -48,7 +55,6 @@ export type RouteName =
   | 'admin-users'
   | 'admin-invitations'
   | 'admin-runs'
-  | 'admin-renderer'
   | 'admin-audit'
   | 'admin-settings'
   | 'not-found'
@@ -56,6 +62,13 @@ export type RouteName =
 interface RouteDefinition {
   readonly name: Exclude<RouteName, 'not-found'>
   readonly pattern: string
+  /**
+   * True when the route only means anything with a deployed cloud half. Such
+   * routes are skipped by the matcher when the build compiles the cloud out —
+   * a deep link to `/admin` on a local-only deployment must not produce a
+   * sign-in prompt for a service that does not exist.
+   */
+  readonly cloudOnly?: boolean
 }
 
 /**
@@ -68,19 +81,18 @@ interface RouteDefinition {
  */
 export const ROUTES: readonly RouteDefinition[] = [
   { name: 'analyzer', pattern: '/' },
-  { name: 'sign-in', pattern: '/sign-in' },
-  { name: 'register', pattern: '/register' },
-  { name: 'recover', pattern: '/recover' },
-  { name: 'security', pattern: '/security' },
-  { name: 'runs', pattern: '/runs' },
-  { name: 'run', pattern: '/runs/:runId' },
-  { name: 'admin', pattern: '/admin' },
-  { name: 'admin-users', pattern: '/admin/users' },
-  { name: 'admin-invitations', pattern: '/admin/invitations' },
-  { name: 'admin-runs', pattern: '/admin/runs' },
-  { name: 'admin-renderer', pattern: '/admin/renderer' },
-  { name: 'admin-audit', pattern: '/admin/audit' },
-  { name: 'admin-settings', pattern: '/admin/settings' },
+  { name: 'sign-in', pattern: '/sign-in', cloudOnly: true },
+  { name: 'register', pattern: '/register', cloudOnly: true },
+  { name: 'recover', pattern: '/recover', cloudOnly: true },
+  { name: 'security', pattern: '/security', cloudOnly: true },
+  { name: 'runs', pattern: '/runs', cloudOnly: true },
+  { name: 'run', pattern: '/runs/:runId', cloudOnly: true },
+  { name: 'admin', pattern: '/admin', cloudOnly: true },
+  { name: 'admin-users', pattern: '/admin/users', cloudOnly: true },
+  { name: 'admin-invitations', pattern: '/admin/invitations', cloudOnly: true },
+  { name: 'admin-runs', pattern: '/admin/runs', cloudOnly: true },
+  { name: 'admin-audit', pattern: '/admin/audit', cloudOnly: true },
+  { name: 'admin-settings', pattern: '/admin/settings', cloudOnly: true },
 ]
 
 export interface RouteMatch {
@@ -112,6 +124,7 @@ export function matchLocation(location: string): RouteMatch {
   const actual = segmentsOf(pathname)
 
   for (const route of ROUTES) {
+    if (route.cloudOnly === true && !cloudEnabled()) continue
     const expected = segmentsOf(route.pattern)
     if (expected.length !== actual.length) continue
 

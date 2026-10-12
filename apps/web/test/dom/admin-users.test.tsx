@@ -20,11 +20,11 @@ import userEvent from '@testing-library/user-event'
 import { describe, expect, it, vi } from 'vitest'
 
 vi.mock('../../src/auth/client.ts', () => ({
-  authClient: {
+  getAuthClient: () => ({
     signIn: { passkey: () => Promise.resolve({ error: null }) },
     signOut: () => Promise.resolve({ error: null }),
     passkey: { listUserPasskeys: () => Promise.resolve({ data: [] }) },
-  },
+  }),
 }))
 
 import { AdminUsersScreen } from '../../src/screens/AdminUsersScreen.tsx'

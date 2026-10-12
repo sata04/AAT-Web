@@ -1,22 +1,20 @@
 /**
- * When a render may be started, and — mostly — when it may not.
+ * When a poster render may be started, and when it may upload.
  *
- * The automatic poster is one render per analysis revision. That guarantee is the database's: a
- * partial unique index on `(analysis_revision_id, preset_version) WHERE kind = 'auto'`, claimed by
- * an `INSERT ... ON CONFLICT DO NOTHING`, so a repeat call reads the existing row back and renders
- * nothing. The browser is not asked to be clever about it, and deliberately keeps no second flag of
- * its own — a client-side check loses to a reload, a second tab and another device, and having two
- * mechanisms would make it unclear which one was holding the line.
+ * The figure is drawn by the local engine — `src/poster/engine/renderer.ts` — which
+ * this file replaces with a stub, so the only real work under test is the wiring:
+ * which status the lane sees, which request goes to the Worker and carrying what,
+ * and — the contract's sharp edge — *when no request may be made at all*.
  *
- * What the browser *is* responsible for is the shape of its requests, which is what this file
- * asserts:
- *
- *  - one POST per generate, and never a second one behind a poll;
- *  - a figure that is still rendering is followed with the *listing* endpoint, which renders
- *    nothing — so watching a poster costs a container nothing, and neither does a rerender;
- *  - a failed figure is retried through `POST /posters/:id/retry`, which is conditional on it still
- *    being failed, rather than by asking for the automatic poster again;
- *  - a spec that cannot be built sends nothing at all.
+ *  - every render is local: a figure that never touches the network still exists
+ *    and is still downloadable;
+ *  - the automatic poster uploads exactly once — the unique index keeps a repeat
+ *    from storing twice — and a finished render is uploaded as
+ *    `{ spec, pngBase64 }`, never as a render request;
+ *  - a custom poster uploads through the collection endpoint, which keeps history
+ *    rather than overwriting;
+ *  - with the cloud disabled — or no revision to file under — no fetch happens;
+ *  - a spec that cannot be built renders nothing and sends nothing at all.
  */
 
 import { DEFAULT_ANALYSIS_CONFIG } from '@aat/shared'
@@ -24,17 +22,32 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { asFullResolution } from '../../src/analysis/series.ts'
 import type { Dataset, SensorDataset } from '../../src/app/dataset.ts'
 import type { PosterStatus } from '../../src/cloud/status.ts'
-import {
-  generateAutoPoster,
-  generateCustomPoster,
-  type PosterContext,
-  retryAutoPoster,
-} from '../../src/poster/requests.ts'
+import type { PosterEngineStatus } from '../../src/poster/engine/renderer.ts'
+import { generateAutoPoster, generateCustomPoster, type PosterContext } from '../../src/poster/requests.ts'
 
 const REVISION_ID = 'rev_01J000000000000000000000'
 const POSTER_ID = 'pos_01J000000000000000000000'
+const PNG = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 1, 2, 3])
 
 const EMPTY = asFullResolution(new Float64Array(0))
+
+/* The engine, stubbed: statuses can be scripted, the PNG is fixed. */
+const engine = vi.hoisted(() => ({
+  render: vi.fn(async (): Promise<Uint8Array> => PNG),
+  listeners: new Set<(status: PosterEngineStatus) => void>(),
+  emit(status: PosterEngineStatus) {
+    for (const listener of this.listeners) listener(status)
+  },
+}))
+
+vi.mock('../../src/poster/engine/renderer.ts', () => ({
+  renderPosterPng: () => engine.render(),
+  posterEngineVersion: () => 'aat-poster-engine/test',
+  onPosterEngineStatus: (callback: (status: PosterEngineStatus) => void) => {
+    engine.listeners.add(callback)
+    return () => engine.listeners.delete(callback)
+  },
+}))
 
 function series(count: number) {
   const time = new Float64Array(count)
@@ -71,7 +84,7 @@ const ABSENT: SensorDataset = {
   endIndex: null,
 }
 
-function context(innerSamples = 1000): PosterContext {
+function context(innerSamples = 1000, revisionId: string | null = REVISION_ID): PosterContext {
   const dataset: Dataset = {
     name: '260811a_data',
     filename: '260811a_data.csv',
@@ -102,19 +115,19 @@ function context(innerSamples = 1000): PosterContext {
     fromCache: false,
     config: DEFAULT_ANALYSIS_CONFIG,
   }
-  return { revisionId: REVISION_ID, runCode: '260811a', dataset }
+  return { revisionId, runCode: '260811a', dataset }
 }
 
-function figure(status: 'queued' | 'rendering' | 'ready' | 'failed', failureCode: string | null = null) {
+function figure(kind: 'auto' | 'custom' = 'auto') {
   return {
     posterId: POSTER_ID,
     analysisRevisionId: REVISION_ID,
-    kind: 'auto' as const,
+    kind,
     presetVersion: 'aat-poster-v1',
     specHash: 'd'.repeat(64),
-    status,
-    rendererVersion: 'aat-poster-renderer/1.0.0',
-    failureCode,
+    status: 'ready',
+    rendererVersion: 'aat-poster-engine/test',
+    failureCode: null,
     attemptCount: 1,
     createdAt: '2026-08-11T00:00:00.000Z',
   }
@@ -123,6 +136,7 @@ function figure(status: 'queued' | 'rendering' | 'ready' | 'failed', failureCode
 interface Recorded {
   method: string
   path: string
+  body: { spec?: { analysisRevisionId?: string; posterKind?: string }; pngBase64?: string } | null
 }
 
 const recorded: Recorded[] = []
@@ -131,7 +145,11 @@ const realFetch = globalThis.fetch
 function install(responder: (request: Recorded) => Response): void {
   globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = new URL(String(input), 'https://aat.test')
-    const request: Recorded = { method: (init?.method ?? 'GET').toUpperCase(), path: url.pathname }
+    const request: Recorded = {
+      method: (init?.method ?? 'GET').toUpperCase(),
+      path: url.pathname,
+      body: typeof init?.body === 'string' ? (JSON.parse(init.body) as Recorded['body']) : null,
+    }
     recorded.push(request)
     return responder(request)
   }) as typeof fetch
@@ -147,54 +165,90 @@ function trace(): string[] {
 
 beforeEach(() => {
   recorded.length = 0
+  engine.render.mockClear()
+  engine.render.mockResolvedValue(PNG)
+  engine.emit({ kind: 'ready' })
 })
 
 afterEach(() => {
   globalThis.fetch = realFetch
-  vi.useRealTimers()
+  vi.unstubAllEnvs()
 })
 
 describe('the automatic poster', () => {
-  it('makes exactly one request when the Worker answers with a finished figure', async () => {
-    install(() => json({ poster: figure('ready') }, 201))
+  it('renders locally and uploads the finished PNG exactly once', async () => {
+    install(() => json({ poster: figure('auto'), created: true }, 201))
     const statuses: PosterStatus[] = []
 
     const outcome = await generateAutoPoster(context(), (status) => statuses.push(status))
 
     expect(outcome.ok).toBe(true)
+    if (!outcome.ok) return
+    expect(outcome.uploaded).toBe(true)
+    expect(outcome.entry.posterId).toBe(POSTER_ID)
+    expect(outcome.entry.png).toEqual(PNG)
+    // One request, carrying the spec and the bytes — never a render request.
     expect(trace()).toEqual([`POST /api/v1/revisions/${REVISION_ID}/poster/auto`])
+    const body = recorded[0]?.body
+    expect(body?.spec?.analysisRevisionId).toBe(REVISION_ID)
+    expect(body?.spec?.posterKind).toBe('auto')
+    expect(body?.pngBase64).toBe(btoa(String.fromCharCode(...PNG)))
+    // The ready status carries the *local* URL even after upload — the stored
+    // figure's API URL is fetchable, but a preview that needs the network would
+    // break the moment the connection drops.
     expect(statuses.at(-1)).toEqual({
       kind: 'ready',
-      url: `/api/v1/posters/${POSTER_ID}/image`,
+      url: outcome.entry.imageUrl,
       posterId: POSTER_ID,
     })
   })
 
-  it('follows an in-flight render with the listing, never with another render request', async () => {
-    vi.useFakeTimers()
-    let listings = 0
-    install((request) => {
-      if (request.method === 'POST') return json({ poster: figure('rendering') }, 200)
-      listings += 1
-      return json({ posters: [figure(listings >= 2 ? 'ready' : 'rendering')] })
+  it('mirrors the engine lifecycle in the lane while the draw runs', async () => {
+    engine.render.mockImplementation(async () => {
+      engine.emit({ kind: 'loading', detail: 'first run' })
+      engine.emit({ kind: 'rendering' })
+      return PNG
     })
+    install(() => json({ poster: figure('auto') }, 201))
+    const statuses: PosterStatus[] = []
 
-    const pending = generateAutoPoster(context(), () => {})
-    // Two poll ticks, which is enough for the stub to settle.
-    await vi.advanceTimersByTimeAsync(6_000)
-    const outcome = await pending
+    const outcome = await generateAutoPoster(context(), (status) => statuses.push(status))
 
     expect(outcome.ok).toBe(true)
-    const posts = trace().filter((entry) => entry.startsWith('POST'))
-    const gets = trace().filter((entry) => entry.startsWith('GET'))
-    // One render request, however many times its state was read.
-    expect(posts).toEqual([`POST /api/v1/revisions/${REVISION_ID}/poster/auto`])
-    expect(gets.length).toBeGreaterThanOrEqual(1)
-    expect(new Set(gets)).toEqual(new Set([`GET /api/v1/revisions/${REVISION_ID}/posters`]))
+    expect(statuses.map((status) => status.kind)).toEqual(['loading', 'rendering', 'uploading', 'ready'])
   })
 
-  it('reports a failed figure as retryable without retrying it itself', async () => {
-    install(() => json({ poster: figure('failed', 'POSTER_RENDER_FAILED') }, 200))
+  it('makes no request at all when there is no revision to file under', async () => {
+    install(() => json({ poster: figure('auto') }, 201))
+    const statuses: PosterStatus[] = []
+
+    const outcome = await generateAutoPoster(context(1000, null), (status) => statuses.push(status))
+
+    expect(outcome.ok).toBe(true)
+    if (!outcome.ok) return
+    expect(outcome.uploaded).toBe(false)
+    // The figure still exists — local render, local URL, nothing stored.
+    expect(outcome.entry.posterId).toBeNull()
+    expect(outcome.entry.png).toEqual(PNG)
+    expect(outcome.entry.imageUrl.length).toBeGreaterThan(0)
+    expect(recorded).toHaveLength(0)
+    expect(statuses.at(-1)?.kind).toBe('ready')
+  })
+
+  it('makes no request at all when the cloud half is disabled at build time', async () => {
+    vi.stubEnv('VITE_AAT_CLOUD_ENABLED', 'false')
+    install(() => json({ poster: figure('auto') }, 201))
+
+    const outcome = await generateAutoPoster(context(), () => {})
+
+    expect(outcome.ok).toBe(true)
+    if (!outcome.ok) return
+    expect(outcome.uploaded).toBe(false)
+    expect(recorded).toHaveLength(0)
+  })
+
+  it('keeps the rendered entry when the upload is refused', async () => {
+    install(() => json({ error: { code: 'RATE_LIMITED', message: '制限に達しました。' } }, 429))
     const statuses: PosterStatus[] = []
 
     const outcome = await generateAutoPoster(context(), (status) => statuses.push(status))
@@ -203,92 +257,87 @@ describe('the automatic poster', () => {
     if (outcome.ok) return
     expect(outcome.kind).toBe('cloud')
     expect(outcome.kind === 'cloud' && outcome.retryable).toBe(true)
-    // Exactly one request: a client that re-posted on failure would turn a persistent renderer
-    // fault into a render loop, which is why the automatic endpoint refuses to retry.
-    expect(trace()).toHaveLength(1)
+    // The image was drawn — only its cloud copy is missing.
+    expect(outcome.kind === 'cloud' && outcome.entry?.png).toEqual(PNG)
     const last = statuses.at(-1)
     expect(last?.kind).toBe('failed')
-    expect(last?.kind === 'failed' && last.posterId).toBe(POSTER_ID)
-    expect(last?.kind === 'failed' && last.message).toContain('POSTER_RENDER_FAILED')
+    expect(last?.kind === 'failed' && last.retryable).toBe(true)
   })
 
-  it('treats backpressure as retryable and stores nothing about it', async () => {
-    install(() => json({ error: { code: 'POSTER_BUSY', message: 'ポスター生成が混み合っています。' } }, 429))
-    const outcome = await generateAutoPoster(context(), () => {})
+  it('reports a render failure without inventing an entry', async () => {
+    engine.render.mockRejectedValue(new Error('engine exploded'))
+    install(() => json({ poster: figure('auto') }, 201))
+    const statuses: PosterStatus[] = []
+
+    const outcome = await generateAutoPoster(context(), (status) => statuses.push(status))
 
     expect(outcome.ok).toBe(false)
     if (outcome.ok) return
-    expect(outcome.kind === 'cloud' && outcome.retryable).toBe(true)
-    expect(trace()).toHaveLength(1)
+    expect(outcome.kind === 'cloud' && outcome.entry).toBeNull()
+    expect(outcome.kind === 'cloud' && outcome.message).toContain('engine exploded')
+    expect(recorded).toHaveLength(0)
+    expect(statuses.at(-1)?.kind).toBe('failed')
   })
 
   it('stops writing to the lane once its request has been abandoned', async () => {
-    vi.useFakeTimers()
-    install((request) =>
-      request.method === 'POST'
-        ? json({ poster: figure('rendering') }, 200)
-        : json({ posters: [figure('rendering')] }),
-    )
-    const controller = new AbortController()
     const statuses: PosterStatus[] = []
+    const controller = new AbortController()
+    engine.render.mockImplementation(async () => {
+      engine.emit({ kind: 'rendering' })
+      controller.abort()
+      return PNG
+    })
+    install(() => json({ poster: figure('auto') }, 201))
 
-    const pending = generateAutoPoster(context(), (status) => statuses.push(status), controller.signal)
-    await vi.advanceTimersByTimeAsync(3_000)
-    const beforeAbort = statuses.length
-    expect(beforeAbort).toBeGreaterThan(0)
+    const outcome = await generateAutoPoster(context(), (status) => statuses.push(status), controller.signal)
 
-    // What happens when a second dataset is analysed while the first one's poster is still
-    // rendering: the newer request aborts this one and reports its own state immediately. A late
-    // update from here would describe a figure nobody is waiting for any more.
-    controller.abort()
-    await vi.advanceTimersByTimeAsync(30_000)
-    await pending
-
-    expect(statuses).toHaveLength(beforeAbort)
+    expect(outcome.ok).toBe(true)
+    // `rendering` was seen before the abort; the `uploading`/`ready` writes that
+    // followed it belong to a request nobody is waiting for any more.
+    expect(statuses.map((status) => status.kind)).toEqual(['rendering'])
   })
 
-  it('sends nothing when the spec cannot be built', async () => {
-    install(() => json({ poster: figure('ready') }, 201))
+  it('renders nothing and sends nothing when the spec cannot be built', async () => {
+    install(() => json({ poster: figure('auto') }, 201))
     // No sensor has a sample in the preset's 0 .. 1.45 s window, so there is no honest figure to
-    // ask for — and asking anyway would spend a container render to be told so.
+    // draw — and drawing anyway would spend an engine run to be told so.
     const outcome = await generateAutoPoster(context(0), () => {})
 
     expect(outcome.ok).toBe(false)
     if (outcome.ok) return
     expect(outcome.kind).toBe('spec')
+    expect(engine.render).not.toHaveBeenCalled()
     expect(recorded).toHaveLength(0)
   })
 })
 
-describe('retrying', () => {
-  it('uses the retry endpoint when the failed figure has an id', async () => {
-    install(() => json({ poster: figure('ready') }, 201))
-    const outcome = await retryAutoPoster(context(), POSTER_ID, () => {})
-
-    expect(outcome.ok).toBe(true)
-    expect(trace()).toEqual([`POST /api/v1/posters/${POSTER_ID}/retry`])
-  })
-
-  it('falls back to the idempotent endpoint when no figure was ever created', async () => {
-    install(() => json({ poster: figure('ready') }, 201))
-    const outcome = await retryAutoPoster(context(), null, () => {})
-
-    expect(outcome.ok).toBe(true)
-    expect(trace()).toEqual([`POST /api/v1/revisions/${REVISION_ID}/poster/auto`])
-  })
-})
-
 describe('a custom poster', () => {
-  it('goes to the collection endpoint, which keeps history rather than overwriting', async () => {
-    install(() => json({ poster: { ...figure('ready'), kind: 'custom' } }, 201))
+  it('uploads through the collection endpoint, which keeps history rather than overwriting', async () => {
+    install(() => json({ poster: figure('custom') }, 201))
     const outcome = await generateCustomPoster(context(), { series: 'inner', xMin: 0, xMax: 0.5 })
 
     expect(outcome.ok).toBe(true)
+    if (!outcome.ok) return
+    expect(outcome.entry.kind).toBe('custom')
     expect(trace()).toEqual([`POST /api/v1/revisions/${REVISION_ID}/posters`])
+    expect(recorded[0]?.body?.spec?.posterKind).toBe('custom')
   })
 
-  it('refuses a range with no samples before sending anything', async () => {
-    install(() => json({ poster: figure('ready') }, 201))
+  it('stays local-only when the context has no revision', async () => {
+    install(() => json({ poster: figure('custom') }, 201))
+
+    const outcome = await generateCustomPoster(context(1000, null), { series: 'inner', xMin: 0, xMax: 0.5 })
+
+    expect(outcome.ok).toBe(true)
+    if (!outcome.ok) return
+    expect(outcome.uploaded).toBe(false)
+    expect(outcome.entry.posterId).toBeNull()
+    expect(outcome.entry.analysisRevisionId).toBe('local:260811a')
+    expect(recorded).toHaveLength(0)
+  })
+
+  it('refuses a range with no samples before rendering or sending anything', async () => {
+    install(() => json({ poster: figure('custom') }, 201))
     const outcome = await generateCustomPoster(context(), { series: 'inner', xMin: 50, xMax: 60 })
 
     expect(outcome.ok).toBe(false)
@@ -297,6 +346,7 @@ describe('a custom poster', () => {
     expect(outcome.kind === 'spec' && outcome.advice.code).toBe('POSTER_RANGE_EMPTY')
     // The advice carries the range the data does cover, so the dialog can offer to move there.
     expect(outcome.kind === 'spec' && outcome.advice.action?.kind).toBe('move-to-data')
+    expect(engine.render).not.toHaveBeenCalled()
     expect(recorded).toHaveLength(0)
   })
 })

@@ -11,18 +11,19 @@
  * and they differ *between browsers* as well.
  *
  * That is fine for a screenshot to paste into a message, and not fine for a
- * figure in a paper. The formal, reproducible figure is the cloud poster, which
- * runs the pinned Matplotlib renderer against a validated plot spec — that is
- * the only output carrying a pixel-level guarantee. The UI says so at the point
- * of export rather than in a document nobody opens.
+ * figure in a paper. The formal, reproducible figure is the poster, which the
+ * pinned Matplotlib renderer (running locally on Pyodide) draws from a
+ * validated plot spec — that is the only output carrying a pixel-level
+ * guarantee. The UI says so at the point of export rather than in a document
+ * nobody opens.
  */
 
 /** Japanese caveat shown next to the PNG action and repeated in the result toast. */
 export const PNG_PARITY_NOTICE =
-  'ブラウザPNGはデスクトップ版（Matplotlib）と画素単位では一致しません。論文用の図はクラウドの正式ポスターを使用してください。'
+  'ブラウザPNGはデスクトップ版（Matplotlib）と画素単位では一致しません。論文用の図は正式ポスター図を使用してください。'
 
 export const PNG_PARITY_NOTICE_EN =
-  'Browser PNG is not pixel-identical to the desktop Matplotlib output. Use the cloud formal poster for publication figures.'
+  'Browser PNG is not pixel-identical to the desktop Matplotlib output. Use the formal poster figure for publication figures.'
 
 export interface CanvasPngOptions {
   /**

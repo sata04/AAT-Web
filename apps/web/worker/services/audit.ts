@@ -56,11 +56,9 @@ export type AuditAction =
   | 'source.upload'
   | 'source.download'
   | 'source.delete'
-  | 'poster.render'
-  | 'poster.retry'
+  | 'poster.upload'
   | 'poster.download'
   | 'quota.update'
-  | 'renderer.circuit_breaker'
 
 /** Keys whose values must never reach the audit log, whatever a caller passes. */
 const FORBIDDEN_DETAIL_KEYS =

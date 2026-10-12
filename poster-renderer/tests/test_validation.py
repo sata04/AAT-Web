@@ -52,8 +52,6 @@ def test_limits_mirror_the_typescript_schema():
     assert limits.POSTER_KINDS == ("auto", "custom")
     assert limits.SERIES_SELECTIONS == ("inner", "drag", "both")
     assert limits.POSTER_PRESET_VERSIONS == ("aat-poster-v1",)
-    # The transport cap must exceed the payload cap, or a schema-valid spec could not be uploaded.
-    assert limits.MAX_REQUEST_BYTES > limits.MAX_PAYLOAD_BYTES
 
 
 @pytest.mark.parametrize(

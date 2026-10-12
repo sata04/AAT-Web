@@ -50,7 +50,7 @@ reference tree was already pinned to, and `scripts/check-versions.mjs` — run b
 `scripts/check-versions.test.mjs` — fails if any copy disagrees. Updating the baseline is: edit
 one file, run the tests, be told by name which others are stale.
 
-It is deliberately *not* generated at build time. The renderer is a container that must not read a
+It is deliberately *not* generated at build time. The render core must not read a
 sibling repository; and a value that changes the pixels of every future figure should be a diff a
 human approved, not a number that materialises during a build. The checker's job is only to make a
 *partial* update impossible.
@@ -75,7 +75,7 @@ fail before a figure could carry the claim.
 
 **`APP_VERSION` in `apps/web` is the build identity** — which AAT Web produced this. It is
 recorded against the analysis revision, where it can be precise, and it never reaches the
-container at all.
+render core at all.
 
 ### Why not put AAT Web's version in the watermark
 

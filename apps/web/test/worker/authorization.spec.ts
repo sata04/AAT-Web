@@ -39,6 +39,7 @@ import {
   createRevision,
   createRun,
   createUser,
+  POSTER_PNG_BASE64,
   posterSpec,
   type TestUser,
 } from './helpers/client.ts'
@@ -65,8 +66,16 @@ const PROTECTED_ENDPOINTS: ProtectedEndpoint[] = [
   { method: 'GET', path: '/api/v1/revisions/01ANYTHING/snapshot' },
   { method: 'GET', path: '/api/v1/runs/01ANYTHING/source' },
   { method: 'DELETE', path: '/api/v1/runs/01ANYTHING/source' },
-  { method: 'POST', path: '/api/v1/revisions/01ANYTHING/poster/auto', body: { spec: {} } },
-  { method: 'POST', path: '/api/v1/revisions/01ANYTHING/posters', body: { spec: {} } },
+  {
+    method: 'POST',
+    path: '/api/v1/revisions/01ANYTHING/poster/auto',
+    body: { spec: {}, pngBase64: POSTER_PNG_BASE64 },
+  },
+  {
+    method: 'POST',
+    path: '/api/v1/revisions/01ANYTHING/posters',
+    body: { spec: {}, pngBase64: POSTER_PNG_BASE64 },
+  },
   { method: 'GET', path: '/api/v1/revisions/01ANYTHING/posters' },
   { method: 'GET', path: '/api/v1/posters/01ANYTHING/image' },
   { method: 'GET', path: '/api/v1/admin/users' },
@@ -79,8 +88,6 @@ const PROTECTED_ENDPOINTS: ProtectedEndpoint[] = [
     body: { kind: 'registration', role: 'Viewer', displayName: 'x', ttlHours: 1 },
   },
   { method: 'GET', path: '/api/v1/admin/storage' },
-  { method: 'GET', path: '/api/v1/admin/renderer' },
-  { method: 'PUT', path: '/api/v1/admin/renderer', body: { open: true } },
   { method: 'GET', path: '/api/v1/admin/audit' },
   { method: 'PUT', path: '/api/v1/admin/quotas/01ANYTHING', body: { bytesLimit: 1 } },
 ]
@@ -135,7 +142,7 @@ async function populatedRun(owner: TestUser, filename = '260811a_data.csv') {
   const rendered = await apiFetch(`/api/v1/revisions/${revisionId}/poster/auto`, {
     method: 'POST',
     cookie: owner.cookie,
-    body: JSON.stringify({ spec: posterSpec(revisionId) }),
+    body: JSON.stringify({ spec: posterSpec(revisionId), pngBase64: POSTER_PNG_BASE64 }),
   })
   expect(rendered.status).toBe(201)
   const poster = (await rendered.json()) as { poster: { posterId: string } }
@@ -201,7 +208,7 @@ describe('capabilities', () => {
     const response = await apiFetch(`/api/v1/revisions/${revisionId}/poster/auto`, {
       method: 'POST',
       cookie: viewer.cookie,
-      body: JSON.stringify({ spec: posterSpec(revisionId) }),
+      body: JSON.stringify({ spec: posterSpec(revisionId), pngBase64: POSTER_PNG_BASE64 }),
     })
     expect(response.status).toBe(403)
   })
@@ -304,7 +311,7 @@ describe('a Researcher reads and reuses a colleague’s work', () => {
     const custom = await apiFetch(`/api/v1/revisions/${revisionId}/posters`, {
       method: 'POST',
       cookie: colleague.cookie,
-      body: JSON.stringify({ spec: posterSpec(revisionId, 'custom') }),
+      body: JSON.stringify({ spec: posterSpec(revisionId, 'custom'), pngBase64: POSTER_PNG_BASE64 }),
     })
     expect(custom.status).toBe(201)
     const body = (await custom.json()) as { poster: { status: string } }
@@ -325,16 +332,16 @@ describe('a Researcher reads and reuses a colleague’s work', () => {
     const auto = await apiFetch(`/api/v1/revisions/${revisionId}/poster/auto`, {
       method: 'POST',
       cookie: colleague.cookie,
-      body: JSON.stringify({ spec: posterSpec(revisionId) }),
+      body: JSON.stringify({ spec: posterSpec(revisionId), pngBase64: POSTER_PNG_BASE64 }),
     })
     expect(auto.status).toBe(201)
 
     // The one automatic figure per revision, whoever asked for it: the owner polling the same
-    // endpoint is handed the colleague's render rather than making a second one.
+    // endpoint is handed the colleague's upload rather than storing a second one.
     const again = await apiFetch(`/api/v1/revisions/${revisionId}/poster/auto`, {
       method: 'POST',
       cookie: owner.cookie,
-      body: JSON.stringify({ spec: posterSpec(revisionId) }),
+      body: JSON.stringify({ spec: posterSpec(revisionId), pngBase64: POSTER_PNG_BASE64 }),
     })
     expect(again.status).toBe(200)
     expect(((await again.json()) as { created: boolean }).created).toBe(false)
@@ -807,7 +814,7 @@ describe('a deleted run stays invisible through every door', () => {
       const response = await apiFetch(`/api/v1/revisions/${revisionId}/poster/auto`, {
         method: 'POST',
         cookie: caller.cookie,
-        body: JSON.stringify({ spec: posterSpec(revisionId) }),
+        body: JSON.stringify({ spec: posterSpec(revisionId), pngBase64: POSTER_PNG_BASE64 }),
       })
       expect(response.status, caller.role).toBe(404)
     }
@@ -862,7 +869,7 @@ describe('spec provenance', () => {
       method: 'POST',
       cookie: owner.cookie,
       // The spec claims to be a figure of revision B while being filed under revision A.
-      body: JSON.stringify({ spec: posterSpec(revisionB) }),
+      body: JSON.stringify({ spec: posterSpec(revisionB), pngBase64: POSTER_PNG_BASE64 }),
     })
     expect(response.status).toBe(400)
   })

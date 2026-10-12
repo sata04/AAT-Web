@@ -8,8 +8,6 @@
  */
 
 import { describe, expect, it } from 'vitest'
-import type { AdminAuditEntry } from '../../src/admin/api.ts'
-import { observeRenderer, RENDERER_UNAVAILABLE_FACTS } from '../../src/admin/renderer.ts'
 import { describeFailure, resourceOf, valueOr } from '../../src/admin/resource.ts'
 import {
   ADMIN_RUN_PAGE_SIZE,
@@ -196,91 +194,13 @@ describe('paging a fixed array', () => {
 })
 
 /* --------------------------------------------------------------------------------------------- */
-/* The renderer, seen through the audit log                                                        */
-/* --------------------------------------------------------------------------------------------- */
-
-function entry(overrides: Partial<AdminAuditEntry>): AdminAuditEntry {
-  return {
-    id: '01J',
-    actorUserId: 'u1',
-    action: 'poster.render',
-    targetType: 'poster_figure',
-    targetId: 'p1',
-    targetOwnerUserId: 'u2',
-    ipAddress: null,
-    details: null,
-    createdAt: '2026-08-11T00:00:00.000Z',
-    ...overrides,
-  }
-}
-
-describe('observeRenderer', () => {
-  it('counts the three visible actions and keeps the denominator', () => {
-    const observations = observeRenderer([
-      entry({ id: '3', action: 'poster.render', createdAt: '2026-08-11T03:00:00.000Z' }),
-      entry({ id: '2', action: 'poster.retry', createdAt: '2026-08-11T02:00:00.000Z' }),
-      entry({ id: '1', action: 'poster.download', createdAt: '2026-08-11T01:00:00.000Z' }),
-    ])
-    expect(observations).toMatchObject({ rendered: 1, retried: 1, downloaded: 1, sampled: 3 })
-    expect(observations.oldest).toBe('2026-08-11T01:00:00.000Z')
-  })
-
-  it('takes the renderer version from the most recent successful render', () => {
-    const observations = observeRenderer([
-      entry({
-        id: '2',
-        details: { rendererVersion: '2.0.0', byteSize: 100 },
-        createdAt: '2026-08-11T02:00:00.000Z',
-      }),
-      entry({
-        id: '1',
-        details: { rendererVersion: '1.0.0', byteSize: 50 },
-        createdAt: '2026-08-11T01:00:00.000Z',
-      }),
-    ])
-    expect(observations.latestRendererVersion).toBe('2.0.0')
-    expect(observations.latestRenderAt).toBe('2026-08-11T02:00:00.000Z')
-    expect(observations.rendererVersions).toEqual(['2.0.0', '1.0.0'])
-    expect(observations.renderedBytes).toBe(150)
-  })
-
-  it('reads hostile or absent details without throwing', () => {
-    const observations = observeRenderer([
-      entry({ details: 'not an object' }),
-      entry({ id: '2', details: { rendererVersion: 42 } }),
-      entry({ id: '3', details: null }),
-    ])
-    expect(observations.rendered).toBe(3)
-    expect(observations.latestRendererVersion).toBeNull()
-  })
-
-  it('reports nothing rather than zero-as-a-fact for an empty sample', () => {
-    const observations = observeRenderer([])
-    expect(observations.sampled).toBe(0)
-    expect(observations.oldest).toBeNull()
-    expect(observations.latestRendererVersion).toBeNull()
-  })
-})
-
-describe('the renderer screen says what it cannot show', () => {
-  it('names the failure count, the duration and the container shape as unavailable', () => {
-    const labels = RENDERER_UNAVAILABLE_FACTS.map((fact) => fact.label).join(' ')
-    expect(labels).toContain('所要時間')
-    expect(labels).toContain('失敗')
-    expect(labels).toContain('コンテナ')
-    for (const fact of RENDERER_UNAVAILABLE_FACTS) expect(fact.reason.length).toBeGreaterThan(20)
-  })
-})
-
-/* --------------------------------------------------------------------------------------------- */
 /* Settings                                                                                        */
 /* --------------------------------------------------------------------------------------------- */
 
 describe('the settings catalogue', () => {
-  it('offers exactly the two things a route can change at runtime', () => {
-    expect(OPERATIONAL_SETTINGS).toHaveLength(2)
+  it('offers exactly the one thing a route can change at runtime', () => {
+    expect(OPERATIONAL_SETTINGS).toHaveLength(1)
     const labels = OPERATIONAL_SETTINGS.map((setting) => setting.label).join(' ')
-    expect(labels).toContain('サーキットブレーカー')
     expect(labels).toContain('保存容量')
   })
 

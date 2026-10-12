@@ -1,8 +1,8 @@
 """Every hard limit and enum the renderer enforces, in one module.
 
-These mirror `packages/plot-spec/src/spec.ts` exactly. The Worker validates a spec with Zod
-before it ever reaches this container, and this container validates it again from scratch —
-the container must never assume its caller is honest, and the duplication is the point.
+These mirror `packages/plot-spec/src/spec.ts` exactly. The app validates a spec with Zod before
+it ever reaches the engine, and the renderer validates it again from scratch — the renderer must
+never assume its caller is honest, and the duplication is the point.
 
 Because there are two implementations of one contract, the constants live here alone (not
 scattered through the validation code) so reconciling them against `spec.ts` is a diff of two
@@ -83,19 +83,6 @@ SPEC_ALLOWED_KEYS: Final = SPEC_REQUIRED_KEYS | SPEC_OPTIONAL_KEYS
 SERIES_DATA_KEYS: Final = frozenset({"time", "values"})
 ENCODED_SERIES_KEYS: Final = frozenset({"data", "length"})
 PLOT_DATA_KEYS: Final = frozenset({"inner", "drag"})
-
-# --- HTTP transport limits (this service's own, not spec.ts's) ----------------------------------
-
-#: Slack allowed for the JSON envelope around the base64 arrays: keys, punctuation, the scalar
-#: fields and the run/title strings. A spec whose arrays sit exactly on MAX_PAYLOAD_BYTES is
-#: valid, so the body cap has to be strictly larger than MAX_PAYLOAD_BYTES or the transport would
-#: reject specs the schema accepts. 64 KiB is ~200x the largest possible envelope.
-MAX_ENVELOPE_OVERHEAD_BYTES: Final = 64 * 1024
-
-#: Hard cap on the HTTP request body, enforced from `Content-Length` *before* a single byte of
-#: the body is read and again while reading, so an over-long or lying body is never buffered.
-MAX_REQUEST_BYTES: Final = MAX_PAYLOAD_BYTES + MAX_ENVELOPE_OVERHEAD_BYTES
-
 
 def expected_base64_length(byte_length: int) -> int:
     """Length of standard, padded base64 for `byte_length` bytes (codec.ts expectedBase64Length)."""

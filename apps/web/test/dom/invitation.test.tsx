@@ -21,14 +21,14 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 const addPasskey = vi.fn()
 
 vi.mock('../../src/auth/client.ts', () => ({
-  authClient: {
+  getAuthClient: () => ({
     signIn: { passkey: () => Promise.resolve({ error: null }) },
     signOut: () => Promise.resolve({ error: null }),
     passkey: {
       addPasskey: (options: unknown) => addPasskey(options),
       listUserPasskeys: () => Promise.resolve({ data: [] }),
     },
-  },
+  }),
 }))
 
 import { InvitationScreen } from '../../src/screens/InvitationScreen.tsx'

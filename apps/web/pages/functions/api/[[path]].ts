@@ -37,6 +37,14 @@
  *
  * `wrangler pages dev` does NOT reproduce that swallowing — it returns the stack
  * trace — so no local run can tell you this is right. See docs/ci.md.
+ *
+ * ## No binding at all is also an answer
+ *
+ * A cloud-disabled deployment does not deploy the `aat-api` Worker, so the Service binding is
+ * not merely failing — it is absent. That case is answered 404 JSON rather than thrown: an
+ * exception would fall into the same SPA fallback as a crash, and RESOURCE_NOT_FOUND is the code
+ * the client gateway already reads as "this deployment has no cloud half" — which is exactly
+ * what this is.
  */
 
 /**
@@ -52,8 +60,14 @@ interface ServiceBinding {
 }
 
 interface Env {
-  /** The private `aat-api` Worker. No route, no public subdomain; reachable only from here. */
-  AAT_API: ServiceBinding
+  /**
+   * The private `aat-api` Worker. No route, no public subdomain; reachable only from here.
+   *
+   * Absent — legitimately — on a cloud-disabled deployment, where no Worker is deployed and
+   * `resolve-pages-config.mjs` emits no `services` entry. Optional rather than required so the
+   * check below compiles honestly instead of promising a binding that is not there.
+   */
+  AAT_API?: ServiceBinding
 }
 
 interface PagesContext {
@@ -62,6 +76,31 @@ interface PagesContext {
 }
 
 export async function onRequest(context: PagesContext): Promise<Response> {
+  /*
+   * No binding means this deployment has no cloud half — AAT_CLOUD_ENABLED=false, no Worker,
+   * no D1, no R2. That is a supported configuration, not a fault, and 404 is how this codebase
+   * says so: the client's gateway reads it as "local-only" and the user is shown nothing broken.
+   * It is answered without touching the catch path on purpose — a missing binding is not an
+   * error, and a 502 here would misreport an intentional posture as a failure.
+   */
+  if (!context.env?.AAT_API) {
+    return new Response(
+      JSON.stringify({
+        error: {
+          code: 'RESOURCE_NOT_FOUND',
+          message: 'このデプロイではクラウド機能は無効です。',
+        },
+      }),
+      {
+        status: 404,
+        headers: {
+          'content-type': 'application/json; charset=utf-8',
+          'cache-control': 'no-store',
+        },
+      },
+    )
+  }
+
   try {
     return await context.env.AAT_API.fetch(context.request)
   } catch (error) {

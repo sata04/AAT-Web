@@ -1,8 +1,8 @@
 """Shared fixtures and the deterministic spec every visual test is built from.
 
 `poster_renderer` is imported from `src/` without being installed, so the suite runs identically
-from a checkout (`python3 -m pytest poster-renderer/tests`) and from inside the container image
-(`python -m pytest /app/tests`, where `PYTHONPATH=/app/src`).
+from a checkout (`poster-renderer/.venv/bin/python -m pytest poster-renderer/tests`) and inside
+the browser's Pyodide engine, which executes the same sources.
 """
 
 from __future__ import annotations

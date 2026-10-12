@@ -9,7 +9,6 @@ import { type Dispatch, type SetStateAction, useCallback, useEffect, useRef } fr
 import { AnalysisClient } from '../analysis/client.ts'
 import type { Dataset } from '../app/dataset.ts'
 import type { RangeStatisticsResult } from '../app/range-statistics.ts'
-import type { PosterFigure } from '../cloud/gateway.ts'
 import type { CloudStatuses } from '../cloud/status.ts'
 import { applyViewEvent } from '../components/hooks.ts'
 import type { NoticeItem } from '../components/NoticeStack.tsx'
@@ -20,6 +19,7 @@ import type { SelectionRange } from '../graph/selection.ts'
 import type { GraphPalette } from '../graph/theme.ts'
 import type { ChartViewport } from '../graph/UPlotChart.tsx'
 import type { ViewMode } from '../graph/view-mode.ts'
+import type { PosterEntry } from '../poster/entry.ts'
 import type { PosterContext } from '../poster/requests.ts'
 import type { AnalyzerViewProps, OnboardingActionKeys } from './AnalyzerView.tsx'
 import { retryPosterFor, retrySyncFor } from './analyzer-cloud.ts'
@@ -90,7 +90,7 @@ export interface AnalyzerActionsInput {
   dismissNotice: (id: number) => void
   getExportClient: () => ExportClient
   syncToCloud: (dataset: Dataset, analysedWith?: AnalysisConfig) => Promise<void>
-  startAutoPoster: (context: PosterContext, posterId: string | null) => Promise<void>
+  startAutoPoster: (context: PosterContext) => Promise<void>
   setMode: Dispatch<SetStateAction<ViewMode>>
   setSelection: Dispatch<SetStateAction<SelectionRange | null>>
   setViewport: Dispatch<SetStateAction<ChartViewport | null>>
@@ -100,7 +100,7 @@ export interface AnalyzerActionsInput {
   setActiveName: Dispatch<SetStateAction<string | null>>
   setConfig: Dispatch<SetStateAction<AnalysisConfig>>
   setSettingsOpen: Dispatch<SetStateAction<boolean>>
-  setCustomPosters: Dispatch<SetStateAction<PosterFigure[]>>
+  setCustomPosters: Dispatch<SetStateAction<PosterEntry[]>>
   setStatuses: Dispatch<SetStateAction<CloudStatuses>>
 }
 
@@ -157,7 +157,7 @@ export function analyzerActions(
         setStatuses: input.setStatuses,
         syncToCloud: input.syncToCloud,
       }),
-    retryPoster: () => retryPosterFor(input.statuses, input.syncedPoster, input.startAutoPoster),
+    retryPoster: () => retryPosterFor(input.syncedPoster, input.startAutoPoster),
     addCustomPoster: (poster) => input.setCustomPosters((current) => [poster, ...current]),
     notify: input.notify,
     setPendingColumns: loop.setPendingColumns,

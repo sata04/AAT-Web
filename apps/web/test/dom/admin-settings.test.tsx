@@ -2,21 +2,21 @@
  * Settings, asserted mostly for what it refuses to become.
  *
  * The rule the screen is built from is that a control belongs there only if a route changes it at
- * runtime and changing it is an operational decision. So the tests check the two controls that pass
- * — the renderer's circuit breaker, and a pointer to the per-account quota editor where the person
- * and their usage are on screen — and then check that the deploy-time constants are *listed as
- * refusals with somewhere to go*, not quietly missing and not turned into inputs.
+ * runtime and changing it is an operational decision. So the tests check the one control that
+ * passes — a pointer to the per-account quota editor where the person and their usage are on
+ * screen — and then check that the deploy-time constants are *listed as refusals with somewhere
+ * to go*, not quietly missing and not turned into inputs.
  */
 
 import { screen, waitFor, within } from '@testing-library/react'
 import { describe, expect, it, vi } from 'vitest'
 
 vi.mock('../../src/auth/client.ts', () => ({
-  authClient: {
+  getAuthClient: () => ({
     signIn: { passkey: () => Promise.resolve({ error: null }) },
     signOut: () => Promise.resolve({ error: null }),
     passkey: { listUserPasskeys: () => Promise.resolve({ data: [] }) },
-  },
+  }),
 }))
 
 import { AdminSettingsScreen } from '../../src/screens/AdminSettingsScreen.tsx'
@@ -24,8 +24,6 @@ import { expectEveryControlIsNamed, installNetwork, json, meRoute, renderScreen 
 
 const BASE = {
   'GET /api/v1/me': meRoute({ role: 'Admin', displayName: '管理 太郎', id: 'usr_admin' }),
-  'GET /api/v1/admin/renderer': () =>
-    json({ circuitBreaker: { open: false, reason: null, updatedAt: null } }),
   'GET /api/v1/admin/storage': () =>
     json({
       perUser: [
@@ -62,14 +60,6 @@ const BASE = {
 }
 
 describe('admin settings', () => {
-  it('offers the breaker here as well, because it is the lever you need now', async () => {
-    installNetwork(BASE)
-    renderScreen(<AdminSettingsScreen />, { path: '/admin/settings' })
-
-    const panel = await screen.findByRole('region', { name: 'ポスター生成の停止と再開' })
-    expect(await within(panel).findByRole('button', { name: 'ポスター生成を停止する' })).toBeDefined()
-  })
-
   it('sends the quota decision to the screen that has the person on it', async () => {
     installNetwork(BASE)
     renderScreen(<AdminSettingsScreen />, { path: '/admin/settings' })
@@ -120,7 +110,7 @@ describe('admin settings', () => {
   it('gives every control an accessible name', async () => {
     installNetwork(BASE)
     const { container } = renderScreen(<AdminSettingsScreen />, { path: '/admin/settings' })
-    await screen.findByRole('region', { name: 'ポスター生成の停止と再開' })
+    await screen.findByRole('region', { name: '保存容量の上限' })
     expectEveryControlIsNamed(container)
   })
 })

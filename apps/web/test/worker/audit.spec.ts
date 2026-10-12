@@ -11,7 +11,15 @@
 import { describe, expect, it } from 'vitest'
 import { auditLogs } from '../../worker/db/schema.ts'
 import { redactDetails } from '../../worker/services/audit.ts'
-import { apiFetch, createRevision, createRun, createUser, db, posterSpec } from './helpers/client.ts'
+import {
+  apiFetch,
+  createRevision,
+  createRun,
+  createUser,
+  db,
+  POSTER_PNG_BASE64,
+  posterSpec,
+} from './helpers/client.ts'
 
 interface AuditEntry {
   action: string
@@ -39,7 +47,7 @@ describe('audit log', () => {
     await apiFetch(`/api/v1/revisions/${revisionId}/poster/auto`, {
       method: 'POST',
       cookie: user.cookie,
-      body: JSON.stringify({ spec: posterSpec(revisionId) }),
+      body: JSON.stringify({ spec: posterSpec(revisionId), pngBase64: POSTER_PNG_BASE64 }),
     })
 
     const actions = new Set((await entriesFor(admin.cookie)).map((entry) => entry.action))
@@ -48,7 +56,7 @@ describe('audit log', () => {
       'user.register',
       'run.create',
       'revision.create',
-      'poster.render',
+      'poster.upload',
     ]) {
       expect(actions).toContain(expected)
     }
@@ -85,7 +93,7 @@ describe('audit log', () => {
     expect(entry?.details).toMatchObject({ crossUser: true })
   })
 
-  it('records a poster rendered on a colleague’s revision against both parties', async () => {
+  it('records a poster uploaded for a colleague’s revision against both parties', async () => {
     const admin = await createUser({ role: 'Admin' })
     const owner = await createUser()
     const colleague = await createUser()
@@ -95,11 +103,11 @@ describe('audit log', () => {
     const rendered = await apiFetch(`/api/v1/revisions/${revisionId}/poster/auto`, {
       method: 'POST',
       cookie: colleague.cookie,
-      body: JSON.stringify({ spec: posterSpec(revisionId) }),
+      body: JSON.stringify({ spec: posterSpec(revisionId), pngBase64: POSTER_PNG_BASE64 }),
     })
     expect(rendered.status).toBe(201)
 
-    const renders = await entriesFor(admin.cookie, 'poster.render')
+    const renders = await entriesFor(admin.cookie, 'poster.upload')
     const entry = renders.find((candidate) => candidate.targetOwnerUserId === owner.userId)
     expect(entry?.actorUserId).toBe(colleague.userId)
     expect(entry?.details).toMatchObject({ crossUser: true })
