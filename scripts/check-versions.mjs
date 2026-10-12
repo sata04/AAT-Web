@@ -26,7 +26,7 @@
  * and every other copy is checked against it. Updating the vendored reference means updating one
  * file and then being told, by name, which other files disagree.
  *
- * Deliberately *not* a build-time define. The renderer is a container that must not read a sibling
+ * Deliberately *not* a build-time define. The renderer runs in the browser and must not read a sibling
  * repository, `apps/web/src/app/version.ts` explains why these constants are reviewed by a human
  * rather than generated, and — decisively — moving the watermark version changes the pixels of
  * every future poster (see `docs/versioning.md`). A value with that consequence should be a diff
