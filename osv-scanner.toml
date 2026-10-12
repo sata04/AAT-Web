@@ -46,9 +46,13 @@
 # The remediation is drizzle-kit dropping the abandoned @esbuild-kit
 # packages, which is not AAT's to make. Every other esbuild in the lockfile
 # (0.25.12, 0.28.x) is already past the fix.
+#
+# Re-read 2026-10-12 when the first date expired: drizzle-kit 0.31.11 (latest)
+# still depends on @esbuild-kit/esm-loader, and nothing here runs
+# `esbuild --serve`, so the reasoning above still holds.
 # ---------------------------------------------------------------------------
 
 [[IgnoredVulns]]
 id = "GHSA-67mh-4wv8-2f99"
-ignoreUntil = 2026-10-12
+ignoreUntil = 2026-12-12
 reason = "esbuild: not reachable in this deployment; see the note above."

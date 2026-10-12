@@ -67,5 +67,24 @@ overrides:
   # prebuilt binaries, exploitable when decoding untrusted AVIF/HEIF input.
   # Reached through miniflare (wrangler / @cloudflare/vite-plugin /
   # @cloudflare/vitest-pool-workers dev tooling); sharp is not in the deployed
-  # Worker bundle. 0.35.4 vendors libheif 1.23.2 with the fixes.
-  sharp@<0.35.4: "0.35.4"
+  # Worker bundle. 0.35.4 vendors libheif 1.23.2 with the fixes; 0.35.5 adds the
+  # fix for GHSA-wq5f-xc86-pv6w (high).
+  sharp@<0.35.5: "0.35.5"
+  # Advisories open on 2026-10-12 (osv-scanner "Known vulnerabilities"), all in
+  # dev/build tooling — none of these packages is in the deployed bundle. Each
+  # selector stays inside the major the parent already resolves, so the override
+  # can never pull a breaking major in.
+  # undici 7.29.0 is pinned exactly by miniflare (GHSA-2gqq-gqf2-x968,
+  # GHSA-2jfj-6hjv-fm6j, GHSA-3wwx-pv8p-q78v, GHSA-3xpg-4rpp-hhhm,
+  # GHSA-8436-99hf-9mmv, GHSA-pmjh-fq2x-6v4x, GHSA-r53p-7pc4-xj5r,
+  # GHSA-rfgv-xxqx-mfg5, GHSA-rx4f-c7p8-82vq, GHSA-w293-vg96-wgc3).
+  undici@>=7.0.0 <7.29.1: "7.29.1"
+  # GHSA-6j4f-fj2g-mc7p, GHSA-q2hr-2g5m-vwhr, GHSA-qhr7-859c-m2p7 (via minimatch).
+  brace-expansion@>=2.0.0 <2.1.7: "2.1.7"
+  brace-expansion@>=5.0.0 <5.0.12: "5.0.12"
+  # GHSA-hrr3-gc8f-f4qj (via ajv).
+  fast-uri@>=3.0.0 <3.1.8: "3.1.8"
+  # GHSA-gfhx-hw2g-v5hg (via @rollup/plugin-terser).
+  serialize-javascript@>=7.0.0 <7.1.2: "7.1.2"
+  # GHSA-68fv-2mgg-jv7q (via postcss / css-tree).
+  source-map-js@>=1.0.0 <1.2.2: "1.2.2"
