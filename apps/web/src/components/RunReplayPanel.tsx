@@ -55,6 +55,7 @@ import { type ChartViewport, UPlotChart } from '../graph/UPlotChart.tsx'
 import { useThemePalette } from '../graph/use-theme-palette.ts'
 import type { ViewMode } from '../graph/view-mode.ts'
 import { canSelectRange, isGQuality, isShowingAll } from '../graph/view-mode.ts'
+import { openPosterUrlRegistry, releasePosterUrls } from '../poster/entry.ts'
 import { PosterDialog } from '../poster/PosterDialog.tsx'
 import type { ReplayedAnalysis } from '../runs/replay.ts'
 import { applyViewEvent } from './hooks.ts'
@@ -266,6 +267,12 @@ export function RunReplayPanel(props: RunReplayPanelProps): React.JSX.Element {
   const [exporting, setExporting] = useState(false)
 
   const getExportClient = useExportClient()
+  // The poster dialog's blob URLs must outlive the render that minted them, so this panel holds
+  // the URL registry open while it is mounted — the Analyzer is unmounted on this screen.
+  useEffect(() => {
+    openPosterUrlRegistry()
+    return () => releasePosterUrls()
+  }, [])
   const { palette } = useThemePalette(themeSettingFrom(documentThemeSetting()))
 
   const plotModel = useMemo(

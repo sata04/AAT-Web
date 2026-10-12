@@ -115,14 +115,18 @@ export function entryFromFigure(figure: PosterFigure): PosterEntry {
  */
 const liveDisplayUrls = new Set<string>()
 /**
- * False once the Analyzer screen has unmounted: a render that completes late mints a URL
- * nobody can display, so new mints are revoked on the spot rather than parked in the set.
- * Reopened by the next mount.
+ * How many mounted screens can display poster URLs — the Analyzer and the run replay panel both
+ * render posters, and they are never on screen together, so each holds the registry while
+ * mounted. When the last holder unmounts the registry closes: a render that completes late mints
+ * a URL nobody can display, so new mints are revoked on the spot rather than parked in the set.
+ * Open before any holder has mounted, so a render outside a screen keeps its URL.
  */
+let holders = 0
 let registryOpen = true
 
-/** Reopen the registry — called from the Analyzer screen's mount effect. */
+/** Hold the registry open — called from a poster-rendering screen's mount effect. */
 export function openPosterUrlRegistry(): void {
+  holders += 1
   registryOpen = true
 }
 
@@ -132,8 +136,13 @@ export function releasePosterUrl(url: string): void {
   globalThis.URL?.revokeObjectURL?.(url)
 }
 
-/** Revoke every live blob URL — called from the Analyzer screen's unmount. */
+/**
+ * Drop one hold — called from a poster-rendering screen's unmount. The last hold revokes every
+ * live blob URL and closes the registry.
+ */
 export function releasePosterUrls(): void {
+  holders = Math.max(0, holders - 1)
+  if (holders > 0) return
   for (const url of liveDisplayUrls) globalThis.URL?.revokeObjectURL?.(url)
   liveDisplayUrls.clear()
   registryOpen = false

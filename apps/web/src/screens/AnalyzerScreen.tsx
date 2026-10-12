@@ -197,7 +197,7 @@ export function AnalyzerScreen(): React.JSX.Element {
     })
   }, [])
 
-  // Poster blob URLs are held until the screen unmounts: the panel and the status lane can show
+  // Poster blob URLs are held until the screen unmounts (the run replay panel holds them the same way): the panel and the status lane can show
   // the same figure, so no per-entry revocation point is safe, and unmounting is the one moment
   // nothing can still be displaying any of them. Reopening on mount matters for the renders that
   // finish *after* an unmount — their URLs are revoked at mint time while the registry is closed.
