@@ -84,6 +84,26 @@ async function download(url) {
   return Buffer.from(await response.arrayBuffer())
 }
 
+/** Copy `src` over `dest` unless an identically sized copy is already there; true when copied. */
+function copyIfChanged(src, dest) {
+  if (existsSync(dest) && statSync(dest).size === statSync(src).size) return false
+  copyFileSync(src, dest)
+  return true
+}
+
+/** Download one wheel, refuse it unless its sha256 matches the lock file, then put it in place. */
+async function downloadVerifiedWheel(url, dest, wheel) {
+  const body = await download(url)
+  const digest = sha256Hex(body)
+  if (digest !== wheel.sha256) {
+    throw new Error(`sha256 mismatch for ${wheel.file_name}: got ${digest}, want ${wheel.sha256}`)
+  }
+  // Write via a temp path + rename so a killed run never leaves a truncated wheel in place.
+  const tmp = `${dest}.partial`
+  writeFileSync(tmp, body)
+  renameSync(tmp, dest)
+}
+
 export async function vendorPosterAssets() {
   const { packageDir, version } = resolvePyodidePackage()
   const outDir = join(APP_DIR, 'node_modules', '.cache', 'poster-assets', 'pyodide', version)
@@ -94,10 +114,7 @@ export async function vendorPosterAssets() {
   for (const file of CORE_FILES) {
     const src = join(packageDir, file)
     const dest = join(outDir, file)
-    if (!existsSync(dest) || statSync(dest).size !== statSync(src).size) {
-      copyFileSync(src, dest)
-      copied++
-    }
+    if (copyIfChanged(src, dest)) copied++
     bytes += statSync(dest).size
   }
 
@@ -107,15 +124,7 @@ export async function vendorPosterAssets() {
   for (const wheel of wheels) {
     const dest = join(outDir, wheel.file_name)
     if (!existsSync(dest)) {
-      const body = await download(`${CDN_BASE}/v${version}/full/${wheel.file_name}`)
-      const digest = sha256Hex(body)
-      if (digest !== wheel.sha256) {
-        throw new Error(`sha256 mismatch for ${wheel.file_name}: got ${digest}, want ${wheel.sha256}`)
-      }
-      // Write via a temp path + rename so a killed run never leaves a truncated wheel in place.
-      const tmp = `${dest}.partial`
-      writeFileSync(tmp, body)
-      renameSync(tmp, dest)
+      await downloadVerifiedWheel(`${CDN_BASE}/v${version}/full/${wheel.file_name}`, dest, wheel)
       downloaded++
     }
     bytes += statSync(dest).size
