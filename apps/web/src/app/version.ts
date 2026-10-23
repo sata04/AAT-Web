@@ -13,7 +13,7 @@
  */
 
 /** Version of `@aat/analysis-core` (its `package.json` version). */
-export const ANALYSIS_ENGINE_VERSION = '1.0.0'
+export const ANALYSIS_ENGINE_VERSION = '1.1.0'
 
 /** Version of the web application shell. */
 export const APP_VERSION = '1.0.0'
