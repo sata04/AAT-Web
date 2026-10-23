@@ -63,9 +63,16 @@ allowBuilds:
 # regression below a fixed version surfaces there rather than in a pin nobody
 # re-reads.
 overrides:
+  # GHSA-mrhx-c7xc-m3w5: Better Auth and Workers test tooling still pin
+  # vulnerable Zod 4 releases. Keep their collection validation on the fix.
+  "@better-auth/core>zod": "4.6.6"
+  "@cloudflare/vitest-pool-workers>zod": "4.6.6"
   # GHSA-rgj7-g3m4-5g8c (high): libheif vulnerabilities shipped in sharp's
   # prebuilt binaries, exploitable when decoding untrusted AVIF/HEIF input.
   # Reached through miniflare (wrangler / @cloudflare/vite-plugin /
   # @cloudflare/vitest-pool-workers dev tooling); sharp is not in the deployed
   # Worker bundle. 0.35.4 vendors libheif 1.23.2 with the fixes.
   sharp@<0.35.4: "0.35.4"
+minimumReleaseAgeExclude:
+  # Renovate security update: zod@4.6.6
+  - zod@4.6.6
