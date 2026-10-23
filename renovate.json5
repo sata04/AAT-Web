@@ -15,6 +15,15 @@
   // version that is outside it rather than nothing.
   internalChecksFilter: "strict",
 
+  // Open dependency PRs once a week, not as each release lands. A package
+  // that shipped several releases during the week gets one PR for the newest
+  // eligible version instead of a PR (and a CI run) per release. This does not
+  // merge different packages into one PR; add groupName rules for that.
+  // Vulnerability alerts (osvVulnerabilityAlerts below)
+  // carry their own, unrestricted schedule and still arrive immediately, and
+  // automerge is not restricted by this schedule either.
+  schedule: ["before 7am on monday"],
+
   // Transitive dependencies are refreshed weekly. Everything that lands here
   // has already passed the three pnpm gates (7-day wait, blockExoticSubdeps,
   // trustPolicy: no-downgrade), so a large batch is not a batch of unvetted
