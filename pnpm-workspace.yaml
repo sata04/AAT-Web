@@ -69,3 +69,6 @@ overrides:
   # @cloudflare/vitest-pool-workers dev tooling); sharp is not in the deployed
   # Worker bundle. 0.35.4 vendors libheif 1.23.2 with the fixes.
   sharp@<0.35.4: "0.35.4"
+minimumReleaseAgeExclude:
+  # Renovate security update: zod@4.6.6
+  - zod@4.6.6
