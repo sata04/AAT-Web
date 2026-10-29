@@ -2,9 +2,9 @@
 
 How AAT Web reaches production, and why the procedure is shaped the way it is.
 
-**This repository has never been deployed.** `apps/web/wrangler.jsonc` carries deliberately
-invalid placeholders and `.github/workflows/deploy.yml` is `workflow_dispatch`-only. Both are
-described below, together with what has to be provisioned before either can change.
+`apps/web/wrangler.jsonc` carries deliberately invalid deployment placeholders; it is not evidence
+that production is absent. `.github/workflows/deploy.yml` supports manual dispatch and gated pushes
+to `main`. Verify the actual serving versions before changing existing infrastructure.
 
 Nothing in this document should be executed casually. The steps that create Cloudflare resources
 cost money, and the step that sets `AAT_RP_ID` is effectively irreversible — see
@@ -50,7 +50,7 @@ guards exist.
 
 | Resource | Name | Created by |
 | --- | --- | --- |
-| Worker | `aat-web` | first `wrangler deploy` |
+| Worker | `aat-api` | first `wrangler deploy` |
 | D1 database | `aat-db` | `wrangler d1 create aat-db` |
 | R2 bucket (private) | `aat-objects` | `wrangler r2 bucket create aat-objects` |
 | Pages project | the production hostname | `AAT_PAGES_PROJECT`, first Pages deploy |
@@ -168,6 +168,57 @@ directions; `docs/ci.md` has the longer account.
 
 An automatic deploy is not a shortcut through anything. The `verify` job still runs in full, on the
 merge commit, without credentials, before `deploy` sees a secret.
+
+## Retiring an existing poster Container without deleting research data
+
+Merging the Pyodide migration does **not** deploy it. A green Deploy run can mean that its gate
+succeeded and both the build and deployment jobs were skipped. Check those jobs and the serving
+Pages commit / Worker version, not just the workflow conclusion.
+
+The old `PosterRendererContainer` namespace was created with migration `v1`. Keep that historical
+migration and the inert class export: they preserve the namespace and any stored state. There is
+no production binding and no Container start/render call in the retained class. Its requests answer 410;
+old alarms retain their stop-only `container.destroy()` teardown without rescheduling or mutating
+Durable Object storage. Never add `deleted_classes` or
+delete the namespace merely to make a deployment pass.
+
+Use this order for an already deployed installation:
+
+1. Review and test the complete candidate, including the retained export/migration. Use the existing
+   deployment workflow on the reviewed `main` SHA (`gh workflow run deploy.yml --ref main` from an
+   authenticated operator session). Honor the production environment's approval gate. Do not ship
+   directly from an unreviewed worktree or retrieve deployment credentials to avoid that gate.
+2. Confirm both the Worker and production Pages deployment completed, then test a **freshly loaded**
+   browser: local poster rendering/download, authenticated PNG upload, history, and download of an
+   existing poster. A new frontend talking to the old backend can still invoke a Container, so
+   verifying the client alone is insufficient.
+3. Existing service-worker clients must reload before creating new posters. The old `{spec}` POST
+   receives a non-retryable 409 with `poster_client_refresh_required`; it never falls back to server
+   rendering. Save any local work before reloading. Existing stored images remain readable.
+4. Identify the **one** old `aat-poster-renderer` application, checking its Worker/class/namespace
+   association. For its existing `default` scheduling policy, apply the reversible Cloudflare API
+   `PATCH /accounts/<account_id>/containers/applications/<application_id>` with
+   `{"max_instances":0}`. Do not modify other applications. Removing `containers` from Wrangler
+   does not remove an existing application, and the cap alone does not prove an active instance
+   has stopped.
+5. Read back `max_instances: 0` and verify no active/assigned or running/starting/stopping instances
+   remain. The retained legacy idle alarm stops a surviving renderer; `destroy()` stops its
+   ephemeral filesystem/processes immediately, not gracefully. Allow in-flight renders to finish
+   before cutover where possible; interrupted renders may need to be repeated after updating the
+   client. D1/R2 images and Durable Object storage are not deleted. If placements survive without
+   an alarm, stop here and arrange a supported stop-only operation; merely waiting or a successful
+   cap PATCH is not proof of shutdown. Keep the application definition, image, Durable Object namespace,
+   D1, and R2 data. Storage and other Cloudflare services can still incur charges.
+
+If authenticated deployment or verification is unavailable, stop before scaling down: retain the
+working production renderer and report the missing step. Reverting the cap to its recorded prior
+value is reversible, but rolling back the Worker alone also restores the Container-dependent API;
+coordinate frontend/backend rollback and capacity together. No deletion is part of this procedure.
+
+References: [application edit API](https://developers.cloudflare.com/api/resources/containers/subresources/applications/methods/edit/),
+[production concurrent-instance cap](https://developers.cloudflare.com/workers/wrangler/configuration/#containers),
+[container stop API](https://developers.cloudflare.com/containers/api/durable-object-container/#destroy),
+and [legacy Durable Object migrations](https://developers.cloudflare.com/durable-objects/reference/durable-object-class-migrations-legacy/).
 
 ## Order of operations for a first deployment
 

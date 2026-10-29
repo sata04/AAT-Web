@@ -58,6 +58,36 @@ async function posterObjectsFor(user: TestUser) {
 }
 
 describe('automatic poster', () => {
+  it.each(['auto', 'custom'] as const)(
+    'asks a legacy %s client to refresh without creating data',
+    async (kind) => {
+      const user = await createUser()
+      const runId = await createRun(user)
+      const revisionId = await createRevision(user, runId)
+      const path = kind === 'auto' ? `poster/auto` : 'posters'
+      const before = await quotaFor(user)
+      const response = await apiFetch(`/api/v1/revisions/${revisionId}/${path}`, {
+        method: 'POST',
+        cookie: user.cookie,
+        body: JSON.stringify({ spec: posterSpec(revisionId, kind) }),
+      })
+      expect(response.status).toBe(409)
+      expect(await response.json()).toMatchObject({
+        error: {
+          code: 'INVALID_ANALYSIS_CONFIG',
+          httpStatus: 409,
+          details: { reason: 'poster_client_refresh_required' },
+          message: expect.stringContaining('再読み込み'),
+        },
+      })
+      expect(await posterObjectsFor(user)).toHaveLength(0)
+      expect(await quotaFor(user)).toEqual(before)
+      expect(
+        await db().select().from(posterFigures).where(eq(posterFigures.analysisRevisionId, revisionId)),
+      ).toHaveLength(0)
+    },
+  )
+
   it('stores the uploaded PNG once and returns the same figure on every later call', async () => {
     const user = await createUser()
     const runId = await createRun(user)
