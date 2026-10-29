@@ -5,6 +5,7 @@ settings:
   excludeLinksFromLockfile: false
 
 overrides:
+  '@rollup/plugin-node-resolve@16.0.3>deepmerge': '-'
   drizzle-kit@0.31.10>@esbuild-kit/esm-loader: '-'
   sharp@<0.35.5: 0.35.5
   undici@>=7.0.0 <7.30.1: 7.30.1
@@ -15,6 +16,9 @@ overrides:
   serialize-javascript@>=7.0.0 <7.1.2: 7.1.2
   source-map-js@>=1.0.0 <1.2.2: 1.2.2
   zod@>=4.0.0 <4.6.6: 4.6.6
+
+patchedDependencies:
+  '@rollup/plugin-node-resolve@16.0.3': 2043615e9b05af5b4bc9fd4ad0a9f06302a209bdbd79f186506ad23190b99e40
 
 importers:
 
@@ -2549,10 +2553,6 @@ packages:
 
   decimal.js@10.6.0:
     resolution: {integrity: sha512-YpgQiITW3JXGntzdUmyUR1V812Hn8T1YVXhCu+wO3OpS4eU9l4YdD3qjyiKdV6mvV29zapkMeD390UVEf2lkUg==}
-
-  deepmerge@4.3.1:
-    resolution: {integrity: sha512-3sUqbMEc77XqpdNO7FRyRog+eW3ph+GYCbj+rK+uYyRMuwsVy0rMiVtPn+QJlKFvWP/1PYpapqYn0Me2knFn+A==}
-    engines: {node: '>=0.10.0'}
 
   define-data-property@1.1.4:
     resolution: {integrity: sha512-rBMvIzlpA8v6E+SJZoo++HAYqsLrkg7MSfIinMPFhmkorw7X+dOXVJQs+QT69zGkzMyfDnIMN2Wid1+NbL3T+A==}
@@ -5407,11 +5407,10 @@ snapshots:
     transitivePeerDependencies:
       - supports-color
 
-  '@rollup/plugin-node-resolve@16.0.3(rollup@4.63.2)':
+  '@rollup/plugin-node-resolve@16.0.3(patch_hash=2043615e9b05af5b4bc9fd4ad0a9f06302a209bdbd79f186506ad23190b99e40)(rollup@4.63.2)':
     dependencies:
       '@rollup/pluginutils': 5.4.0(rollup@4.63.2)
       '@types/resolve': 1.20.2
-      deepmerge: 4.3.1
       is-module: 1.0.0
       resolve: 1.22.12
     optionalDependencies:
@@ -5930,8 +5929,6 @@ snapshots:
       supports-color: 10.2.2
 
   decimal.js@10.6.0: {}
-
-  deepmerge@4.3.1: {}
 
   define-data-property@1.1.4:
     dependencies:
@@ -7311,7 +7308,7 @@ snapshots:
       '@babel/preset-env': 7.29.7(@babel/core@7.29.7(supports-color@10.2.2))(supports-color@10.2.2)
       '@babel/runtime': 7.29.7
       '@rollup/plugin-babel': 6.1.0(@babel/core@7.29.7(supports-color@10.2.2))(rollup@4.63.2)(supports-color@10.2.2)
-      '@rollup/plugin-node-resolve': 16.0.3(rollup@4.63.2)
+      '@rollup/plugin-node-resolve': 16.0.3(patch_hash=2043615e9b05af5b4bc9fd4ad0a9f06302a209bdbd79f186506ad23190b99e40)(rollup@4.63.2)
       '@rollup/plugin-replace': 6.0.3(rollup@4.63.2)
       '@rollup/plugin-terser': 1.0.0(rollup@4.63.2)
       '@trickfilm400/rollup-plugin-off-main-thread': 3.0.0-pre1

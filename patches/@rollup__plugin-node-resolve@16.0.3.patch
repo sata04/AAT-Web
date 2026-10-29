@@ -1,0 +1,83 @@
+diff --git a/dist/cjs/index.js b/dist/cjs/index.js
+index 4047435046a30bede18b1b88a86310bf6180f24f..d8d12310a14cbdc438fc236becb8d56e89644cc7 100644
+--- a/dist/cjs/index.js
++++ b/dist/cjs/index.js
+@@ -4,7 +4,6 @@ Object.defineProperty(exports, '__esModule', { value: true });
+ 
+ var path = require('path');
+ var module$1 = require('module');
+-var deepMerge = require('deepmerge');
+ var isModule = require('is-module');
+ var fs = require('fs');
+ var util = require('util');
+@@ -1063,6 +1062,20 @@ const deepFreeze = (object) => {
+   return object;
+ };
+ 
++const deepClone = (object) => {
++  const result = Object.assign({}, object);
++
++  for (const [key, value] of Object.entries(result)) {
++    if (Array.isArray(value)) {
++      result[key] = Array.from(value);
++    } else if (typeof value === 'object') {
++      result[key] = deepClone(value);
++    }
++  }
++
++  return result;
++};
++
+ const baseConditions = ['default', 'module'];
+ const baseConditionsEsm = [...baseConditions, 'import'];
+ const baseConditionsCjs = [...baseConditions, 'require'];
+@@ -1080,7 +1093,7 @@ const defaults = {
+ };
+ const nodeImportPrefix = /^node:/;
+ 
+-const DEFAULTS = deepFreeze(deepMerge({}, defaults));
++const DEFAULTS = deepFreeze(deepClone(defaults));
+ 
+ function nodeResolve(opts = {}) {
+   const { warnings } = handleDeprecatedOptions(opts);
+diff --git a/dist/es/index.js b/dist/es/index.js
+index 6c22eb316dfa46659051b84baca173ba8609081e..be062c1398db741da5792261af8daa2185ab49df 100644
+--- a/dist/es/index.js
++++ b/dist/es/index.js
+@@ -1,6 +1,5 @@
+ import path, { dirname, resolve, extname, normalize, sep } from 'path';
+ import { builtinModules } from 'module';
+-import deepMerge from 'deepmerge';
+ import isModule from 'is-module';
+ import fs, { realpathSync } from 'fs';
+ import { promisify } from 'util';
+@@ -1059,6 +1058,20 @@ const deepFreeze = (object) => {
+   return object;
+ };
+ 
++const deepClone = (object) => {
++  const result = Object.assign({}, object);
++
++  for (const [key, value] of Object.entries(result)) {
++    if (Array.isArray(value)) {
++      result[key] = Array.from(value);
++    } else if (typeof value === 'object') {
++      result[key] = deepClone(value);
++    }
++  }
++
++  return result;
++};
++
+ const baseConditions = ['default', 'module'];
+ const baseConditionsEsm = [...baseConditions, 'import'];
+ const baseConditionsCjs = [...baseConditions, 'require'];
+@@ -1076,7 +1089,7 @@ const defaults = {
+ };
+ const nodeImportPrefix = /^node:/;
+ 
+-const DEFAULTS = deepFreeze(deepMerge({}, defaults));
++const DEFAULTS = deepFreeze(deepClone(defaults));
+ 
+ function nodeResolve(opts = {}) {
+   const { warnings } = handleDeprecatedOptions(opts);

@@ -63,6 +63,10 @@ allowBuilds:
 # regression below a fixed version surfaces there rather than in a pin nobody
 # re-reads.
 overrides:
+  # node-resolve's sole deepmerge call clones a fixed defaults object. Its
+  # matching local source patch removes that call before removing this edge.
+  # Upstream proposal: https://github.com/rollup/plugins/pull/2036 (unmerged).
+  "@rollup/plugin-node-resolve@16.0.3>deepmerge": "-"
   # GHSA-67mh-4wv8-2f99: Drizzle Kit 0.31.10 ships CLI/API loaders using
   # tsx; its published JavaScript never imports this obsolete dependency.
   # Remove only that unused edge, including its vulnerable esbuild 0.18.20.
@@ -86,3 +90,6 @@ overrides:
   source-map-js@>=1.0.0 <1.2.2: "1.2.2"
   # GHSA-mrhx-c7xc-m3w5: fix transitive Zod 4.x as well as direct imports.
   zod@>=4.0.0 <4.6.6: "4.6.6"
+
+patchedDependencies:
+  '@rollup/plugin-node-resolve@16.0.3': patches/@rollup__plugin-node-resolve@16.0.3.patch
