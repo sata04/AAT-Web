@@ -76,7 +76,7 @@ overrides:
   sharp@<0.35.5: "0.35.5"
   # Miniflare pins undici exactly; retain each existing major while taking the
   # 2026-10-15 fixes (including GHSA-2m5v-pch6-74hx and GHSA-4w7w-5xrc-9h26).
-  undici@>=7.0.0 <7.30.1: "7.30.1"
+  undici@>=7.0.0 <7.30.1: "8.12.2"
   undici@>=8.0.0 <8.12.2: "8.12.2"
   # GHSA-6j4f-fj2g-mc7p, GHSA-q2hr-2g5m-vwhr, GHSA-qhr7-859c-m2p7 (minimatch).
   brace-expansion@>=2.0.0 <2.1.7: "2.1.7"
@@ -93,3 +93,6 @@ overrides:
 
 patchedDependencies:
   '@rollup/plugin-node-resolve@16.0.3': patches/@rollup__plugin-node-resolve@16.0.3.patch
+minimumReleaseAgeExclude:
+  # Renovate security update: undici@8.12.2
+  - undici@8.12.2
