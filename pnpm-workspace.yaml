@@ -63,6 +63,10 @@ allowBuilds:
 # regression below a fixed version surfaces there rather than in a pin nobody
 # re-reads.
 overrides:
+  # GHSA-67mh-4wv8-2f99: Drizzle Kit 0.31.10 ships CLI/API loaders using
+  # tsx; its published JavaScript never imports this obsolete dependency.
+  # Remove only that unused edge, including its vulnerable esbuild 0.18.20.
+  "drizzle-kit@0.31.10>@esbuild-kit/esm-loader": "-"
   # GHSA-rgj7-g3m4-5g8c and GHSA-wq5f-xc86-pv6w: fixed libheif/librsvg
   # in sharp's prebuilt binaries, reached only through Miniflare dev tooling.
   sharp@<0.35.5: "0.35.5"

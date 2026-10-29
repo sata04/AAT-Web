@@ -34,21 +34,6 @@
 #
 # Consumed by .github/workflows/security.yml via `--config osv-scanner.toml`.
 
-# ---------------------------------------------------------------------------
-# esbuild 0.18.20 — 1 advisory
-#
-# esbuild 0.18.20 is reached only through drizzle-kit ->
-# @esbuild-kit/esm-loader -> @esbuild-kit/core-utils, a devDependency used
-# to generate migrations. GHSA-67mh-4wv8-2f99 is exploitable against
-# `esbuild --serve`; nothing in this repository starts an esbuild dev
-# server, and esbuild is not in the deployed Worker bundle.
-#
-# The remediation is drizzle-kit dropping the abandoned @esbuild-kit
-# packages, which is not AAT's to make. Every other esbuild in the lockfile
-# (0.25.12, 0.28.x) is already past the fix.
-# ---------------------------------------------------------------------------
-
-[[IgnoredVulns]]
-id = "GHSA-67mh-4wv8-2f99"
-ignoreUntil = 2026-10-12
-reason = "esbuild: not reachable in this deployment; see the note above."
+# GHSA-67mh-4wv8-2f99 was removed on 2026-10-29 after pruning Drizzle Kit's
+# unused @esbuild-kit/esm-loader dependency. esbuild 0.18.20 is no longer in
+# the lockfile, so no acceptance is needed. No advisory ignores remain.
