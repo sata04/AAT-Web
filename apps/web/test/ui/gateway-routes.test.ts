@@ -134,6 +134,31 @@ interface RecordedRequest {
 const recorded: RecordedRequest[] = []
 const realFetch = globalThis.fetch
 
+it('presents a poster refresh response without making it retryable', async () => {
+  const message = 'ポスター描画方式が更新されました。AAT Webを再読み込みしてください。'
+  globalThis.fetch = async () =>
+    Response.json(
+      {
+        error: {
+          code: 'INVALID_ANALYSIS_CONFIG',
+          httpStatus: 409,
+          message,
+          messages: { ja: message, en: 'Reload AAT Web.' },
+          details: { reason: 'poster_client_refresh_required' },
+        },
+      },
+      { status: 409 },
+    )
+  const result = await gateway.requestAutoPoster('revision-test', specFor('revision-test', 'auto'), '')
+  expect(result).toMatchObject({
+    ok: false,
+    kind: 'error',
+    retryable: false,
+    message,
+    details: { reason: 'poster_client_refresh_required' },
+  })
+})
+
 beforeEach(() => {
   recorded.length = 0
   globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {

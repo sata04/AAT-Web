@@ -30,6 +30,9 @@ import { posterRoutes } from './routes/posters.ts'
 import { revisionRoutes } from './routes/revisions.ts'
 import { runRoutes, workspaceRoutes } from './routes/runs.ts'
 
+// Retain the deployed Durable Object namespace, not the old Container runtime.
+export { PosterRendererContainer } from './legacy-poster-renderer.ts'
+
 const app = new Hono<AppEnv>()
 
 app.onError(errorHandler)

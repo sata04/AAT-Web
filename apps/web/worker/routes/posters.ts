@@ -29,6 +29,7 @@
 
 import { type PosterPlotSpec, parsePosterPlotSpec, specHash } from '@aat/plot-spec'
 import { ApiError } from '@aat/shared'
+import { zValidator } from '@hono/zod-validator'
 import { and, desc, eq, isNull, ne, sql } from 'drizzle-orm'
 import { Hono } from 'hono'
 import { z } from 'zod'
@@ -45,7 +46,6 @@ import {
   requireSession,
   withDatabase,
 } from '../middleware/authorize.ts'
-import { validate } from '../middleware/validate.ts'
 import { writeAuditLog } from '../services/audit.ts'
 import {
   decodePosterPng,
@@ -67,6 +67,28 @@ const posterRequestSchema = z.object({
   // The client-side drawing engine's version string ("pyodide-0.28.x/matplotlib-3.x.y"),
   // recorded on the figure as `rendererVersion` — provenance, not a value the Worker acts on.
   engineVersion: z.string().max(200).optional(),
+})
+
+const validatePosterRequest = zValidator('json', posterRequestSchema, (result, context) => {
+  if (result.success) return undefined
+
+  // Old service-worker clients send {spec} and expect a server-side render. Never resurrect that
+  // path: explain the required refresh, without storing a partial upload or starting a Container.
+  const data = result.data
+  if (data && typeof data === 'object' && 'spec' in data && !('pngBase64' in data)) {
+    const error = new ApiError('INVALID_ANALYSIS_CONFIG', {
+      details: { reason: 'poster_client_refresh_required' },
+    }).toPayload()
+    const messages = {
+      ja: 'ポスター描画方式が更新されました。AAT Webを再読み込みしてください。',
+      en: 'Poster rendering has been updated. Reload AAT Web to continue.',
+    }
+    return context.json({ error: { ...error, httpStatus: 409, message: messages.ja, messages } }, 409, {
+      'cache-control': 'no-store',
+    })
+  }
+  const fields = result.error.issues.map((issue) => issue.path.join('.')).filter((path) => path !== '')
+  throw new ApiError('INVALID_ANALYSIS_CONFIG', { details: { target: 'json', fields: fields.slice(0, 20) } })
 })
 
 function figureResponse(figure: typeof posterFigures.$inferSelect) {
@@ -228,7 +250,7 @@ async function recordPosterUpload(
 posterRoutes.post(
   '/revisions/:revisionId/poster/auto',
   requireCapability('poster:generate'),
-  validate('json', posterRequestSchema),
+  validatePosterRequest,
   async (context) => {
     const db = context.get('db')
     const revision = await requireRevision(context, context.req.param('revisionId'), 'read')
@@ -281,7 +303,7 @@ posterRoutes.post(
 posterRoutes.post(
   '/revisions/:revisionId/posters',
   requireCapability('poster:generate'),
-  validate('json', posterRequestSchema),
+  validatePosterRequest,
   async (context) => {
     const db = context.get('db')
     const revision = await requireRevision(context, context.req.param('revisionId'), 'read')

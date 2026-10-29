@@ -10,11 +10,13 @@
  */
 
 import type { D1Migration } from '@cloudflare/vitest-pool-workers'
+import type { PosterRendererContainer } from '../../worker/legacy-poster-renderer.ts'
 
 declare global {
   namespace Cloudflare {
     interface Env {
       TEST_MIGRATIONS: D1Migration[]
+      LEGACY_POSTER_RENDERER: DurableObjectNamespace<PosterRendererContainer>
     }
   }
 }

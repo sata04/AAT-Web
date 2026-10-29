@@ -1,7 +1,7 @@
 # Gitleaks configuration for AAT Web.
 #
-# The default rule set, plus the narrowest possible allowlist for values that are
-# synthetic by construction.
+# The default rule set, plus exact-value exceptions for synthetic fixtures and
+# public source expressions that cannot be credentials.
 #
 # ## The rule for adding an entry here
 #
@@ -46,3 +46,14 @@ entry stops applying the moment the fixture changes.
 """
 regexTarget = "match"
 regexes = ['''inv_5f9c1c0a8e2b4d7fa1c3e6b0d4728915''']
+
+# Preserve the default rule's regex, entropy, and keywords. This exact public
+# schema-member expression is code, not a credential; no path or token shape
+# is exempted, so a real key on the same property remains detectable.
+[[rules]]
+id = "generic-api-key"
+
+[[rules.allowlists]]
+description = "Public schema member expression, not a credential"
+regexTarget = "secret"
+regexes = ['''^quotaReservations\.r2Key$''']

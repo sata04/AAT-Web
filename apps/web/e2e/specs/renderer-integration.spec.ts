@@ -23,7 +23,9 @@
 
 import { readFileSync } from 'node:fs'
 import path from 'node:path'
+import type { APIRequestContext } from '@playwright/test'
 import { openCsv, RUN_FIXTURE, registerWithInvitation, statusLane, waitForAnalysis } from '../harness/app.ts'
+import type { Harness } from '../harness/database.ts'
 import { expect, test } from '../harness/fixtures.ts'
 import { REPO_ROOT } from '../harness/stack.ts'
 
@@ -58,6 +60,47 @@ function pngSize(bytes: Buffer): { width: number; height: number } {
   expect(bytes.subarray(0, 8)).toEqual(PNG_MAGIC)
   expect(bytes.subarray(12, 16).toString('latin1')).toBe('IHDR')
   return { width: bytes.readUInt32BE(16), height: bytes.readUInt32BE(20) }
+}
+
+function expectRenderedPng(pngBase64: string): Buffer {
+  expect(pngBase64).toBeTruthy()
+  const uploaded = Buffer.from(pngBase64, 'base64')
+  expect(pngSize(uploaded)).toEqual({ width: EXPECTED_WIDTH, height: EXPECTED_HEIGHT })
+  // Matplotlib writes the metadata the renderer asked it to — this is the byte-level fingerprint
+  // of the real render core, and no stub in this repository produces it.
+  expect(uploaded.toString('latin1')).toContain(`AAT poster-renderer ${RENDERER_VERSION}`)
+  expect(uploaded.toString('latin1')).toContain('(aat-poster-v1)')
+  // Several hundred kilobytes of line plot, not a placeholder.
+  expect(uploaded.byteLength).toBeGreaterThan(20_000)
+  return uploaded
+}
+
+async function expectLegacyClientsRequireRefresh(
+  harness: Harness,
+  request: APIRequestContext,
+  specPath: string | null,
+  spec: unknown,
+): Promise<void> {
+  const storedCounts = () =>
+    harness.one<{ posters: number; objects: number }>(
+      `SELECT (SELECT count(*) FROM poster_figures) AS posters,
+                (SELECT count(*) FROM cloud_objects) AS objects`,
+    )
+  const beforeLegacy = await storedCounts()
+  const endpoint = specPath ?? ''
+  for (const path of [endpoint, endpoint.replace('/poster/auto', '/posters')]) {
+    const legacy = await request.post(path, { data: { spec } })
+    expect(legacy.status()).toBe(409)
+    expect(legacy.headers()['cache-control']).toBe('no-store')
+    expect(await legacy.json()).toMatchObject({
+      error: {
+        httpStatus: 409,
+        code: 'INVALID_ANALYSIS_CONFIG',
+        details: { reason: 'poster_client_refresh_required' },
+      },
+    })
+  }
+  expect(await storedCounts()).toEqual(beforeLegacy)
 }
 
 test.describe('real poster renderer', () => {
@@ -118,15 +161,7 @@ test.describe('real poster renderer', () => {
 
     /* ---------------------------------------------------- the bytes the browser produced */
 
-    expect(sent.pngBase64).toBeTruthy()
-    const uploaded = Buffer.from(sent.pngBase64, 'base64')
-    expect(pngSize(uploaded)).toEqual({ width: EXPECTED_WIDTH, height: EXPECTED_HEIGHT })
-    // Matplotlib writes the metadata the renderer asked it to — this is the byte-level fingerprint
-    // of the real render core, and no stub in this repository produces it.
-    expect(uploaded.toString('latin1')).toContain(`AAT poster-renderer ${RENDERER_VERSION}`)
-    expect(uploaded.toString('latin1')).toContain('(aat-poster-v1)')
-    // Several hundred kilobytes of line plot, not a placeholder.
-    expect(uploaded.byteLength).toBeGreaterThan(20_000)
+    const uploaded = expectRenderedPng(sent.pngBase64)
 
     /* ------------------------------------------------------------------ the record, and back */
 
@@ -152,6 +187,11 @@ test.describe('real poster renderer', () => {
     const bytes = Buffer.from(await image.body())
     // What comes back out is what the browser sent in — byte for byte.
     expect(bytes.equals(uploaded)).toBe(true)
+    await test.info().attach('browser-rendered-poster', { body: bytes, contentType: 'image/png' })
+
+    /* -------------------------------------- old clients refresh without creating server work */
+
+    await expectLegacyClientsRequireRefresh(harness, page.request, specPath, sent.spec)
 
     /* ----------------------------------- the Worker refuses a bad spec on the upload itself */
 

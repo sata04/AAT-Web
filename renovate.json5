@@ -95,7 +95,7 @@
       // sit for 30 days and then auto-merge on green CI. To take one sooner,
       // open the PR manually from the Dependency Dashboard.
       //
-      // Must stay last — Renovate applies later rules on top.
+      // Keep after the broad update rules; explicit visual-contract exclusions stay last.
       description: "Deployment-path dependencies wait 30 days (auto-merge retained)",
       matchPackageNames: [
         "wrangler",
@@ -111,6 +111,15 @@
       ],
       minimumReleaseAge: "30 days",
       internalChecksFilter: "strict",
+    },
+    {
+      // The npm Pyodide package pins Python, Matplotlib, NumPy and Pillow in browser posters.
+      // A patch can change research figures just as a native renderer dependency can.
+      description: "Browser poster runtime requires visual review, including minor and patch updates",
+      matchDatasources: ["npm"],
+      matchPackageNames: ["pyodide"],
+      automerge: false,
+      addLabels: ["visual-contract", "needs-visual-review"],
     },
   ],
 

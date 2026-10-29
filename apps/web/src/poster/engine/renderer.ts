@@ -26,6 +26,7 @@ interface WorkerRenderedMessage {
   code?: string
   message?: string
   field?: string | undefined
+  bootstrapFailed?: boolean
 }
 
 type WorkerOutbound =
@@ -66,11 +67,35 @@ function failPending(message: string): void {
   worker = null
 }
 
+function handleRenderedMessage(message: WorkerRenderedMessage): void {
+  if (!message.ok && message.bootstrapFailed) {
+    failPending(message.message ?? 'poster engine bootstrap failed')
+    return
+  }
+  const entry = pending.get(message.id)
+  if (!entry) return
+  pending.delete(message.id)
+  if (message.ok && message.png) {
+    entry.resolve(message.png)
+  } else {
+    entry.reject(
+      new PosterEngineError(
+        message.kind ?? 'engine',
+        message.code ?? 'POSTER_RENDER_FAILED',
+        message.message ?? 'poster rendering failed',
+        message.field,
+      ),
+    )
+  }
+}
+
 function ensureWorker(): Worker {
   worker ??= (() => {
     // `new URL(..., import.meta.url)` is the form Vite recognises for bundling a module worker.
     const spawned = new Worker(new URL('./pyodide.worker.ts', import.meta.url), { type: 'module' })
     spawned.onmessage = (event: MessageEvent<WorkerOutbound>) => {
+      // Queued messages from a discarded bootstrap must not affect its replacement.
+      if (worker !== spawned) return
       const message = event.data
       if (message.type === 'status') {
         setStatus(message.status)
@@ -80,24 +105,14 @@ function ensureWorker(): Worker {
         engineVersion = message.version
         return
       }
-      const entry = pending.get(message.id)
-      if (!entry) return
-      pending.delete(message.id)
-      if (message.ok && message.png) {
-        entry.resolve(message.png)
-      } else {
-        entry.reject(
-          new PosterEngineError(
-            message.kind ?? 'engine',
-            message.code ?? 'POSTER_RENDER_FAILED',
-            message.message ?? 'poster rendering failed',
-            message.field,
-          ),
-        )
-      }
+      handleRenderedMessage(message)
     }
-    spawned.onerror = () => failPending('poster engine worker failed')
-    spawned.onmessageerror = () => failPending('poster engine worker dropped a message')
+    spawned.onerror = () => {
+      if (worker === spawned) failPending('poster engine worker failed')
+    }
+    spawned.onmessageerror = () => {
+      if (worker === spawned) failPending('poster engine worker dropped a message')
+    }
     return spawned
   })()
   return worker

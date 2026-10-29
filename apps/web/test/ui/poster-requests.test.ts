@@ -24,6 +24,7 @@ import type { Dataset, SensorDataset } from '../../src/app/dataset.ts'
 import type { PosterStatus } from '../../src/cloud/status.ts'
 import type { PosterEngineStatus } from '../../src/poster/engine/renderer.ts'
 import { generateAutoPoster, generateCustomPoster, type PosterContext } from '../../src/poster/requests.ts'
+import { posterContextFor } from '../../src/screens/analyzer-cloud.ts'
 
 const REVISION_ID = 'rev_01J000000000000000000000'
 const POSTER_ID = 'pos_01J000000000000000000000'
@@ -312,6 +313,33 @@ describe('the automatic poster', () => {
 })
 
 describe('a custom poster', () => {
+  it('keeps the saved revision only for the exact dataset that was synced', () => {
+    const synced = context()
+    expect(posterContextFor(synced, synced.dataset)).toBe(synced)
+    const reanalysed = { ...synced.dataset, inner: sensor(700), sampleCount: 700 }
+    const selected = posterContextFor(synced, reanalysed)
+    expect(selected?.dataset).toBe(reanalysed)
+    expect(selected?.revisionId).toBeNull()
+    expect(selected?.runCode).toBe(synced.runCode)
+  })
+
+  it('renders a same-name replacement locally after sign-out leaves an old synced context', async () => {
+    const staleSignedInContext = context()
+    // Signed-out reanalysis has no cloud sync to replace the retained context.
+    const active = { ...staleSignedInContext.dataset, inner: sensor(800), sampleCount: 800 }
+    const selected = posterContextFor(staleSignedInContext, active)
+    expect(selected?.dataset).toBe(active)
+    expect(selected?.revisionId).toBeNull()
+    if (selected === null) throw new Error('replacement must remain locally renderable')
+    install(() => json({ poster: figure('custom') }, 201))
+    const outcome = await generateCustomPoster(selected, { series: 'inner', xMin: 0, xMax: 0.5 })
+    expect(outcome.ok).toBe(true)
+    if (!outcome.ok) return
+    expect(outcome.uploaded).toBe(false)
+    expect(outcome.entry.analysisRevisionId).toBe('local:260811a')
+    expect(recorded).toHaveLength(0)
+  })
+
   it('uploads through the collection endpoint, which keeps history rather than overwriting', async () => {
     install(() => json({ poster: figure('custom') }, 201))
     const outcome = await generateCustomPoster(context(), { series: 'inner', xMin: 0, xMax: 0.5 })
