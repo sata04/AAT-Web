@@ -119,8 +119,15 @@
     }
   ],
 
-  // No durable_objects, migrations or containers: posters are drawn in the browser — Pyodide +
-  // Matplotlib in WASM — and POSTed back, so the Worker only validates and records uploaded PNGs.
+  // Preserve the already-deployed v1 namespace without a binding or any Container configuration.
+  // The exported class is inert; removing its export/history or adding deleted_classes would
+  // either block an existing deployment or destroy retained Durable Object data.
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": ["PosterRendererContainer"]
+    }
+  ],
 
   /*
    * Non-secret tunables. Anything that would identify the deployment (hostname,

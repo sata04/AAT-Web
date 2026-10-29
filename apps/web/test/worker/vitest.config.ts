@@ -37,6 +37,9 @@ export default defineConfig({
         compatibilityFlags: ['nodejs_compat'],
         d1Databases: { DB: 'aat-test-db' },
         r2Buckets: ['AAT_OBJECTS'],
+        durableObjects: {
+          LEGACY_POSTER_RENDERER: { className: 'PosterRendererContainer', useSQLite: true },
+        },
         bindings: {
           TEST_MIGRATIONS: migrations,
           // A test secret, and only ever a test secret.

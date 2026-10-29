@@ -188,7 +188,9 @@ export function posterContextFor(
   active: Dataset | null,
 ): PosterContext | null {
   if (active === null) return null
-  if (syncedPoster !== null && syncedPoster.dataset.name === active.name) return syncedPoster
+  // Reanalysis/reopening replaces the dataset even when its filename is unchanged. The saved
+  // revision describes only the exact object that was synced, never a same-named replacement.
+  if (syncedPoster !== null && syncedPoster.dataset === active) return syncedPoster
   const runCode = parseRunFilename(active.filename).runCode
   if (runCode === null) return null
   return { revisionId: null, runCode, dataset: active }

@@ -55,6 +55,7 @@ interface RenderedMessage {
   code?: string
   message?: string
   field?: string | undefined
+  bootstrapFailed?: boolean
 }
 
 let hostPromise: Promise<PosterEngineHost> | null = null
@@ -83,8 +84,8 @@ function boot(): Promise<PosterEngineHost> {
     scope.postMessage(message)
     return host
   })
-  // If boot rejects, every later render fails fast with UNAVAILABLE rather than retrying a
-  // 26 MiB download+instantiate that already proved broken in this worker's lifetime.
+  // A partially initialised interpreter is not reusable. Later messages in this worker fail fast;
+  // the renderer discards it on bootstrapFailed so a user retry can boot a fresh worker.
   hostPromise.catch((error: unknown) => {
     bootError = new PosterEngineError(
       'engine',
@@ -107,8 +108,12 @@ scope.onmessage = (event: MessageEvent<RenderRequest>) => {
     }
   }
 
+  let booted = false
   boot()
-    .then((host) => host.renderSpecJson(JSON.stringify(request.spec)))
+    .then((host) => {
+      booted = true
+      return host.renderSpecJson(JSON.stringify(request.spec))
+    })
     .then((png) => reply({ type: 'rendered', id: request.id, ok: true, png }))
     .catch((error: unknown) => {
       const engineError =
@@ -127,6 +132,7 @@ scope.onmessage = (event: MessageEvent<RenderRequest>) => {
         code: engineError.code,
         message: engineError.message,
         field: engineError.field,
+        bootstrapFailed: !booted,
       })
     })
 }

@@ -152,6 +152,29 @@ test.describe('real poster renderer', () => {
     const bytes = Buffer.from(await image.body())
     // What comes back out is what the browser sent in — byte for byte.
     expect(bytes.equals(uploaded)).toBe(true)
+    await test.info().attach('browser-rendered-poster', { body: bytes, contentType: 'image/png' })
+
+    /* -------------------------------------- old clients refresh without creating server work */
+
+    const storedCounts = () =>
+      harness.one<{ posters: number; objects: number }>(
+        `SELECT (SELECT count(*) FROM poster_figures) AS posters,
+                (SELECT count(*) FROM cloud_objects) AS objects`,
+      )
+    const beforeLegacy = await storedCounts()
+    for (const endpoint of [specPath ?? '', (specPath ?? '').replace('/poster/auto', '/posters')]) {
+      const legacy = await page.request.post(endpoint, { data: { spec: sent.spec } })
+      expect(legacy.status()).toBe(409)
+      expect(legacy.headers()['cache-control']).toBe('no-store')
+      expect(await legacy.json()).toMatchObject({
+        error: {
+          httpStatus: 409,
+          code: 'INVALID_ANALYSIS_CONFIG',
+          details: { reason: 'poster_client_refresh_required' },
+        },
+      })
+    }
+    expect(await storedCounts()).toEqual(beforeLegacy)
 
     /* ----------------------------------- the Worker refuses a bad spec on the upload itself */
 

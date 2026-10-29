@@ -63,9 +63,22 @@ allowBuilds:
 # regression below a fixed version surfaces there rather than in a pin nobody
 # re-reads.
 overrides:
-  # GHSA-rgj7-g3m4-5g8c (high): libheif vulnerabilities shipped in sharp's
-  # prebuilt binaries, exploitable when decoding untrusted AVIF/HEIF input.
-  # Reached through miniflare (wrangler / @cloudflare/vite-plugin /
-  # @cloudflare/vitest-pool-workers dev tooling); sharp is not in the deployed
-  # Worker bundle. 0.35.4 vendors libheif 1.23.2 with the fixes.
-  sharp@<0.35.4: "0.35.4"
+  # GHSA-rgj7-g3m4-5g8c and GHSA-wq5f-xc86-pv6w: fixed libheif/librsvg
+  # in sharp's prebuilt binaries, reached only through Miniflare dev tooling.
+  sharp@<0.35.5: "0.35.5"
+  # Miniflare pins undici exactly; retain each existing major while taking the
+  # 2026-10-15 fixes (including GHSA-2m5v-pch6-74hx and GHSA-4w7w-5xrc-9h26).
+  undici@>=7.0.0 <7.30.1: "7.30.1"
+  undici@>=8.0.0 <8.12.2: "8.12.2"
+  # GHSA-6j4f-fj2g-mc7p, GHSA-q2hr-2g5m-vwhr, GHSA-qhr7-859c-m2p7 (minimatch).
+  brace-expansion@>=2.0.0 <2.1.7: "2.1.7"
+  brace-expansion@>=5.0.0 <5.0.12: "5.0.12"
+  # GHSA-hrr3-gc8f-f4qj and the 3.1.9 normalization fixes (ajv).
+  fast-uri@>=3.0.0 <3.1.9: "3.1.9"
+  # GHSA-gfhx-hw2g-v5hg (@rollup/plugin-terser). The later 7.1.3 fix
+  # for GHSA-m5mm-p8h7-m29v is still inside the normal 7-day release-age gate.
+  serialize-javascript@>=7.0.0 <7.1.2: "7.1.2"
+  # GHSA-68fv-2mgg-jv7q (postcss / css-tree).
+  source-map-js@>=1.0.0 <1.2.2: "1.2.2"
+  # GHSA-mrhx-c7xc-m3w5: fix transitive Zod 4.x as well as direct imports.
+  zod@>=4.0.0 <4.6.6: "4.6.6"

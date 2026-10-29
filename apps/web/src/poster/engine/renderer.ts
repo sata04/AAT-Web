@@ -26,6 +26,7 @@ interface WorkerRenderedMessage {
   code?: string
   message?: string
   field?: string | undefined
+  bootstrapFailed?: boolean
 }
 
 type WorkerOutbound =
@@ -71,6 +72,8 @@ function ensureWorker(): Worker {
     // `new URL(..., import.meta.url)` is the form Vite recognises for bundling a module worker.
     const spawned = new Worker(new URL('./pyodide.worker.ts', import.meta.url), { type: 'module' })
     spawned.onmessage = (event: MessageEvent<WorkerOutbound>) => {
+      // Queued messages from a discarded bootstrap must not affect its replacement.
+      if (worker !== spawned) return
       const message = event.data
       if (message.type === 'status') {
         setStatus(message.status)
@@ -78,6 +81,10 @@ function ensureWorker(): Worker {
       }
       if (message.type === 'ready') {
         engineVersion = message.version
+        return
+      }
+      if (!message.ok && message.bootstrapFailed) {
+        failPending(message.message ?? 'poster engine bootstrap failed')
         return
       }
       const entry = pending.get(message.id)
@@ -96,8 +103,12 @@ function ensureWorker(): Worker {
         )
       }
     }
-    spawned.onerror = () => failPending('poster engine worker failed')
-    spawned.onmessageerror = () => failPending('poster engine worker dropped a message')
+    spawned.onerror = () => {
+      if (worker === spawned) failPending('poster engine worker failed')
+    }
+    spawned.onmessageerror = () => {
+      if (worker === spawned) failPending('poster engine worker dropped a message')
+    }
     return spawned
   })()
   return worker
