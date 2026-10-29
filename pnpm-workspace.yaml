@@ -79,7 +79,7 @@ overrides:
   undici@>=7.0.0 <7.30.1: "7.30.1"
   undici@>=8.0.0 <8.12.2: "8.12.2"
   # GHSA-6j4f-fj2g-mc7p, GHSA-q2hr-2g5m-vwhr, GHSA-qhr7-859c-m2p7 (minimatch).
-  brace-expansion@>=2.0.0 <2.1.7: "2.1.7"
+  brace-expansion@>=2.0.0 <2.1.7: "5.0.12"
   brace-expansion@>=5.0.0 <5.0.12: "5.0.12"
   # GHSA-hrr3-gc8f-f4qj and the 3.1.9 normalization fixes (ajv).
   fast-uri@>=3.0.0 <3.1.9: "3.1.9"
@@ -93,3 +93,6 @@ overrides:
 
 patchedDependencies:
   '@rollup/plugin-node-resolve@16.0.3': patches/@rollup__plugin-node-resolve@16.0.3.patch
+minimumReleaseAgeExclude:
+  # Renovate security update: brace-expansion@5.0.12
+  - brace-expansion@5.0.12
