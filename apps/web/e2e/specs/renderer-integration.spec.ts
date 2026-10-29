@@ -23,6 +23,7 @@
 
 import { readFileSync } from 'node:fs'
 import path from 'node:path'
+import type { APIRequestContext } from '@playwright/test'
 import { openCsv, RUN_FIXTURE, registerWithInvitation, statusLane, waitForAnalysis } from '../harness/app.ts'
 import { expect, test } from '../harness/fixtures.ts'
 import { REPO_ROOT } from '../harness/stack.ts'
@@ -58,6 +59,26 @@ function pngSize(bytes: Buffer): { width: number; height: number } {
   expect(bytes.subarray(0, 8)).toEqual(PNG_MAGIC)
   expect(bytes.subarray(12, 16).toString('latin1')).toBe('IHDR')
   return { width: bytes.readUInt32BE(16), height: bytes.readUInt32BE(20) }
+}
+
+async function expectLegacyClientsRequireRefresh(
+  request: APIRequestContext,
+  specPath: string | null,
+  spec: unknown,
+): Promise<void> {
+  const endpoint = specPath ?? ''
+  for (const path of [endpoint, endpoint.replace('/poster/auto', '/posters')]) {
+    const legacy = await request.post(path, { data: { spec } })
+    expect(legacy.status()).toBe(409)
+    expect(legacy.headers()['cache-control']).toBe('no-store')
+    expect(await legacy.json()).toMatchObject({
+      error: {
+        httpStatus: 409,
+        code: 'INVALID_ANALYSIS_CONFIG',
+        details: { reason: 'poster_client_refresh_required' },
+      },
+    })
+  }
 }
 
 test.describe('real poster renderer', () => {
@@ -162,18 +183,7 @@ test.describe('real poster renderer', () => {
                 (SELECT count(*) FROM cloud_objects) AS objects`,
       )
     const beforeLegacy = await storedCounts()
-    for (const endpoint of [specPath ?? '', (specPath ?? '').replace('/poster/auto', '/posters')]) {
-      const legacy = await page.request.post(endpoint, { data: { spec: sent.spec } })
-      expect(legacy.status()).toBe(409)
-      expect(legacy.headers()['cache-control']).toBe('no-store')
-      expect(await legacy.json()).toMatchObject({
-        error: {
-          httpStatus: 409,
-          code: 'INVALID_ANALYSIS_CONFIG',
-          details: { reason: 'poster_client_refresh_required' },
-        },
-      })
-    }
+    await expectLegacyClientsRequireRefresh(page.request, specPath, sent.spec)
     expect(await storedCounts()).toEqual(beforeLegacy)
 
     /* ----------------------------------- the Worker refuses a bad spec on the upload itself */

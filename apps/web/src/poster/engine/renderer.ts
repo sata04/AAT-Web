@@ -67,6 +67,28 @@ function failPending(message: string): void {
   worker = null
 }
 
+function handleRenderedMessage(message: WorkerRenderedMessage): void {
+  if (!message.ok && message.bootstrapFailed) {
+    failPending(message.message ?? 'poster engine bootstrap failed')
+    return
+  }
+  const entry = pending.get(message.id)
+  if (!entry) return
+  pending.delete(message.id)
+  if (message.ok && message.png) {
+    entry.resolve(message.png)
+  } else {
+    entry.reject(
+      new PosterEngineError(
+        message.kind ?? 'engine',
+        message.code ?? 'POSTER_RENDER_FAILED',
+        message.message ?? 'poster rendering failed',
+        message.field,
+      ),
+    )
+  }
+}
+
 function ensureWorker(): Worker {
   worker ??= (() => {
     // `new URL(..., import.meta.url)` is the form Vite recognises for bundling a module worker.
@@ -83,25 +105,7 @@ function ensureWorker(): Worker {
         engineVersion = message.version
         return
       }
-      if (!message.ok && message.bootstrapFailed) {
-        failPending(message.message ?? 'poster engine bootstrap failed')
-        return
-      }
-      const entry = pending.get(message.id)
-      if (!entry) return
-      pending.delete(message.id)
-      if (message.ok && message.png) {
-        entry.resolve(message.png)
-      } else {
-        entry.reject(
-          new PosterEngineError(
-            message.kind ?? 'engine',
-            message.code ?? 'POSTER_RENDER_FAILED',
-            message.message ?? 'poster rendering failed',
-            message.field,
-          ),
-        )
-      }
+      handleRenderedMessage(message)
     }
     spawned.onerror = () => {
       if (worker === spawned) failPending('poster engine worker failed')

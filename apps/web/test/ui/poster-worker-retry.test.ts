@@ -27,6 +27,21 @@ class FakeWorker {
   }
 }
 
+function workerInstance(index: number, missingMessage: string): FakeWorker {
+  const instance = FakeWorker.instances[index]
+  if (!instance) throw new Error(missingMessage)
+  return instance
+}
+
+function expectBootstrapWaitersRejected(results: PromiseSettledResult<Uint8Array>[]): void {
+  for (const result of results) {
+    expect(result.status).toBe('rejected')
+    if (result.status === 'rejected') {
+      expect(result.reason).toMatchObject({ code: 'POSTER_ENGINE_UNAVAILABLE' })
+    }
+  }
+}
+
 let renderer: typeof import('../../src/poster/engine/renderer.ts')
 
 beforeEach(async () => {
@@ -41,8 +56,7 @@ afterEach(() => vi.unstubAllGlobals())
 describe('poster Worker recovery', () => {
   it('settles all bootstrap waiters and lets the next user retry succeed on a fresh Worker', async () => {
     const settled = Promise.allSettled([renderer.renderPosterPng(SPEC), renderer.renderPosterPng(SPEC)])
-    const failed = FakeWorker.instances[0]
-    if (!failed) throw new Error('first render must create a Worker')
+    const failed = workerInstance(0, 'first render must create a Worker')
     failed.deliver({
       type: 'rendered',
       id: failed.requests[0]?.id,
@@ -50,18 +64,12 @@ describe('poster Worker recovery', () => {
       bootstrapFailed: true,
       message: 'temporary asset fetch failure',
     })
-    for (const result of await settled) {
-      expect(result.status).toBe('rejected')
-      if (result.status === 'rejected') {
-        expect(result.reason).toMatchObject({ code: 'POSTER_ENGINE_UNAVAILABLE' })
-      }
-    }
+    expectBootstrapWaitersRejected(await settled)
     expect(failed.terminate).toHaveBeenCalledTimes(1)
     expect(FakeWorker.instances).toHaveLength(1) // no automatic retry/download loop
 
     const retry = renderer.renderPosterPng(SPEC)
-    const replacement = FakeWorker.instances[1]
-    if (!replacement) throw new Error('user retry must create a fresh Worker')
+    const replacement = workerInstance(1, 'user retry must create a fresh Worker')
     // A second queued boot failure/error from the old process cannot kill the replacement.
     failed.deliver({ type: 'rendered', id: failed.requests[1]?.id, ok: false, bootstrapFailed: true })
     failed.onerror?.()
@@ -77,8 +85,7 @@ describe('poster Worker recovery', () => {
   ])('keeps the healthy Worker after an ordinary $kind error', async ({ kind, code }) => {
     const result = renderer.renderPosterPng(SPEC)
     const rejected = expect(result).rejects.toMatchObject({ kind, code })
-    const healthy = FakeWorker.instances[0]
-    if (!healthy) throw new Error('first render must create a Worker')
+    const healthy = workerInstance(0, 'first render must create a Worker')
     healthy.deliver({
       type: 'rendered',
       id: healthy.requests[0]?.id,
