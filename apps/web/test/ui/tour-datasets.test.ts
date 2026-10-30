@@ -1,9 +1,20 @@
 import { describe, expect, it, vi } from 'vitest'
 import type { Dataset } from '../../src/app/dataset.ts'
-import { TourDatasets } from '../../src/onboarding/tour-datasets.ts'
+import type { DemoDataset } from '../../src/onboarding/demo-data.ts'
+import { type TourDatasetOpen, TourDatasets } from '../../src/onboarding/tour-datasets.ts'
 
 function dataset(filename: string): Dataset {
   return { filename, name: filename.replace(/\.csv$/, '') } as Dataset
+}
+
+function acceptAndSettle(request: TourDatasetOpen, sample = dataset(request.filename)): Dataset {
+  expect(request.acceptInstall(sample)).toBe(true)
+  request.settle()
+  return sample
+}
+
+function openSample(tracker: TourDatasets, which: DemoDataset): Dataset {
+  return acceptAndSettle(tracker.open(which, []))
 }
 
 describe('tour dataset ownership across React commits', () => {
@@ -17,8 +28,7 @@ describe('tour dataset ownership across React commits', () => {
 
     // The worker dispatched setDatasets, then openFiles resolved. React has
     // not committed that update and first flushes an older passive effect.
-    expect(request.acceptInstall(sample)).toBe(true)
-    request.settle()
+    acceptAndSettle(request, sample)
     tracker.reconcile([kept])
     tracker.reconcile([kept, sample])
     tracker.discardPending()
@@ -31,10 +41,7 @@ describe('tour dataset ownership across React commits', () => {
   it('closes an accepted install even before its dataset update commits', () => {
     const tracker = new TourDatasets()
     const close = vi.fn()
-    const request = tracker.open('a', [])
-    const sample = dataset(request.filename)
-    expect(request.acceptInstall(sample)).toBe(true)
-    request.settle()
+    const sample = openSample(tracker, 'a')
     tracker.reconcile([])
 
     tracker.discardPending()
@@ -65,12 +72,8 @@ describe('tour dataset ownership across React commits', () => {
     const replay = tracker.open('a', [])
     expect(replay.filename).toBe('sample-a-tour.csv')
 
-    const kept = dataset(first.filename)
-    expect(first.acceptInstall(kept)).toBe(true)
-    first.settle()
-    const sample = dataset(replay.filename)
-    expect(replay.acceptInstall(sample)).toBe(true)
-    replay.settle()
+    const kept = acceptAndSettle(first)
+    const sample = acceptAndSettle(replay)
     tracker.reconcile([kept, sample])
     tracker.discardPending()
     tracker.close([], [kept, sample], close)
@@ -80,10 +83,7 @@ describe('tour dataset ownership across React commits', () => {
 
   it('keeps an accepted but uncommitted sample out of replay ownership', () => {
     const tracker = new TourDatasets()
-    const first = tracker.open('a', [])
-    const kept = dataset(first.filename)
-    expect(first.acceptInstall(kept)).toBe(true)
-    first.settle()
+    openSample(tracker, 'a')
     tracker.finish('keep')
     tracker.reconcile([])
     expect(tracker.open('a', []).filename).toBe('sample-a-tour.csv')
@@ -106,12 +106,9 @@ describe('tour dataset ownership across React commits', () => {
   it('never closes a user replacement with the same filename', () => {
     const tracker = new TourDatasets()
     const close = vi.fn()
-    const request = tracker.open('a', [])
-    const sample = dataset(request.filename)
-    expect(request.acceptInstall(sample)).toBe(true)
-    request.settle()
+    const sample = openSample(tracker, 'a')
     tracker.reconcile([sample])
-    const user = dataset(request.filename)
+    const user = dataset(sample.filename)
     tracker.close([], [user], close)
     expect(close).not.toHaveBeenCalled()
     expect(tracker.open('a', [user]).filename).toBe('sample-a-tour.csv')
@@ -120,10 +117,7 @@ describe('tour dataset ownership across React commits', () => {
   it('reuses the tour name when compare closes and reopens before a commit', () => {
     const tracker = new TourDatasets()
     const close = vi.fn()
-    const request = tracker.open('b', [])
-    const sample = dataset(request.filename)
-    expect(request.acceptInstall(sample)).toBe(true)
-    request.settle()
+    const sample = openSample(tracker, 'b')
     tracker.reconcile([sample])
     tracker.close(['a'], [sample], close)
     expect(tracker.open('b', [sample]).filename).toBe('sample-b.csv')

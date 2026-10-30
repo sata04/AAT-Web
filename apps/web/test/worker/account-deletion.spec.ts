@@ -74,6 +74,12 @@ async function sourceUpload(bucket: R2Bucket, owner: TestUser, runId: string): P
 const deleteUser = (bucket: R2Bucket, admin: TestUser, userId: string) =>
   request(bucket, `/api/v1/admin/users/${userId}`, admin, { method: 'DELETE' })
 
+async function sweepRecoveryQueue(bucket: R2Bucket, recordCount: number): Promise<void> {
+  for (let pass = 0; pass <= Math.ceil(recordCount / 3); pass++) {
+    await sweepDeletedAccountObjectKeys(db(), bucket, 3)
+  }
+}
+
 describe('account deletion and uploads', () => {
   it('closes admission and waits for an active PUT, then completes on retry', async () => {
     const admin = await createUser({ role: 'Admin' })
@@ -392,17 +398,13 @@ describe('account deletion and uploads', () => {
     try {
       // Older tests' records may also be in the global queue. This bound includes all of them.
       const records = await db().select().from(deletedAccountObjectKeys)
-      for (let pass = 0; pass <= Math.ceil(records.length / 3); pass++) {
-        await sweepDeletedAccountObjectKeys(db(), bucket, 3)
-      }
+      await sweepRecoveryQueue(bucket, records.length)
       expect(keys.every((key) => checked.includes(key))).toBe(true)
       expect(await env.AAT_OBJECTS.head(failedKey)).not.toBeNull()
       expect(await env.AAT_OBJECTS.head(lastKey)).toBeNull()
       // A key found empty earlier can reappear much later; retention must cover it again.
       await env.AAT_OBJECTS.put(emptyKey, new Uint8Array([2]))
-      for (let pass = 0; pass <= Math.ceil(records.length / 3); pass++) {
-        await sweepDeletedAccountObjectKeys(db(), bucket, 3)
-      }
+      await sweepRecoveryQueue(bucket, records.length)
       expect(await env.AAT_OBJECTS.head(emptyKey)).toBeNull()
     } finally {
       await db().delete(deletedAccountObjectKeys).where(eq(deletedAccountObjectKeys.userId, ledgerOwner))
