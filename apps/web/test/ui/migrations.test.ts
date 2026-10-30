@@ -130,6 +130,27 @@ describe('the committed migrations', () => {
   })
 })
 
+describe('0009_account_deletion_recovery, applied to a populated database', () => {
+  it('preserves existing research rows and keeps recovery metadata outside user cascades', () => {
+    const db = databaseBefore('0009_account_deletion_recovery.sql')
+    seed(db, 'user', { id: 'u1', email: 'u1@aat.invalid' })
+    seed(db, 'runs', { id: 'r1', owner_user_id: 'u1' })
+    seed(db, 'analysis_revisions', { id: 'v1', run_id: 'r1', owner_user_id: 'u1' })
+    seed(db, 'cloud_objects', { id: 'o1', run_id: 'r1', analysis_revision_id: 'v1', owner_user_id: 'u1' })
+    const before = rowCounts(db)
+    applyMigration(db, '0009_account_deletion_recovery.sql')
+    expect(rowCounts(db)).toEqual(before)
+    expect(db.prepare('PRAGMA foreign_key_check').all()).toEqual([])
+    db.exec("INSERT INTO account_deletions (user_id, started_at) VALUES ('u1', 0)")
+    db.exec("INSERT INTO deleted_account_object_keys (r2_key, user_id) VALUES ('sources/u1/r1/o1.csv', 'u1')")
+    db.exec("DELETE FROM user WHERE id = 'u1'")
+    expect(db.prepare('SELECT user_id FROM account_deletions').all()).toEqual([{ user_id: 'u1' }])
+    expect(db.prepare('SELECT r2_key FROM deleted_account_object_keys').all()).toEqual([
+      { r2_key: 'sources/u1/r1/o1.csv' },
+    ])
+  })
+})
+
 describe('0003_drop_projects, applied to a database with data in it', () => {
   function seeded(): DatabaseSync {
     const db = databaseBefore('0003_drop_projects.sql')

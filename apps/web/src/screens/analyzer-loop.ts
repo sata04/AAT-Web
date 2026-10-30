@@ -72,6 +72,12 @@ export interface AnalyzerLoopDeps {
   datasetsRef: { current: readonly Dataset[] }
 }
 
+/** An optional owner can decline a completed install after its caller exits. */
+export interface OpenFilesOptions {
+  localOnly?: boolean
+  acceptInstall?: (dataset: Dataset) => boolean
+}
+
 /** Everything `runAnalysisFor` needs to describe one request. */
 interface AnalysisJob {
   source: OpenedSource
@@ -85,6 +91,7 @@ interface AnalysisJob {
    * revision or poster job even when the session is signed in.
    */
   localOnly?: boolean | undefined
+  acceptInstall?: ((dataset: Dataset) => boolean) | undefined
   /**
    * The cancellation epoch the caller captured. Absent, the current epoch is
    * used — the caller is the request's own epoch authority by definition.
@@ -99,6 +106,7 @@ interface InstalledAnalysis {
   effectiveConfig: AnalysisConfig
   epoch: number
   localOnly: boolean
+  acceptInstall: ((dataset: Dataset) => boolean) | undefined
 }
 
 /**
@@ -131,6 +139,17 @@ async function installAnalysisResult(
   const { source, result, effectiveConfig, epoch } = installed
   if (dropUnwantedInstall(deps, client, source, epoch)) return
   const dataset = datasetFromPayload(result.payload, effectiveConfig, result.fromCache)
+  if (installed.acceptInstall?.(dataset) === false) {
+    // A kept or user install sharing these bytes may still be queued, so a
+    // committed-list check cannot authorize releasing its table/recovery File.
+    // The two deterministic demo sources can remain screen-local; the worker
+    // table cache is bounded and an ordinary last-dataset close still releases.
+    deps.setStatuses((current) => ({
+      ...current,
+      analysis: { kind: 'ready', fromCache: result.fromCache },
+    }))
+    return
+  }
   deps.setDatasets((current) => {
     // Re-analysing or re-opening a file must not move it to the end of the
     // list — the comparison graph draws in list order.
@@ -269,6 +288,7 @@ export async function runAnalysisFor(deps: AnalyzerLoopDeps, job: AnalysisJob): 
       effectiveConfig,
       epoch,
       localOnly: job.localOnly === true,
+      acceptInstall: job.acceptInstall,
     })
   } catch (error) {
     await reportAnalysisError(deps, client, error, { ...job, epoch })
@@ -307,9 +327,9 @@ async function openSingleFile(
   deps: AnalyzerLoopDeps,
   client: AnalysisClient,
   file: File,
-  batch: { epoch: number; localOnly: boolean },
+  batch: { epoch: number; localOnly: boolean; acceptInstall: OpenFilesOptions['acceptInstall'] },
 ): Promise<'done' | 'columns' | 'stop'> {
-  const { epoch, localOnly } = batch
+  const { epoch, localOnly, acceptInstall } = batch
   try {
     const bytes = await file.arrayBuffer()
     if (deps.cancelEpoch.current !== epoch) return 'stop'
@@ -341,14 +361,18 @@ async function openSingleFile(
       deps.setStatuses((current) => ({ ...current, analysis: { kind: 'idle' } }))
       return 'columns'
     }
-    await runAnalysisFor(deps, { source, mapping: source.suggestedMapping, epoch, localOnly })
+    await runAnalysisFor(deps, { source, mapping: source.suggestedMapping, epoch, localOnly, acceptInstall })
     return 'done'
   } catch (error) {
     return reportOpenError(deps, file.name, error) === 'cancelled' ? 'stop' : 'done'
   }
 }
 
-export async function openFilesFor(deps: AnalyzerLoopDeps, files: File[], localOnly = false): Promise<void> {
+export async function openFilesFor(
+  deps: AnalyzerLoopDeps,
+  files: File[],
+  options: OpenFilesOptions = {},
+): Promise<void> {
   const client = deps.getAnalysisClient()
   const epoch = deps.cancelEpoch.current
   for (let index = 0; index < files.length; index++) {
@@ -358,7 +382,11 @@ export async function openFilesFor(deps: AnalyzerLoopDeps, files: File[], localO
       ...current,
       analysis: { kind: 'running', stage: 'decoding', percent: 0 },
     }))
-    const outcome = await openSingleFile(deps, client, file, { epoch, localOnly })
+    const outcome = await openSingleFile(deps, client, file, {
+      epoch,
+      localOnly: options.localOnly === true,
+      acceptInstall: options.acceptInstall,
+    })
     if (outcome === 'stop') return
     if (outcome === 'columns') {
       // The dialog is modal; the rest of the batch resumes when it
@@ -513,6 +541,18 @@ export function closeDatasetFor(deps: AnalyzerLoopDeps, dataset: Dataset): void 
   }
 }
 
+/**
+ * Retract exactly the install a tour owns, including a queued state update.
+ * The caller restores the tour's view. A newer user object under the same
+ * name and an in-flight user import must survive, so this path adds no
+ * filename cancellation marker and does not reset selection or viewport.
+ * Keep the two bounded demo sources: another accepted dataset sharing a hash
+ * can still be queued and absent from the committed list.
+ */
+export function closeTourDatasetFor(deps: AnalyzerLoopDeps, dataset: Dataset): void {
+  deps.setDatasets((current) => current.filter((existing) => existing !== dataset))
+}
+
 export interface AnalyzerLoop {
   pendingColumns: PendingColumnChoice | null
   setPendingColumns: Dispatch<SetStateAction<PendingColumnChoice | null>>
@@ -523,12 +563,13 @@ export interface AnalyzerLoop {
     reopenedOnce?: boolean,
     epoch?: number,
   ) => Promise<void>
-  openFiles: (files: File[], options?: { localOnly?: boolean }) => Promise<void>
+  openFiles: (files: File[], options?: OpenFilesOptions) => Promise<void>
   confirmPendingColumns: (mapping: ColumnMapping) => void
   cancelPendingColumns: () => void
   cancelAnalysis: () => void
   applyConfig: (next: AnalysisConfig) => void
   closeDataset: (dataset: Dataset) => void
+  closeTourDataset: (dataset: Dataset) => void
 }
 
 export interface AnalyzerLoopInput {
@@ -600,8 +641,7 @@ function useLoopCallbacks(
     [deps],
   )
   const openFiles = useCallback(
-    (files: File[], options?: { localOnly?: boolean }) =>
-      openFilesFor(deps, files, options?.localOnly === true),
+    (files: File[], options?: OpenFilesOptions) => openFilesFor(deps, files, options),
     [deps],
   )
   const confirmPendingColumns = useCallback(
@@ -612,6 +652,7 @@ function useLoopCallbacks(
   const cancelAnalysis = useCallback(() => cancelAnalysisFor(deps), [deps])
   const applyConfig = useCallback((next: AnalysisConfig) => applyConfigFor(deps, next), [deps])
   const closeDataset = useCallback((dataset: Dataset) => closeDatasetFor(deps, dataset), [deps])
+  const closeTourDataset = useCallback((dataset: Dataset) => closeTourDatasetFor(deps, dataset), [deps])
   return {
     runAnalysis,
     openFiles,
@@ -620,6 +661,7 @@ function useLoopCallbacks(
     cancelAnalysis,
     applyConfig,
     closeDataset,
+    closeTourDataset,
   }
 }
 

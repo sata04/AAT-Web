@@ -134,6 +134,32 @@ interface RecordedRequest {
 const recorded: RecordedRequest[] = []
 const realFetch = globalThis.fetch
 
+it('offers a retry when account deletion is waiting for an active upload', async () => {
+  const message = 'Waiting for uploads to finish. Retry account deletion shortly.'
+  globalThis.fetch = async () =>
+    Response.json(
+      {
+        error: {
+          code: 'ACCOUNT_DELETION_PENDING',
+          httpStatus: 409,
+          message,
+          messages: {
+            ja: 'アップロードの終了を待っています。しばらくしてからアカウント削除を再試行してください。',
+            en: message,
+          },
+        },
+      },
+      { status: 409 },
+    )
+  expect(await gateway.deleteAdminUser('pending-user')).toMatchObject({
+    ok: false,
+    kind: 'error',
+    code: 'ACCOUNT_DELETION_PENDING',
+    retryable: true,
+    message,
+  })
+})
+
 it('presents a poster refresh response without making it retryable', async () => {
   const message = 'ポスター描画方式が更新されました。AAT Webを再読み込みしてください。'
   globalThis.fetch = async () =>

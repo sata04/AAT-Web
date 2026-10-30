@@ -625,10 +625,31 @@ gallery while its `analysis_revisions` rows remain in place. That is intentional
 references revision ids, and hard-deleting them would leave the record of what happened pointing
 at nothing.
 
-`DELETE /api/v1/admin/users/:userId` (capability `user:manage`) deletes the R2 objects **before**
-the user row, because every foreign key cascades from `user.id`: removing the row first would
-erase the record of which objects existed, leaving them in the bucket with nothing pointing at
-them and no way to find them.
+`DELETE /api/v1/admin/users/:userId` (capability `user:manage`; self-deletion remains forbidden)
+first commits an irreversible `account_deletions` admission barrier, revokes sessions, tombstones
+the owner's runs, and copies every owned object key and every historical reservation key into
+`deleted_account_object_keys`. Reservation admission and its quota hold are one D1 transaction,
+so deletion captures an already admitted key or the admission is refused. The barrier is
+coordination state independent of role and ban policy.
+
+If an upload still holds a non-expired pending reservation, DELETE returns **409
+`ACCOUNT_DELETION_PENDING`** with a retry message; the administrator should retry deletion after
+the upload finishes. Its completion cannot finalise behind the barrier and cleans up its bytes.
+Expired reservations are reclaimed so a vanished client cannot block deletion forever. Cleanup
+then deletes the captured R2 keys in bounded batches before cascading the user. An R2 or D1 failure
+leaves the barrier and recovery keys available to the same DELETE retry, including after cascade.
+
+Expiry does not cancel an R2 PUT already in flight: it can recreate a key after DELETE succeeds.
+The non-FK barrier and key ledger therefore survive the user and are retained even after empty
+or successful R2 checks. Late upload completion attempts cleanup; explicit DELETE retries repeat
+it, and the existing opportunistic quota sweeper on subsequent snapshot and source
+upload paths checks a bounded, rotating set of recovery keys globally. Failed or empty keys cannot
+starve later keys. There is **no background cron or deadline guarantee**: if the upload handler
+terminates and no later cleanup-triggering request arrives, physical bytes can remain until a
+retry or subsequent upload. DELETE success means the account cascade and eager cleanup completed,
+with late PUTs still durably tracked for recovery. Retained metadata contains only generated R2
+keys, opaque user ids, and cleanup order; it consumes D1 storage, and is never charged to another
+member's live storage quota.
 
 ## Outstanding
 

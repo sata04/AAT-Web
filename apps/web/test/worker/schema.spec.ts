@@ -43,6 +43,8 @@ describe('migrations', () => {
       'cloud_objects',
       'quota_usage',
       'quota_reservations',
+      'account_deletions',
+      'deleted_account_object_keys',
       'audit_logs',
       'system_flags',
       'rate_limits',
