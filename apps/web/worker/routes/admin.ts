@@ -28,10 +28,12 @@ import { toPublicUser } from '../auth/identity.ts'
 import { createInvitation, revokeInvitation } from '../auth/invitations.ts'
 import { resolveConfig } from '../config.ts'
 import {
+  accountDeletions,
   analysisRevisions,
   auditLogs,
   cloudObjects,
   passkey,
+  quotaReservations,
   quotaUsage,
   registrationInvites,
   runs,
@@ -41,8 +43,13 @@ import {
 import type { AppEnv } from '../middleware/authorize.ts'
 import { requireCapability, requireSession, withDatabase } from '../middleware/authorize.ts'
 import { validate } from '../middleware/validate.ts'
+import {
+  ACCOUNT_DELETION_REASON,
+  beginAccountDeletion,
+  deleteAccountObjectBytes,
+} from '../services/account-deletion.ts'
 import { writeAuditLog } from '../services/audit.ts'
-import { ensureQuotaRow, setQuotaLimit } from '../services/quota.ts'
+import { ensureQuotaRow, setQuotaLimit, sweepStaleReservations } from '../services/quota.ts'
 import { consumeRateLimit, RATE_LIMITS, rateLimitKey } from '../services/rate-limit.ts'
 
 export const adminRoutes = new Hono<AppEnv>()
@@ -177,14 +184,34 @@ adminRoutes.delete('/users/:userId', requireCapability('user:manage'), async (co
   }
 
   const [target] = await db.select().from(userTable).where(eq(userTable.id, targetId)).limit(1)
-  if (!target) throw new ApiError('RESOURCE_NOT_FOUND')
+  const [deleting] = await db
+    .select()
+    .from(accountDeletions)
+    .where(eq(accountDeletions.userId, targetId))
+    .limit(1)
+  if (!target && !deleting) throw new ApiError('RESOURCE_NOT_FOUND')
 
-  // Delete the bytes before the row: the cascade would otherwise remove every record of which
-  // objects existed, leaving them in R2 with nothing pointing at them and no way to find them.
-  const objects = await db.select().from(cloudObjects).where(eq(cloudObjects.ownerUserId, targetId))
-  for (const object of objects) {
-    await context.env.AAT_OBJECTS.delete(object.r2Key)
+  if (target) {
+    const now = new Date()
+    await beginAccountDeletion(db, targetId, now)
+    // Abandoned requests cannot hold an account forever. Expiry releases the hold, but the key
+    // ledger remains because expiration does not cancel a PUT already on its way to R2.
+    await sweepStaleReservations(db, context.env.AAT_OBJECTS, now, 20, targetId)
+    const [uploading] = await db
+      .select({ id: quotaReservations.id })
+      .from(quotaReservations)
+      .where(and(eq(quotaReservations.userId, targetId), eq(quotaReservations.status, 'pending')))
+      .limit(1)
+    if (uploading) {
+      throw new ApiError('ACCOUNT_DELETION_PENDING', { details: { reason: ACCOUNT_DELETION_REASON } })
+    }
   }
+
+  const [objects] = await db
+    .select({ count: sql<number>`count(*)` })
+    .from(cloudObjects)
+    .where(eq(cloudObjects.ownerUserId, targetId))
+  await deleteAccountObjectBytes(db, context.env.AAT_OBJECTS, targetId)
   await db.delete(userTable).where(eq(userTable.id, targetId))
 
   await writeAuditLog(db, {
@@ -192,11 +219,11 @@ adminRoutes.delete('/users/:userId', requireCapability('user:manage'), async (co
     action: 'user.delete',
     targetType: 'user',
     targetId,
-    details: { objectsDeleted: objects.length },
+    details: { objectsDeleted: objects?.count ?? 0 },
     headers: context.req.raw.headers,
   })
 
-  return context.json({ ok: true, objectsDeleted: objects.length })
+  return context.json({ ok: true, objectsDeleted: objects?.count ?? 0 })
 })
 
 adminRoutes.get('/users/:userId/passkeys', requireCapability('user:manage'), async (context) => {

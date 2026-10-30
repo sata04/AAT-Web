@@ -13,11 +13,17 @@
 import { DEFAULT_ANALYSIS_CONFIG } from '@aat/shared'
 import { describe, expect, it, vi } from 'vitest'
 import type { AnalysisClient, AnalysisProgress } from '../../src/analysis/client.ts'
-import type { OpenedSource } from '../../src/analysis/protocol.ts'
+import type { AnalysisPayload, OpenedSource } from '../../src/analysis/protocol.ts'
 import type { Dataset } from '../../src/app/dataset.ts'
 import { type CloudStatuses, INITIAL_STATUSES } from '../../src/cloud/status.ts'
+import { TourDatasets } from '../../src/onboarding/tour-datasets.ts'
 import { retrySyncFor } from '../../src/screens/analyzer-cloud.ts'
-import { type AnalyzerLoopDeps, closeDatasetFor, openFilesFor } from '../../src/screens/analyzer-loop.ts'
+import {
+  type AnalyzerLoopDeps,
+  closeDatasetFor,
+  closeTourDatasetFor,
+  openFilesFor,
+} from '../../src/screens/analyzer-loop.ts'
 
 const SHA = 'a'.repeat(64)
 
@@ -151,6 +157,264 @@ describe('openFilesFor epoch checks', () => {
 
     expect(client.analyse).not.toHaveBeenCalled()
     expect(datasetsBox.current).toHaveLength(0)
+  })
+})
+
+/** Minimal real worker payload: install still crosses datasetFromPayload. */
+function payload(filename: string): AnalysisPayload {
+  const sensor = {
+    present: false,
+    time: new Float64Array(),
+    gravity: new Float64Array(),
+    acceleration: new Float64Array(),
+    filteredTime: new Float64Array(),
+    filteredGravity: new Float64Array(),
+    startIndex: null,
+    endIndex: null,
+  }
+  return {
+    ...openedSource(filename),
+    mapping: { timeColumn: 't', innerColumn: 'a', dragColumn: 'a', useInner: true, useDrag: false },
+    inner: sensor,
+    drag: sensor,
+    sync: {
+      innerIndex: null,
+      dragIndex: null,
+      innerFallback: null,
+      dragFallback: null,
+      innerCandidateCount: 0,
+      dragCandidateCount: 0,
+    },
+    filterEndIndex: -1,
+    statistics: {
+      inner: { mean: null, startTime: null, std: null },
+      drag: { mean: null, startTime: null, std: null },
+    },
+    gQuality: [],
+    gQualityComputed: false,
+    warnings: [],
+    sampleCount: 0,
+    analysisTimestamp: '2026-10-30T00:00:00.000Z',
+  }
+}
+
+describe('request-specific tour installs', () => {
+  function analyzingClient(filename: string, sourceSha256 = SHA) {
+    const result = { ...payload(filename), sourceSha256 }
+    return stubClient({
+      open: vi.fn(async () => ({
+        ...openedSource(filename),
+        sourceSha256,
+        suggestedMapping: result.mapping,
+      })),
+      analyse: vi.fn(async () => ({ payload: result, fromCache: true })),
+    })
+  }
+
+  it('gives the owner the exact cached fallback object before its install is dispatched', async () => {
+    const client = analyzingClient('sample-a-tour.csv')
+    const queued: ((current: Dataset[]) => Dataset[])[] = []
+    const { deps } = loopDeps(client, {
+      signedIn: true,
+      setDatasets: (update) => {
+        expect(typeof update).toBe('function')
+        queued.push(update as (current: Dataset[]) => Dataset[])
+      },
+    })
+    let owned: Dataset | undefined
+    const acceptInstall = vi.fn((installed: Dataset) => {
+      expect(queued).toHaveLength(0)
+      owned = installed
+      return true
+    })
+
+    await openFilesFor(deps, [new File(['data'], 'sample-a-tour.csv')], {
+      localOnly: true,
+      acceptInstall,
+    })
+
+    expect(acceptInstall).toHaveBeenCalledOnce()
+    expect(queued).toHaveLength(1)
+    expect(queued[0]?.([])[0]).toBe(owned)
+    expect(owned?.filename).toBe('sample-a-tour.csv')
+    expect(owned?.fromCache).toBe(true)
+    expect(deps.syncToCloud).not.toHaveBeenCalled()
+  })
+
+  it.each([false, true])(
+    'drops an exited tour without disturbing a surviving source: sibling=%s',
+    async (sibling) => {
+      const client = analyzingClient('sample-a-tour.csv')
+      const { deps, datasetsBox, statuses } = loopDeps(client, { signedIn: true })
+      const kept = dataset('sample-a.csv')
+      deps.datasetsRef.current = sibling ? [kept] : []
+
+      await openFilesFor(deps, [new File(['data'], 'sample-a-tour.csv')], {
+        localOnly: true,
+        acceptInstall: () => false,
+      })
+
+      expect(datasetsBox.current).toEqual([])
+      expect(deps.setActiveName).not.toHaveBeenCalled()
+      expect(deps.syncToCloud).not.toHaveBeenCalled()
+      expect(statuses.current.analysis).toEqual({ kind: 'ready', fromCache: true })
+      expect(client.release).not.toHaveBeenCalled()
+      expect(deps.sourceFiles.current.has(SHA)).toBe(true)
+    },
+  )
+
+  it('preserves a shared source whose kept dataset install has not committed yet', async () => {
+    const keptClient = analyzingClient('sample-a.csv')
+    const queued: ((current: Dataset[]) => Dataset[])[] = []
+    const { deps } = loopDeps(keptClient, {
+      setDatasets: (update) => queued.push(update as (current: Dataset[]) => Dataset[]),
+    })
+    await openFilesFor(deps, [new File(['same bytes'], 'sample-a.csv')], { localOnly: true })
+    expect(deps.datasetsRef.current).toEqual([])
+    expect(queued).toHaveLength(1)
+
+    const replayClient = analyzingClient('sample-a-tour.csv')
+    deps.getAnalysisClient = () => replayClient
+    await openFilesFor(deps, [new File(['same bytes'], 'sample-a-tour.csv')], {
+      localOnly: true,
+      acceptInstall: () => false,
+    })
+
+    expect(queued).toHaveLength(1)
+    expect(queued[0]?.([])[0]?.filename).toBe('sample-a.csv')
+    expect(replayClient.release).not.toHaveBeenCalled()
+    expect(await deps.sourceFiles.current.get(SHA)?.text()).toBe('same bytes')
+  })
+
+  describe('accepted pending tour cleanup', () => {
+    function queuedLoop(client: AnalysisClient) {
+      const queued: ((current: Dataset[]) => Dataset[])[] = []
+      const result = loopDeps(client, {
+        setDatasets: (update) => queued.push(update as (current: Dataset[]) => Dataset[]),
+      })
+      return {
+        ...result,
+        tracker: new TourDatasets(),
+        commit: () => queued.reduce((current, update) => update(current), [] as Dataset[]),
+      }
+    }
+
+    it('preserves the shared recovery source when the kept sibling is still queued', async () => {
+      const keptClient = analyzingClient('sample-a.csv')
+      const { deps, tracker, commit } = queuedLoop(keptClient)
+      const keptRequest = tracker.open('a', [])
+      await openFilesFor(deps, [new File(['same bytes'], keptRequest.filename)], {
+        localOnly: true,
+        acceptInstall: keptRequest.acceptInstall,
+      })
+      keptRequest.settle()
+      tracker.finish('keep')
+
+      const replay = tracker.open('a', [])
+      const replayClient = analyzingClient(replay.filename)
+      deps.getAnalysisClient = () => replayClient
+      await openFilesFor(deps, [new File(['same bytes'], replay.filename)], {
+        localOnly: true,
+        acceptInstall: replay.acceptInstall,
+      })
+      replay.settle()
+      tracker.discardPending()
+      tracker.close([], [], (owned) => closeTourDatasetFor(deps, owned))
+      tracker.finish('skip')
+
+      expect(commit().map((installed) => installed.filename)).toEqual(['sample-a.csv'])
+      expect(await deps.sourceFiles.current.get(SHA)?.text()).toBe('same bytes')
+      expect(replayClient.release).not.toHaveBeenCalled()
+      expect(deps.closedSources.current.size).toBe(0)
+    })
+
+    it('removes the owned object while preserving a newer same-name user install queued before cleanup', async () => {
+      const demoClient = analyzingClient('sample-a.csv')
+      const { deps, tracker, commit } = queuedLoop(demoClient)
+      const demo = tracker.open('a', [])
+      await openFilesFor(deps, [new File(['demo'], demo.filename)], {
+        localOnly: true,
+        acceptInstall: demo.acceptInstall,
+      })
+      demo.settle()
+
+      // A user import started before the tour may finish after its sample.
+      const userClient = analyzingClient('sample-a.csv', 'b'.repeat(64))
+      deps.getAnalysisClient = () => userClient
+      await openFilesFor(deps, [new File(['user'], 'sample-a.csv')])
+      const user = commit()[0]
+      expect(user).toBeDefined()
+      const activeWrites = vi.mocked(deps.setActiveName).mock.calls.length
+      const selectionWrites = vi.mocked(deps.setSelection).mock.calls.length
+      const viewportWrites = vi.mocked(deps.setViewport).mock.calls.length
+      tracker.discardPending()
+      tracker.close([], [], (owned) => closeTourDatasetFor(deps, owned))
+      tracker.finish('skip')
+
+      expect(commit()).toEqual([user])
+      expect(deps.setActiveName).toHaveBeenCalledTimes(activeWrites)
+      expect(deps.setSelection).toHaveBeenCalledTimes(selectionWrites)
+      expect(deps.setViewport).toHaveBeenCalledTimes(viewportWrites)
+      expect(deps.closedSources.current.size).toBe(0)
+      expect(await deps.sourceFiles.current.get('b'.repeat(64))?.text()).toBe('user')
+    })
+
+    it('does not cancel a pre-tour user import that finishes after owned cleanup', async () => {
+      const userResult = { ...payload('sample-a.csv'), sourceSha256: 'b'.repeat(64) }
+      let finishUser: ((result: { payload: AnalysisPayload; fromCache: boolean }) => void) | undefined
+      let analysisStarted: (() => void) | undefined
+      const started = new Promise<void>((resolve) => {
+        analysisStarted = resolve
+      })
+      const userClient = stubClient({
+        open: vi.fn(async () => ({
+          ...openedSource('sample-a.csv'),
+          sourceSha256: userResult.sourceSha256,
+          suggestedMapping: userResult.mapping,
+        })),
+        analyse: vi.fn(
+          () =>
+            new Promise<{ payload: AnalysisPayload; fromCache: boolean }>((resolve) => {
+              finishUser = resolve
+              analysisStarted?.()
+            }),
+        ),
+      })
+      const { deps, tracker, commit } = queuedLoop(userClient)
+      const userOpening = openFilesFor(deps, [new File(['user'], 'sample-a.csv')])
+      await started
+
+      const demo = tracker.open('a', [])
+      const demoClient = analyzingClient(demo.filename)
+      deps.getAnalysisClient = () => demoClient
+      await openFilesFor(deps, [new File(['demo'], demo.filename)], {
+        localOnly: true,
+        acceptInstall: demo.acceptInstall,
+      })
+      demo.settle()
+      tracker.discardPending()
+      tracker.close([], [], (owned) => closeTourDatasetFor(deps, owned))
+      tracker.finish('skip')
+      const markerAfterClose = deps.closedSources.current.has('sample-a.csv')
+      finishUser?.({ payload: userResult, fromCache: false })
+      await userOpening
+
+      expect(markerAfterClose).toBe(false)
+      expect(commit()).toHaveLength(1)
+      expect(commit()[0]?.fromCache).toBe(false)
+      expect(userClient.release).not.toHaveBeenCalled()
+      expect(await deps.sourceFiles.current.get(userResult.sourceSha256)?.text()).toBe('user')
+    })
+  })
+
+  it('keeps the ordinary signed-in file path and cloud sync unchanged', async () => {
+    const client = analyzingClient('run-a.csv')
+    const { deps, datasetsBox } = loopDeps(client, { signedIn: true })
+    await openFilesFor(deps, [new File(['data'], 'run-a.csv')])
+    expect(datasetsBox.current).toHaveLength(1)
+    expect(deps.setActiveName).toHaveBeenCalledWith('run-a')
+    expect(deps.syncToCloud).toHaveBeenCalledWith(datasetsBox.current[0])
+    expect(client.analyse).toHaveBeenCalledOnce()
   })
 })
 

@@ -41,8 +41,9 @@
 import { ApiError } from '@aat/shared'
 import { and, eq, inArray, isNotNull, isNull, lte, or, sql } from 'drizzle-orm'
 import { type Database, rowsAffected } from '../db/client.ts'
-import { cloudObjects, quotaReservations, quotaUsage, runs } from '../db/schema.ts'
+import { accountDeletions, cloudObjects, quotaReservations, quotaUsage, runs } from '../db/schema.ts'
 import { newId } from '../lib/ids.ts'
+import { accountAcceptsUploads, sweepDeletedAccountObjectKeys } from './account-deletion.ts'
 
 /*
  * Claim-correlated settlement.
@@ -130,17 +131,44 @@ export async function reserveQuota(
     throw new ApiError('QUOTA_EXCEEDED', { details: { reason: 'invalid_declared_size' } })
   }
 
-  const result = await db
-    .update(quotaUsage)
-    .set({ bytesReserved: sql`${quotaUsage.bytesReserved} + ${bytes}`, updatedAt: now })
-    .where(
-      and(
-        eq(quotaUsage.userId, userId),
-        sql`${quotaUsage.bytesUsed} + ${quotaUsage.bytesReserved} + ${bytes} <= ${quotaUsage.bytesLimit}`,
-      ),
-    )
+  const id = newId()
+  const capacity = and(
+    eq(quotaUsage.userId, userId),
+    accountAcceptsUploads(userId),
+    sql`${quotaUsage.bytesUsed} + ${quotaUsage.bytesReserved} + ${bytes} <= ${quotaUsage.bytesLimit}`,
+  )
+  // Admission and its durable key commit together. Deletion cannot capture the account between
+  // a quota increment and recording which R2 key that increment admitted.
+  const [result] = await db.batch([
+    db.insert(quotaReservations).select(
+      db
+        .select({
+          id: sql<string>`${id}`.as('id'),
+          userId: quotaUsage.userId,
+          bytes: sql<number>`${bytes}`.as('bytes'),
+          purpose: sql<string>`${purpose}`.as('purpose'),
+          r2Key: sql<string>`${r2Key}`.as('r2_key'),
+          status: sql<string>`'pending'`.as('status'),
+          claimToken: sql<string | null>`NULL`.as('claim_token'),
+          createdAt: sql<Date>`${Math.floor(now.getTime() / 1_000)}`.as('created_at'),
+          expiresAt: sql<Date>`${Math.floor(now.getTime() / 1_000) + ttlSeconds}`.as('expires_at'),
+        })
+        .from(quotaUsage)
+        .where(capacity),
+    ),
+    db
+      .update(quotaUsage)
+      .set({ bytesReserved: sql`${quotaUsage.bytesReserved} + ${bytes}`, updatedAt: now })
+      .where(and(capacity, sql`EXISTS (SELECT 1 FROM quota_reservations WHERE id = ${id})`)),
+  ])
 
   if (rowsAffected(result) !== 1) {
+    const [deleting] = await db
+      .select({ userId: accountDeletions.userId })
+      .from(accountDeletions)
+      .where(eq(accountDeletions.userId, userId))
+      .limit(1)
+    if (deleting) throw new ApiError('ACCOUNT_DELETION_PENDING')
     const state = await getQuotaState(db, userId)
     throw new ApiError('QUOTA_EXCEEDED', {
       details: state
@@ -148,18 +176,6 @@ export async function reserveQuota(
         : { reason: 'no_quota_row' },
     })
   }
-
-  const id = newId()
-  await db.insert(quotaReservations).values({
-    id,
-    userId,
-    bytes,
-    purpose,
-    r2Key,
-    status: 'pending',
-    createdAt: now,
-    expiresAt: new Date(now.getTime() + ttlSeconds * 1000),
-  })
 
   return { id, bytes, purpose, r2Key }
 }
@@ -187,7 +203,13 @@ export async function finaliseReservation(
     db
       .update(quotaReservations)
       .set({ status: 'finalised', claimToken: token })
-      .where(and(eq(quotaReservations.id, reservation.id), eq(quotaReservations.status, 'pending'))),
+      .where(
+        and(
+          eq(quotaReservations.id, reservation.id),
+          eq(quotaReservations.status, 'pending'),
+          accountAcceptsUploads(userId),
+        ),
+      ),
     // Both ledger writes are correlated to the claim: a sweeper's or deleter's winning claim
     // already released `bytesReserved`, and charging usage for bytes this caller will now roll
     // back would charge for storage that does not exist.
@@ -375,10 +397,12 @@ export async function commitUploadedObject(
 
   await db.delete(cloudObjects).where(eq(cloudObjects.id, object.id))
   await bucket.delete(object.r2Key)
+  // Deletion can close admission between the liveness read and the finalisation batch. Always
+  // release the hold on a failed commit, including that case, rather than waiting for expiry.
+  await releaseReservation(db, reservation, object.ownerUserId, now)
   if (runGone) {
     // The reservation may already have been released by the deleter — releasing again is a
     // no-op on a settled row — so this is safe from either side of that race.
-    await releaseReservation(db, reservation, object.ownerUserId, now)
     throw new ApiError('RESOURCE_NOT_FOUND', { details: { reason: 'run_deleted_mid_upload' } })
   }
   throw new ApiError('INTERNAL', { details: { reason: 'reservation_settled_early' } })
@@ -515,11 +539,18 @@ export async function sweepStaleReservations(
   bucket: R2Bucket,
   now: Date = new Date(),
   limit = 20,
+  userId?: string,
 ): Promise<SweepResult> {
   const stale = await db
     .select()
     .from(quotaReservations)
-    .where(and(eq(quotaReservations.status, 'pending'), lte(quotaReservations.expiresAt, now)))
+    .where(
+      and(
+        eq(quotaReservations.status, 'pending'),
+        lte(quotaReservations.expiresAt, now),
+        userId === undefined ? undefined : eq(quotaReservations.userId, userId),
+      ),
+    )
     .limit(limit)
 
   let reservationsReleased = 0
@@ -571,6 +602,7 @@ export async function sweepStaleReservations(
     .where(
       and(
         isNull(cloudObjects.deletedAt),
+        userId === undefined ? undefined : eq(cloudObjects.ownerUserId, userId),
         or(
           isNotNull(cloudObjects.settledClaim),
           inArray(quotaReservations.status, ['released', 'settled']),
@@ -594,6 +626,7 @@ export async function sweepStaleReservations(
     deadRowsReclaimed++
   }
 
+  orphanedObjectsDeleted += await sweepDeletedAccountObjectKeys(db, bucket, limit)
   return { reservationsReleased, orphanedObjectsDeleted, deadRowsReclaimed }
 }
 

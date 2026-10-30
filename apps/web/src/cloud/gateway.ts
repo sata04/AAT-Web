@@ -67,7 +67,7 @@ export type CloudOutcome<T> =
     }
 
 /** Codes worth offering a retry for; the rest need a different action, not another try. */
-const RETRYABLE: ReadonlySet<string> = new Set(['RATE_LIMITED', 'INTERNAL'])
+const RETRYABLE: ReadonlySet<string> = new Set(['RATE_LIMITED', 'INTERNAL', 'ACCOUNT_DELETION_PENDING'])
 
 /**
  * Read the taxonomy error out of a failure body.
@@ -694,7 +694,7 @@ export function updateAdminUser(userId: string, patch: AdminUserPatch): Promise<
   return request<{ ok: true }>(`/admin/users/${id(userId)}`, { method: 'PATCH', ...jsonBody(patch) })
 }
 
-/** DELETE /api/v1/admin/users/:userId. Deletes the R2 objects before the row. */
+/** DELETE /api/v1/admin/users/:userId. Active uploads return retryable ACCOUNT_DELETION_PENDING. */
 export function deleteAdminUser(userId: string): Promise<CloudOutcome<{ ok: true; objectsDeleted: number }>> {
   return request<{ ok: true; objectsDeleted: number }>(`/admin/users/${id(userId)}`, { method: 'DELETE' })
 }

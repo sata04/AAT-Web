@@ -7,6 +7,7 @@ describe('error taxonomy', () => {
     const expected: ErrorCode[] = [
       'AUTH_REQUIRED',
       'FORBIDDEN',
+      'ACCOUNT_DELETION_PENDING',
       'INVITE_INVALID',
       'INVITE_EXPIRED',
       'INVITE_USED',

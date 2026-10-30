@@ -646,6 +646,34 @@ export const quotaReservations = sqliteTable(
 )
 
 /**
+ * Irreversible upload-admission barrier, retained after the account's cascade. This is coordination
+ * state, independent of the member's role or ban status. A failed deletion retries the same marker.
+ */
+export const accountDeletions = sqliteTable('account_deletions', {
+  userId: text('user_id').primaryKey(),
+  startedAt: integer('started_at', { mode: 'timestamp' }).notNull(),
+})
+
+/**
+ * Physical cleanup ledger, deliberately without a user FK. An admitted PUT may land after its
+ * reservation expired and its user cascaded, so even a successful/empty R2 delete cannot retire
+ * the key. Keys contain generated identifiers only; no measurements or credentials live here.
+ * `checkSequence` rotates bounded recovery passes without relying on wall-clock resolution.
+ */
+export const deletedAccountObjectKeys = sqliteTable(
+  'deleted_account_object_keys',
+  {
+    r2Key: text('r2_key').primaryKey(),
+    userId: text('user_id').notNull(),
+    checkSequence: integer('check_sequence').notNull().default(0),
+  },
+  (table) => [
+    index('deleted_account_object_keys_check_idx').on(table.checkSequence, table.r2Key),
+    index('deleted_account_object_keys_user_idx').on(table.userId, table.r2Key),
+  ],
+)
+
+/**
  * Append-only record of security-relevant actions.
  *
  * `details` is JSON and is written by code that must never put a credential in it: invitation rows

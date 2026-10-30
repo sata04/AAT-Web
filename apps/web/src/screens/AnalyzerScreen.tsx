@@ -56,7 +56,8 @@ import {
   transition,
   type ViewMode,
 } from '../graph/view-mode.ts'
-import { type DemoDataset, demoCsvFile, demoFilename } from '../onboarding/demo-data.ts'
+import { demoCsvFile } from '../onboarding/demo-data.ts'
+import { TourDatasets } from '../onboarding/tour-datasets.ts'
 import { type TourDriver, type TourSnapshot, type TourView, tourViewOf } from '../onboarding/tour-driver.ts'
 import { openPosterUrlRegistry, type PosterEntry, releasePosterUrls } from '../poster/entry.ts'
 import type { PosterContext } from '../poster/requests.ts'
@@ -334,58 +335,10 @@ export function AnalyzerScreen(): React.JSX.Element {
       geometry,
       gestureLayer,
     }
-    // Reconcile tour installs at the commit boundary — the only place that
-    // observes every datasets array. `openDemo` cannot adopt inside its own
-    // continuation: `loop.openFiles` resolves before this commit lands, so a
-    // same-tick read would miss the install entirely.
-    const tracker = tourOwnedRef.current
-    for (const [filename, pending] of tracker.pending) {
-      const installed = datasets.find((dataset) => dataset.filename === filename)
-      if (installed !== undefined && !tracker.reconciled.has(installed)) {
-        // Whatever object is visible for this name belongs to the newest
-        // request: a restart mid-open re-picks the filename, and React may
-        // batch two installs into one commit — per-object bookkeeping would
-        // either misattribute or orphan the survivor.
-        tracker.reconciled.add(installed)
-        tracker.owned.set(pending.latest.which, installed)
-        if (pending.latest.epoch !== tracker.epoch || !tracker.keep.has(pending.latest.which)) {
-          tracker.closing.add(installed)
-          loop.closeDataset(installed)
-        }
-      }
-      if (pending.inFlight === 0) {
-        // Settle runs after the install dispatched, so once every open has
-        // resolved whatever is committed now is all that is ever coming —
-        // an open dropped into `closedSources` produced nothing to wait for.
-        tracker.pending.delete(filename)
-      }
-    }
+    tourOwnedRef.current.reconcile(datasets)
   })
 
-  // Which datasets this run installed, role → filename it landed under; which
-  // opens are still in flight; and the epoch a stale open checks before it
-  // stays. In a ref because `loop` is recreated every commit — `useMemo`
-  // state tied to it would reset each render.
-  const tourOwnedRef = useRef({
-    // The installed Dataset objects — identity, not filename: a researcher who
-    // closes a kept demo and reopens their own file under the same name gets a
-    // different object, which cleanup therefore never matches.
-    owned: new Map<DemoDataset, Dataset>(),
-    keep: new Set<DemoDataset>(),
-    // In-flight opens per chosen filename: how many are still resolving, and
-    // the newest request — whose epoch and role the visible install obeys.
-    pending: new Map<string, { inFlight: number; latest: { which: DemoDataset; epoch: number } }>(),
-    // Installs already matched to a request — the same dataset object still
-    // visible on the next commit must not consume another open.
-    reconciled: new WeakSet<Dataset>(),
-    // Demo datasets the tour has closed but whose removal has not committed
-    // yet. `snapshot` is a commit-boundary read, so a scene that closes and
-    // re-opens in one tick — stepping back into `compare` does exactly that —
-    // would otherwise read its own outgoing dataset as a name collision and
-    // install the sample under the fallback name meant for a researcher's file.
-    closing: new WeakSet<Dataset>(),
-    epoch: 0,
-  })
+  const tourOwnedRef = useRef(new TourDatasets())
 
   // What the workspace looked like when the stage opened — a skipped replay
   // restores this, so driving a researcher's session gives the view back.
@@ -397,71 +350,34 @@ export function AnalyzerScreen(): React.JSX.Element {
   }, [tourOpen])
 
   const tourDriver = useMemo<TourDriver>(() => {
-    // Datasets this run opened, by role → the filename they landed under.
-    // Ownership is recorded at install: a researcher's file with a colliding
-    // name is never mistaken for the demo, and `discardPending` bumps the
-    // epoch so an open still in flight when the stage exits self-closes the
-    // moment it installs instead of appearing on a pristine workspace.
-    // `tracker` lives in a ref, not this memo's closure: `loop` is a new
-    // object every commit, so maps captured here would be silently discarded
-    // on every render — and cleanup would iterate an empty `owned`.
+    // Ownership survives renders, and is recorded before the install dispatch.
     const tracker = tourOwnedRef.current
     const snapshot = tourSnapshotRef
     return {
       snapshot: () => snapshot.current,
       openFiles: (files) => loop.openFiles(files),
       openDemo: async (which) => {
-        // Only a still-present owned object exempts its name — a stale entry
-        // (user closed the demo, reused the filename) must not hide the
-        // researcher's current dataset from `taken`.
-        const mine = new Set(
-          [...tracker.owned.values()]
-            .filter((dataset) => snapshot.current.datasets.includes(dataset))
-            .map((dataset) => dataset.name),
-        )
-        const taken = new Set(
-          snapshot.current.datasets
-            .filter((dataset) => !mine.has(dataset.name) && !tracker.closing.has(dataset))
-            .map((dataset) => dataset.name),
-        )
-        const filename = demoFilename(which, taken)
-        tracker.keep.add(which)
-        // Adoption happens in the snapshot-sync effect — the commit boundary —
-        // because `openFiles` resolves before the install commits.
-        const record = tracker.pending.get(filename) ?? {
-          inFlight: 0,
-          latest: { which, epoch: tracker.epoch },
-        }
-        record.inFlight += 1
-        record.latest = { which, epoch: tracker.epoch }
-        tracker.pending.set(filename, record)
+        const request = tracker.open(which, snapshot.current.datasets)
+        const { filename } = request
         try {
           // Local-only: the tour's own copy promises nothing leaves the
           // browser, and a skipped tour must never leave cloud revisions or
           // poster jobs behind for a signed-in researcher.
-          await loop.openFiles([demoCsvFile(which, filename)], { localOnly: true })
+          await loop.openFiles([demoCsvFile(which, filename)], {
+            localOnly: true,
+            acceptInstall: request.acceptInstall,
+          })
         } finally {
-          record.inFlight -= 1
+          request.settle()
         }
         return filename
       },
       closeTourDatasets: (except = []) => {
-        tracker.keep.clear()
-        for (const which of except) tracker.keep.add(which)
-        for (const [which, dataset] of tracker.owned) {
-          if (tracker.keep.has(which)) continue
-          if (snapshot.current.datasets.includes(dataset)) {
-            tracker.closing.add(dataset)
-            loop.closeDataset(dataset)
-          }
-          tracker.owned.delete(which)
-        }
+        tracker.close(except, snapshot.current.datasets, loop.closeTourDataset)
       },
-      discardPending: () => {
-        tracker.epoch += 1
-      },
+      discardPending: () => tracker.discardPending(),
       activateDemo: (which) => {
-        const dataset = tracker.owned.get(which)
+        const dataset = tracker.active(which)
         if (dataset === undefined || !snapshot.current.datasets.includes(dataset)) return
         setActiveName(dataset.name)
         setSelection(null)
@@ -517,16 +433,8 @@ export function AnalyzerScreen(): React.JSX.Element {
         markOnboarding('rangeHintSeen')
         markOnboarding('compareHintSeen')
       }
-      // The run is over: whatever it left is now the researcher's own data.
-      // Forget ownership — a replay must see kept demos in `taken` (and pick
-      // fallback names), never as objects it is allowed to close. A skipped
-      // run keeps `pending` alive until settle so an open still in flight
-      // self-closes on install; a kept run drops it — the landing file is
-      // exactly what the user asked for.
-      const tracker = tourOwnedRef.current
-      tracker.owned.clear()
-      tracker.keep.clear()
-      if (kind === 'keep') tracker.pending.clear()
+      // Samples left by this run now belong to the researcher.
+      tourOwnedRef.current.finish(kind)
       markOnboarding('welcomeSeen')
       setTourOpen(false)
     },

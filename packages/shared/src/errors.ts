@@ -13,6 +13,7 @@
 export const ERROR_CODES = [
   'AUTH_REQUIRED',
   'FORBIDDEN',
+  'ACCOUNT_DELETION_PENDING',
   'INVITE_INVALID',
   'INVITE_EXPIRED',
   'INVITE_USED',
@@ -50,6 +51,13 @@ const ERROR_SPECS: Record<ErrorCode, ErrorSpec> = {
     message: {
       ja: 'この操作を行う権限がありません。',
       en: 'You do not have permission to perform this action.',
+    },
+  },
+  ACCOUNT_DELETION_PENDING: {
+    httpStatus: 409,
+    message: {
+      ja: 'アップロードの終了を待っています。しばらくしてからアカウント削除を再試行してください。',
+      en: 'Waiting for uploads to finish. Retry account deletion shortly.',
     },
   },
   INVITE_INVALID: {
