@@ -10,6 +10,8 @@
  */
 
 import {
+  type AnalysisConfig,
+  analyseCsv,
   ColumnNotFoundError,
   calculateGQuality,
   calculateStatistics,
@@ -173,5 +175,126 @@ describe('column proposal', () => {
     expect(validateMapping({ ...MAPPING, useInner: false, useDrag: false })).toBe('NO_SENSOR_ENABLED')
     expect(validateMapping({ ...MAPPING, dragColumn: MAPPING.innerColumn })).toBe('SAME_COLUMN_FOR_BOTH')
     expect(validateMapping(MAPPING)).toBeNull()
+  })
+})
+
+describe('Python-reference edge cases through the full pipeline', () => {
+  function analyseExample(text: string, overrides: Partial<AnalysisConfig> = {}) {
+    const config = toEngineConfig(
+      {
+        ...DEFAULT_ANALYSIS_CONFIG,
+        sampling_rate: 1,
+        gravity_constant: 1,
+        acceleration_threshold: 5,
+        end_gravity_level: 8,
+        min_seconds_after_start: 0,
+        window_size: 2,
+        g_quality_start: 2,
+        g_quality_end: 2,
+        g_quality_step: 1,
+        invert_inner_acceleration: false,
+      },
+      { timeColumn: 't', innerColumn: 'a', dragColumn: '', useInner: true, useDrag: false },
+    )
+    return analyseCsv(new TextEncoder().encode(text), { ...config, ...overrides })
+  }
+
+  it.each([
+    ['quoted empty', 't,a\n0,1\n""\n2,1\n'],
+    ['NBSP', 't,a\n0,1\n\u00a0\n2,1\n'],
+    ['form feed', 't,a\n0,1\n\f\n2,1\n'],
+    ['vertical tab', 't,a\n0,1\n\v\n2,1\n'],
+    ['Unicode line separator', 't,a\n0,1\n\u2028\n2,1\n'],
+    ['tab-only TSV row', 't\ta\n0\t1\n\t\n2\t1\n'],
+    ['semicolon quoted empty', 't;a\n0;1\n""\n2;1\n'],
+    ['pipe quoted empty', 't|a\n0|1\n""\n2|1\n'],
+  ])('keeps %s aligned and excludes both incomplete windows', async (_label, text) => {
+    const result = await analyseExample(text)
+    expect(Array.from(result.loaded.inner.gravity)).toEqual([1, Number.NaN, 1])
+    expect(Array.from(result.loaded.inner.time)).toEqual([0, Number.NaN, 2])
+    expect(result.statistics.inner).toEqual({ mean: null, startTime: null, std: null })
+    expect(result.gQuality.rows).toEqual([])
+  })
+
+  it('keeps indexed comma columns aligned across a short final record', async () => {
+    const result = await analyseExample('t,a,n|o|t|e\nr0,0,1,p|q|r|s\nr1,1,1,p|q|r|s\n""\n')
+    expect(Array.from(result.loaded.inner.gravity)).toEqual([1, 1, Number.NaN])
+    expect(result.statistics.inner).toEqual({ mean: 1, startTime: 0, std: 0 })
+  })
+
+  it('propagates the declared error when all complete-window deviations compute as NaN', async () => {
+    const text = 't,a\n0,1e308\n1,1e308\n2,-1e308\n3,-1e308\n4,1e308\n5,1e308\n6,-1e308\n7,-1e308\n'
+    await expect(analyseExample(text, { windowSize: 8, minSecondsAfterStart: 7 })).rejects.toMatchObject({
+      name: 'DataProcessingError',
+      code: 'STATISTICS_ALL_NAN',
+      message: 'All-NaN slice encountered',
+    })
+  })
+
+  it.each([
+    ['whitespace-only physical lines', ' \t\nt,a\n0,1\n   \n1,1\n'],
+    ['mixed record separators', 't,a\r\n0,1\n1,1\r'],
+    ['consistent implicit index', 't,a\nrow0,0,1\nrow1,1,1\n'],
+    ['ambiguous pipe metadata', 't,a,n|o|t|e\n0,1,p|q|r|s\n1,1,p|q|r|s\n'],
+    ['zero-padded integers', 't,a\n0,0000000000000000001\n1,1\n'],
+  ])('retains the reference two-sample statistics for %s', async (_label, text) => {
+    const result = await analyseExample(text)
+    expect(Array.from(result.loaded.inner.gravity)).toEqual([1, 1])
+    expect(result.statistics.inner).toEqual({ mean: 1, startTime: 0, std: 0 })
+    expect(result.gQuality.rows).toHaveLength(1)
+  })
+
+  it('loads a boolean column with a missing sample as 1, NaN, 0', async () => {
+    const result = await analyseExample('t,a\n0,True\n1,NA\n2,False\n')
+    expect(Array.from(result.loaded.inner.gravity)).toEqual([1, Number.NaN, 0])
+    expect(result.statistics.inner).toEqual({ mean: null, startTime: null, std: null })
+    expect(result.warnings.some((entry) => entry.code === 'CELLS_COERCED')).toBe(false)
+  })
+
+  it('truncates the NUL-containing field while preserving the next sample', async () => {
+    const result = await analyseExample('t,a\n0,2\0junk\n1,2\n')
+    expect(Array.from(result.loaded.inner.gravity)).toEqual([2, 2])
+    expect(result.statistics.inner).toEqual({ mean: 2, startTime: 0, std: 0 })
+    expect(result.warnings.some((entry) => entry.code === 'CELLS_COERCED')).toBe(false)
+  })
+
+  it('reports a complete window with infinite standard deviation rather than no statistics', async () => {
+    const result = await analyseExample('t,a\n0,1e200\n1,-1e200\n', { minSecondsAfterStart: 1 })
+    expect(result.statistics.inner).toEqual({ mean: 1e200, startTime: 0, std: Number.POSITIVE_INFINITY })
+    expect(result.gQuality.rows).toEqual([
+      {
+        windowSize: 2,
+        innerMean: 1e200,
+        innerStartTime: 0,
+        innerStd: Number.POSITIVE_INFINITY,
+        dragMean: null,
+        dragStartTime: null,
+        dragStd: null,
+      },
+    ])
+  })
+
+  it('warns when trimming leaves fewer samples than the primary window needs', async () => {
+    const result = await analyseExample('t,a\n0,1\n1,9\n2,1\n3,1\n', { windowSize: 3 })
+    expect(result.loaded.inner.gravity).toHaveLength(4)
+    expect(result.filtered.inner.gravity).toHaveLength(2)
+    expect(result.statistics.inner).toEqual({ mean: null, startTime: null, std: null })
+    expect(result.gQuality.rows).toHaveLength(1)
+    expect(result.warnings).toEqual([
+      expect.objectContaining({
+        code: 'DATA_SHORTER_THAN_WINDOW',
+        details: { sensor: 'inner', samples: 2, required: 3, stage: 'retained' },
+      }),
+    ])
+  })
+
+  it('explains an invalid sync origin while retaining the reference NaN timestamps', async () => {
+    const result = await analyseExample('t,a\nNA,6\n1,6\n2,6\n')
+    expect(Array.from(result.loaded.inner.gravity)).toEqual([Number.NaN, 6, 6])
+    expect(result.loaded.inner.time.every(Number.isNaN)).toBe(true)
+    expect(result.statistics.inner).toEqual({ mean: 6, startTime: Number.NaN, std: 0 })
+    const warning = result.warnings.find((entry) => entry.code === 'SYNC_POINT_NOT_FOUND')
+    expect(warning?.message).toContain('sync origin is invalid')
+    expect(warning?.message).toContain('every adjusted timestamp for this sensor is NaN')
   })
 })

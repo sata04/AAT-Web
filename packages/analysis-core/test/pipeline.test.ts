@@ -285,6 +285,28 @@ describe('filterData', () => {
 })
 
 describe('analysisConfigFromRecord', () => {
+  it('preserves numeric zero for sensor enable and inversion flags', () => {
+    const mapped = analysisConfigFromRecord({
+      use_inner_acceleration: 0,
+      use_drag_acceleration: -0,
+      invert_inner_acceleration: 0,
+    })
+    expect(mapped.useInnerAcceleration).toBe(false)
+    expect(mapped.useDragAcceleration).toBe(false)
+    expect(mapped.invertInnerAcceleration).toBe(false)
+  })
+
+  it.each([1, -2, 0.5, Number.NaN])('uses Python bool(%s) for numeric flags', (value) => {
+    const mapped = analysisConfigFromRecord({
+      use_inner_acceleration: value,
+      use_drag_acceleration: value,
+      invert_inner_acceleration: value,
+    })
+    expect(mapped.useInnerAcceleration).toBe(true)
+    expect(mapped.useDragAcceleration).toBe(true)
+    expect(mapped.invertInnerAcceleration).toBe(true)
+  })
+
   it('reads the desktop application’s snake_case configuration', () => {
     const mapped = analysisConfigFromRecord({
       time_column: 'Time (s)',

@@ -37,6 +37,8 @@ export type AnalysisErrorCode =
   | 'GRAVITY_CONSTANT_ZERO'
   /** Neither sensor produced a series to filter. */
   | 'NO_SENSOR_DATA'
+  /** Complete windows exist, but every standard deviation computed as NaN. */
+  | 'STATISTICS_ALL_NAN'
   /** A window size or sampling rate that cannot describe a real window. */
   | 'ANALYSIS_PARAMETER_INVALID'
   /** The exact-computation budget would be exceeded (deliberate divergence). */
@@ -135,6 +137,7 @@ export class DataProcessingError extends AnalysisError {
       | 'TIME_COLUMN_INVALID'
       | 'GRAVITY_CONSTANT_ZERO'
       | 'NO_SENSOR_DATA'
+      | 'STATISTICS_ALL_NAN'
     >,
     message: string,
     details: AnalysisErrorDetails = {},
