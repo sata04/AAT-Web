@@ -429,6 +429,12 @@ export function defaultViewportFor(
 ): { min: number; max: number } {
   if (model.xRange !== null) return { min: model.xRange[0], max: model.xRange[1] }
   if (dataRange !== null && dataRange.max > dataRange.min) return { min: dataRange.min, max: dataRange.max }
+  if (dataRange !== null && dataRange.max === dataRange.min && Number.isFinite(dataRange.min)) {
+    // Both x axes use seconds. A half-second minimum gives a singleton useful
+    // context near zero; 10% padding scales that context for longer windows.
+    const pad = Math.max(Math.abs(dataRange.min) * 0.1, 0.5)
+    return { min: dataRange.min - pad, max: dataRange.max + pad }
+  }
   return { min: 0, max: defaultDuration }
 }
 

@@ -11,6 +11,9 @@
  *    displaced one back once the slot frees.
  */
 
+import { readFileSync } from 'node:fs'
+import { dirname, resolve as resolvePath } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { DEFAULT_ANALYSIS_CONFIG } from '@aat/shared'
 import { screen } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
@@ -153,6 +156,76 @@ describe('topmost dialog', () => {
     await user.keyboard('{Escape}')
     expect(closed).toEqual(['upper', 'lower'])
     expect(screen.queryByRole('dialog')).toBeNull()
+  })
+})
+
+describe('sticky dialog footer', () => {
+  it.each([
+    [800, 24],
+    [641, 24],
+    [640, 16],
+    [375, 16],
+  ])('matches the dialog padding at viewport width %s', (width, padding) => {
+    renderComponent(
+      <Dialog title="Layout" onClose={() => {}} footer={<button type="button">Close</button>}>
+        <p>Content</p>
+      </Dialog>,
+    )
+    const sheet = document.createElement('style')
+    sheet.textContent = ['tokens', 'app', 'responsive']
+      .map((name) =>
+        readFileSync(
+          resolvePath(dirname(fileURLToPath(import.meta.url)), '../../src/styles', `${name}.css`),
+          'utf8',
+        ),
+      )
+      .join('\n')
+      .replace(/^@import.*$/gm, '')
+    document.head.append(sheet)
+    try {
+      // jsdom lacks viewport media evaluation and custom-property substitution.
+      // Activate the actual matching rules and resolve their inherited vars;
+      // jsdom then computes the real padding/margin/calc declarations.
+      const rules = Array.from(sheet.sheet?.cssRules ?? []).flatMap((rule) => {
+        if (rule.type === CSSRule.STYLE_RULE) return [rule as CSSStyleRule]
+        if (rule.type !== CSSRule.MEDIA_RULE) return []
+        const media = rule as CSSMediaRule
+        const maxWidth = media.conditionText.match(/^\(max-width: (\d+)px\)$/)?.[1]
+        return maxWidth !== undefined && width <= Number(maxWidth)
+          ? Array.from(media.cssRules).filter(
+              (child): child is CSSStyleRule => child.type === CSSRule.STYLE_RULE,
+            )
+          : []
+      })
+      const variables = new Map<string, string>()
+      const resolve = (value: string): string =>
+        value.replace(/var\((--[\w-]+)\)/g, (_match, name: string) => resolve(variables.get(name) ?? ''))
+      for (const selector of [':root', '.dialog', '.dialog__actions']) {
+        const matching = rules.filter((rule) => rule.selectorText === selector)
+        for (const rule of matching) {
+          for (const name of Array.from(rule.style)) {
+            if (name.startsWith('--')) variables.set(name, rule.style.getPropertyValue(name))
+          }
+        }
+        if (selector === ':root') continue
+        const element = document.querySelector<HTMLElement>(selector)
+        for (const rule of matching) {
+          for (const name of Array.from(rule.style)) {
+            if (!name.startsWith('--'))
+              element?.style.setProperty(name, resolve(rule.style.getPropertyValue(name)))
+          }
+        }
+      }
+      const dialog = getComputedStyle(screen.getByRole('dialog'))
+      const footer = getComputedStyle(document.querySelector('.dialog__actions') as HTMLElement)
+      expect(dialog.paddingLeft).toBe(`${padding}px`)
+      expect(footer.marginLeft).toBe(`${-padding}px`)
+      expect(footer.marginRight).toBe(`${-padding}px`)
+      expect(footer.marginBottom).toBe(`${-padding}px`)
+      expect(footer.paddingLeft).toBe(`${padding}px`)
+    } finally {
+      sheet.remove()
+    }
   })
 })
 

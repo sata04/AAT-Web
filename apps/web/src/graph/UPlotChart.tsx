@@ -16,10 +16,12 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
 import uPlot from 'uplot'
 import 'uplot/dist/uPlot.min.css'
-import { buildDisplayGrid, columnsForWidth, decimateToGrid } from './decimate.ts'
+import { buildDisplayGrid, columnsForWidth } from './decimate.ts'
 import type { ChartGeometry } from './geometry.ts'
+import { type PlotCanvas, plotCanvasFor, plotLegendEntries } from './plot-legend.ts'
 import type { PlotModel } from './plot-model.ts'
 import type { GraphPalette } from './theme.ts'
+import { clampViewport, dataForUPlot, finishDragZoom } from './uplot-adapter.ts'
 
 /** The visible x range, in data units. */
 export interface ChartViewport {
@@ -35,8 +37,8 @@ export interface UPlotChartProps {
   /** Full data extent, so a zoom-out cannot wander off into empty space. */
   bounds: ChartViewport
   onGeometryChange: (geometry: ChartGeometry | null) => void
-  /** Handed the drawing canvas so PNG export can read it. */
-  onCanvasChange: (canvas: HTMLCanvasElement | null) => void
+  /** Pixels plus the current title and visible legend for PNG export. */
+  onCanvasChange: (canvas: PlotCanvas | null) => void
   /**
    * Handed uPlot's `.u-over` element — the plot-area event layer — so the
    * selection overlay can listen there without shadowing zoom and pan.
@@ -52,21 +54,6 @@ export interface UPlotChartProps {
 }
 
 const WHEEL_ZOOM_FACTOR = 0.0015
-/** Never zoom in past this span; below it floating point stops being helpful. */
-const MIN_SPAN = 1e-6
-
-function clampViewport(viewport: ChartViewport, bounds: ChartViewport): ChartViewport {
-  const boundsSpan = Math.max(bounds.max - bounds.min, MIN_SPAN)
-  let span = Math.min(Math.max(viewport.max - viewport.min, MIN_SPAN), boundsSpan)
-  let min = viewport.min
-  if (min < bounds.min) min = bounds.min
-  if (min + span > bounds.max) min = bounds.max - span
-  if (min < bounds.min) {
-    min = bounds.min
-    span = boundsSpan
-  }
-  return { min, max: min + span }
-}
 
 export function UPlotChart(props: UPlotChartProps): React.JSX.Element {
   const {
@@ -84,6 +71,9 @@ export function UPlotChart(props: UPlotChartProps): React.JSX.Element {
   const rootRef = useRef<HTMLDivElement | null>(null)
   const plotRef = useRef<uPlot | null>(null)
   const [size, setSize] = useState<{ width: number; height: number }>({ width: 0, height: 0 })
+  const [hiddenTraceKeys, setHiddenTraceKeys] = useState<ReadonlySet<string>>(new Set())
+  const hiddenTraceKeysRef = useRef(hiddenTraceKeys)
+  hiddenTraceKeysRef.current = hiddenTraceKeys
 
   // Refs, not state: uPlot's `range` callbacks and the wheel handler run outside
   // React's render cycle and must see the current values, not a captured render.
@@ -153,9 +143,13 @@ export function UPlotChart(props: UPlotChartProps): React.JSX.Element {
       title: '',
       legend: { show: false },
       cursor: {
-        // uPlot's own drag-to-zoom is enabled only when the selection tool is
-        // not using the primary button; otherwise the two fight over the drag.
-        drag: { x: !primaryDragReserved, y: false, setScale: !primaryDragReserved },
+        // uPlot draws the rectangle; setSelect publishes the zoom to React,
+        // which owns the scale and regenerates data for the new viewport.
+        drag: { x: !primaryDragReserved, y: false, setScale: false },
+        bind: {
+          mousedown: (_self, _target, handler) => (event) =>
+            event.button === 0 && !event.shiftKey ? handler(event) : null,
+        },
         focus: { prox: 24 },
       },
       scales: {
@@ -222,6 +216,7 @@ export function UPlotChart(props: UPlotChartProps): React.JSX.Element {
         {},
         ...model.traces.map((trace) => ({
           label: trace.label,
+          show: !hiddenTraceKeysRef.current.has(trace.key),
           stroke: trace.colour,
           width: 1,
           scale: trace.axis,
@@ -252,6 +247,24 @@ export function UPlotChart(props: UPlotChartProps): React.JSX.Element {
             },
             setScale: publishGeometry,
             setSize: publishGeometry,
+            setSelect: (self: uPlot) => {
+              const event = self.cursor.event
+              if (primaryDragReserved || event?.type !== 'mouseup' || event.button !== 0 || event.shiftKey) {
+                return
+              }
+              finishDragZoom(self, boundsRef.current, onViewportChangeRef.current)
+            },
+            setSeries: (self: uPlot, _index: number | null, options: uPlot.Series) => {
+              // Cursor focus also fires setSeries, but does not hide a trace.
+              if (options.show === undefined) return
+              setHiddenTraceKeys(
+                new Set(
+                  model.traces
+                    .filter((_trace, index) => self.series[index + 1]?.show === false)
+                    .map((trace) => trace.key),
+                ),
+              )
+            },
           },
         },
       ],
@@ -260,7 +273,7 @@ export function UPlotChart(props: UPlotChartProps): React.JSX.Element {
     const initial: uPlot.AlignedData = [new Float64Array(0), ...model.traces.map(() => new Float64Array(0))]
     const plot = new uPlot(options, initial, root)
     plotRef.current = plot
-    onCanvasChange(plot.ctx.canvas)
+    onCanvasChange(plotCanvasFor(plot.ctx.canvas, model, hiddenTraceKeysRef.current))
     onGestureLayerChange(plot.over)
     publishGeometry()
 
@@ -282,6 +295,13 @@ export function UPlotChart(props: UPlotChartProps): React.JSX.Element {
     onGestureLayerChange,
   ])
 
+  // Visibility changes leave the uPlot instance intact, but its exported
+  // identification must still agree with the HTML legend and visible traces.
+  useEffect(() => {
+    const plot = plotRef.current
+    if (plot !== null) onCanvasChange(plotCanvasFor(plot.ctx.canvas, model, hiddenTraceKeys))
+  }, [model, hiddenTraceKeys, onCanvasChange])
+
   /**
    * Push decimated data for the current viewport.
    *
@@ -296,11 +316,7 @@ export function UPlotChart(props: UPlotChartProps): React.JSX.Element {
 
     const columns = columnsForWidth(plot.bbox.width / devicePixelRatio)
     const grid = buildDisplayGrid(viewport.min, viewport.max, columns)
-    const data: uPlot.AlignedData = [
-      grid.x,
-      ...model.traces.map((trace) => decimateToGrid(grid, trace.time, trace.values).y),
-    ]
-    plot.setData(data, false)
+    plot.setData(dataForUPlot(grid, model.traces), false)
     plot.setScale('x', { min: viewport.min, max: viewport.max })
     publishGeometry()
   }, [model, viewport, size.width, size.height, publishGeometry])
@@ -393,10 +409,31 @@ export function UPlotChart(props: UPlotChartProps): React.JSX.Element {
     }
   }, [model, palette, size.width, size.height, primaryDragReserved])
 
+  const legend = plotLegendEntries(model, hiddenTraceKeys)
+
   return (
-    <section className="plot-frame" ref={rootRef} aria-label={model.title}>
-      {model.emptyMessage !== null ? <p className="plot-frame__empty">{model.emptyMessage}</p> : null}
-      {props.children}
+    <section className="plot-frame" aria-label={model.title}>
+      <div className="plot-frame__heading">
+        <h2 className="plot-frame__title">{model.title}</h2>
+        {legend.length > 0 ? (
+          <ul className="plot-legend" aria-label="凡例">
+            {legend.map((entry) => (
+              <li className="plot-legend__entry" key={entry.key}>
+                <span
+                  className={`plot-legend__swatch plot-legend__swatch--${entry.kind}`}
+                  style={{ backgroundColor: entry.colour }}
+                  aria-hidden="true"
+                />
+                {entry.label}
+              </li>
+            ))}
+          </ul>
+        ) : null}
+      </div>
+      <div className="plot-frame__chart" ref={rootRef}>
+        {model.emptyMessage !== null ? <p className="plot-frame__empty">{model.emptyMessage}</p> : null}
+        {props.children}
+      </div>
     </section>
   )
 }

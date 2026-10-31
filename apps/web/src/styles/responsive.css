@@ -110,9 +110,9 @@
   }
 
   .dialog {
+    --dialog-pad: var(--space-lg);
     gap: var(--space-md);
     max-height: calc(100dvh - var(--space-lg));
-    padding: var(--space-lg);
   }
 
   .dialog__actions > .button {
