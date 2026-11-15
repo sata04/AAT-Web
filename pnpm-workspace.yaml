@@ -93,3 +93,6 @@ overrides:
 
 patchedDependencies:
   '@rollup/plugin-node-resolve@16.0.3': patches/@rollup__plugin-node-resolve@16.0.3.patch
+minimumReleaseAgeExclude:
+  # Renovate security update: hono@4.13.16
+  - hono@4.13.16
